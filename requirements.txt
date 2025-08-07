@@ -17,3 +17,8 @@ pytz==2025.2
 transformers==4.53.0
 sentence-transformers==5.0.0
 twilio
+sqlmodel
+psycopg2-binary
+pgvector
+sqlalchemy
+supabase

@@ -1,101 +1,63 @@
 
-import os
+# vapi/rag.py
 import json
-from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
+
+from db import (
+    insert_rule_chunks,
+    insert_apartments,
+    search_rules,
+    search_apartments,
+)
 
 
 class RAGEngine:
     def __init__(
         self,
-        docs_path="Rules.txt",
-        faiss_path="vector_store/faiss_index",
-        apartment_path="vector_store/apartment_index",
-        apartment_json_path="data.json"
+        rules_path: str = "Rules.txt",
+        apartments_json: str = "data.json",
     ):
-        self.docs_path = docs_path
-        self.faiss_path = faiss_path
-        self.apartment_faiss_path = apartment_path
-        self.apartment_json_path = apartment_json_path
-        self.model_name = "BAAI/bge-base-en"
-        
-        self.embedding_model = HuggingFaceEmbeddings(model_name=self.model_name)
+        self.rules_path = rules_path
+        self.apartments_json = apartments_json  
 
-        # Load or build rules index
-        if self._faiss_index_exists(self.faiss_path):
-            print("Loading existing Rules FAISS index...")
-            self.db = FAISS.load_local(
-                self.faiss_path,
-                self.embedding_model,
-                allow_dangerous_deserialization=True
-            )
-        else:
-            print("No existing Rules FAISS index found. Building from docs...")
-            self.db = self._build_vector_store()
-            self.db.save_local(self.faiss_path)
-            print("Rules FAISS index saved.")
-
-        # Load or build apartment index
-        if self._faiss_index_exists(self.apartment_faiss_path):
-            print("Loading existing Apartment FAISS index...")
-            self.apartment_db = FAISS.load_local(
-                self.apartment_faiss_path,
-                self.embedding_model,
-                allow_dangerous_deserialization=True
-            )
-        else:
-            print("No existing Apartment FAISS index found. Building from JSON...")
-            self.apartment_db = self._build_apartment_index(self.apartment_json_path)
-            self.apartment_db.save_local(self.apartment_faiss_path)
-            print("Apartment FAISS index saved.")
-
-    def _faiss_index_exists(self, path: str) -> bool:
-        return os.path.exists(os.path.join(path, "index.faiss")) and \
-           os.path.exists(os.path.join(path, "index.pkl"))
-
-    def _build_vector_store(self):
-        if not os.path.exists(self.docs_path):
-            raise FileNotFoundError(f"File '{self.docs_path}' not found.")
-
-        loader = TextLoader(self.docs_path)
+    # --------- INDEXING ---------
+    def build_rules_index(self):
+        """Reads Rules.txt, splits into chunks, and stores them in pgvector DB."""
+        loader = TextLoader(self.rules_path)
         documents = loader.load()
 
         splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = splitter.split_documents(documents)
+        chunks = [doc.page_content for doc in splitter.split_documents(documents)]
 
-        return FAISS.from_documents(chunks, self.embedding_model)
+        insert_rule_chunks(chunks)
+        print(f"Inserted {len(chunks)} rule chunks into pgvector.")
 
+    def build_apartment_index(self):
+        """Reads data.json and stores apartment embeddings in pgvector DB."""
+        with open(self.apartments_json, "r", encoding="utf-8") as f:
+            listings = json.load(f)
+
+        insert_apartments(listings, self.listing_to_text)
+        print(f"Inserted {len(listings)} apartment listings into pgvector.")
+
+    # --------- QUERYING ---------
     def query(self, question: str, k: int = 3) -> str:
-        results = self.db.similarity_search(question, k=k)
-        context = "\n".join([doc.page_content for doc in results])
-        return f"Here are the most relevant parts:\n\n{context}"
+        """Finds top-k relevant rule chunks for a question."""
+        results = search_rules(question, k=k)
+        return "Here are the most relevant parts:\n\n" + "\n".join(results)
 
-    def listing_to_text(self, listing: dict) -> str:
+    def search_apartments(self, query: str, k: int = 5):
+        """Finds top-k apartment listings matching the query."""
+        return search_apartments(query, k=k)
+
+    # --------- HELPERS ---------
+    @staticmethod
+    def listing_to_text(listing: dict) -> str:
+        """Converts apartment listing JSON into text for embeddings."""
         return (
             f"{listing['bedrooms']} bed, {listing['bathrooms']} bath "
             f"{listing['property_type']} in {listing['address']}, "
             f"listed at ${listing['price']} with {listing['square_feet']} sqft. "
             f"Features include: {', '.join(listing.get('features', []))}."
         )
-
-    def _build_apartment_index(self, json_path: str):
-        print("Building apartment semantic index...")
-        listings = []
-
-        with open(json_path, "r") as f:
-            data_list = json.load(f)
-            for data in data_list:
-                text = self.listing_to_text(data)
-                listings.append(Document(page_content=text, metadata={"source": data}))
-
-        return FAISS.from_documents(listings, self.embedding_model)
-
-    def search_apartments(self, query: str, k: int = 5):
-        if not self.apartment_db:
-            raise RuntimeError("Apartment FAISS index not loaded.")
-
-        results = self.apartment_db.similarity_search(query, k=k)
-        return [res.metadata["source"] for res in results]

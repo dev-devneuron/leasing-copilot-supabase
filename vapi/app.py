@@ -1,30 +1,37 @@
-from fastapi import FastAPI,  HTTPException
-#from sqlalchemy.orm import Session
+from fastapi import FastAPI, HTTPException, Form, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Union
-import json
+from datetime import datetime
+import json,os
+from sqlmodel import select, Session
+import httpx
+from httpx import TimeoutException
+
+from dotenv import load_dotenv
+from fastapi.responses import FileResponse, RedirectResponse, Response, PlainTextResponse
+from google_auth_oauthlib.flow import Flow
+from twilio.twiml.messaging_response import MessagingResponse
+from contextlib import asynccontextmanager
+from db import *
+from db import init_vector_db
 from calendar_utils import GoogleCalendar
 from vapi.rag import RAGEngine
-from httpx import TimeoutException
-from datetime import datetime
-from fastapi import Request as FastAPIRequest
-from fastapi.responses import FileResponse
-from fastapi.responses import RedirectResponse, Response
-from google_auth_oauthlib.flow import Flow
-import pickle
-import os,base64
 from vapi.bounded_usage import MessageLimiter
-from twilio.twiml.messaging_response import MessagingResponse
-from config import TOKEN_FILE, CREDENTIALS_FILE, REDIRECT_URI, LIMIT_FILE, CHAT_SESSIONS_FILE,timeout,DAILY_LIMIT,TWILIO_PHONE_NUMBER
+from config import (
+    CREDENTIALS_FILE,
+    REDIRECT_URI,
+    timeout,
+    DAILY_LIMIT,
+    TWILIO_PHONE_NUMBER,
+)
+
+from sqlalchemy import update
+from fastapi.middleware.cors import CORSMiddleware
 
 
-from fastapi import FastAPI, Form, Request
-import httpx
-import os
-from dotenv import load_dotenv
-from fastapi.responses import PlainTextResponse
 
-load_dotenv()  # Load values from .env
+load_dotenv()  # Load .env values
 
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
 VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID")
@@ -32,12 +39,15 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 
 
-
-app = FastAPI()
-rag = RAGEngine()
-calendar = GoogleCalendar()
+rag = RAGEngine()  # pgvector RAG
 
 
+
+message_limiter = MessageLimiter(DAILY_LIMIT)
+session=Session(engine)
+
+
+# ------------------ ToolCall Models ------------------ #
 class ToolCallFunction(BaseModel):
     name: str
     arguments: Union[str, dict]
@@ -53,127 +63,194 @@ class VapiRequest(BaseModel):
     message: Message
 
 
-@app.post("/query_docs/")
-def query_docs(request: VapiRequest):
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Checking and initializing pgvector indexes and Relational DB tables")
+    #vector db is being initialized in  
+    init_vector_db()
+    try:
+        rules = rag.query("test", k=1)
+        if "Here are the most relevant parts:" in rules and len(rules.splitlines()) <= 1:
+            rag.build_rules_index()
+
+        apartments = rag.search_apartments("test", k=1)
+        if not apartments:
+            rag.build_apartment_index()
+    except Exception as e:
+        print(f"Error initializing indexes: {e}")
+
+    yield  # This is where FastAPI app runs
+
+    print("Shutting down fastapi app...")
+
+# origins = [
+#     "https://react-app-form.onrender.com"
+# ]
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+#------------------ CreateCustomer ----------------#
+@app.post("/create_customer/")
+def create_customer(request: VapiRequest):
     for tool_call in request.message.toolCalls:
-        if tool_call.function.name == "queryDocs":
-            args = tool_call.function.arguments
-            if isinstance(args, str):
-                import json
-                args = json.loads(args)
-            question = args.get("query")
-            if not question:
-                raise HTTPException(status_code=400, detail="Missing query text")
-
-            response = rag.query(question)
-
-            return {
-                "results": [
-                    {
-                        "toolCallId": tool_call.id,
-                        "result": response
-                    }
-                ]
-            }
-    raise HTTPException(status_code=400, detail="Invalid tool call")
-
-
-@app.post("/search_apartments/")
-def search_apartments(request: VapiRequest):
-    for tool_call in request.message.toolCalls:
-        if tool_call.function.name == "searchApartments":
-            args = tool_call.function.arguments
-            if isinstance(args, str):
-                query = args.strip()
-            elif isinstance(args, dict):
-                query = args.get("query", "").strip()
-            else:
-                raise HTTPException(status_code=400, detail="Invalid arguments format")
-
-            if not query:
-                raise HTTPException(status_code=400, detail="Missing query text")
-            
-            if not query:
-                raise HTTPException(status_code=400, detail="Missing query text")
-            #print("Vapi's Query:",query)
-            listings = rag.search_apartments(query)
-            #print("Retrieval:", listings)
-
-            return {
-                "results": [
-                    {
-                        "toolCallId": tool_call.id,
-                        "result": listings
-                    }
-                ]
-            }
-
-    raise HTTPException(status_code=400, detail="Invalid tool call")
-
-
-@app.post("/get_date/")
-def get_date(request: VapiRequest):
-    for tool_call in request.message.toolCalls:
-        if tool_call.function.name == "getDate":
-            return {
-                "results": [
-                    {
-                        "toolCallId": tool_call.id,
-                        "result": {
-                            "date": datetime.now().date().isoformat()
-                        }
-                    }
-                ]
-            }
-
-    return {"error": "Invalid tool call"}
-
-
-@app.post("/book_visit/")
-def book_visit(request: VapiRequest):
-    for tool_call in request.message.toolCalls:
-        if tool_call.function.name == "bookVisit":
+        if tool_call.function.name == "CreateCust":
             args = tool_call.function.arguments
             if isinstance(args, str):
                 args = json.loads(args)
 
             name = args.get("name")
             email = args.get("email")
-            date = args.get("date") 
-            address = args.get("address")
+            contact_number = args.get("contact_number")
+            if_tenant = False
 
-            if not (name and email and date):
-                raise HTTPException(status_code=400, detail="Missing required fields: name, email, or date")
+            if not contact_number:
+                raise HTTPException(status_code=400, detail="Contact number is required")
 
-            # Check slot availability
-            if not calendar.is_time_available(date):
-                return {
-                    "results": [
-                        {
-                            "toolCallId": tool_call.id,
-                            "result": f"Sorry, the requested time {date} is not available."
-                        }
-                    ]
-                }
-            summary = f"Apartment Visit: {name}"
-            description = f"Apartment Visit Booking\nName: {name}\nEmail: {email}\nAddress: {address}"
+            # Call helper to create customer
+            customer = create_customer_entry(name, email,contact_number, if_tenant)
 
-            event = calendar.create_event(date, summary=summary, email=email,description=description)
             return {
-                "results": [
-                    {
-                        "toolCallId": tool_call.id,
-                        "result": f"Booking confirmed! Look your google calendar for the schedule. Event link: {event.get('htmlLink')}"
-                    }
-                ]
+                "results": [{
+                    "toolCallId": tool_call.id,
+                    "result": f"Customer created with ID {customer.id}"
+                }]
             }
 
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "message": "DevNeuron ChatBot is running"}
+# ------------------ Query Docs ------------------ #
+@app.post("/query_docs/")
+def query_docs(request: VapiRequest):
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == "queryDocs":
+            args = tool_call.function.arguments
+            if isinstance(args, str):
+                args = json.loads(args)
+            question = args.get("query")
+            if not question:
+                raise HTTPException(status_code=400, detail="Missing query text")
+
+            response = rag.query(question)
+            return {"results": [{"toolCallId": tool_call.id, "result": response}]}
+    raise HTTPException(status_code=400, detail="Invalid tool call")
+
+
+
+@app.post("/confirm_address/")
+def confirm_apartment(request: VapiRequest):
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == "confirmAddress":
+            args = tool_call.function.arguments
+            query = args.strip() if isinstance(args, str) else args.get("query", "").strip()
+            if not query:
+                raise HTTPException(status_code=400, detail="Missing query text")
+
+            print("Query:",query)
+            listings = rag.search_apartments(query)
+            return {"results": [{"toolCallId": tool_call.id, "result": listings}]}
+    raise HTTPException(status_code=400, detail="Invalid tool call")
+
+# ------------------ Search Apartments ------------------ #
+@app.post("/search_apartments/")
+def search_apartments(request: VapiRequest):
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == "searchApartments":
+            args = tool_call.function.arguments
+            query = args.strip() if isinstance(args, str) else args.get("query", "").strip()
+            if not query:
+                raise HTTPException(status_code=400, detail="Missing query text")
+
+            listings = rag.search_apartments(query)
+            return {"results": [{"toolCallId": tool_call.id, "result": listings}]}
+    raise HTTPException(status_code=400, detail="Invalid tool call")
+
+# ------------------ Calendar Tools ------------------ #
+@app.post("/get_date/")
+def get_date(request: VapiRequest):
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == "getDate":
+            return {
+                "results": [
+                    {"toolCallId": tool_call.id, "result": {"date": datetime.now().date().isoformat()}}
+                ]
+            }
+    return {"error": "Invalid tool call"}
+
+
+
+@app.post("/book_visit/")
+def book_visit(request: VapiRequest):
+    print("Request:", request)
+
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == "bookVisit":
+            args = tool_call.function.arguments
+            if isinstance(args, str):
+                args = json.loads(args)
+
+            contact = args.get("contact")
+            email = args.get("email")
+            date_str = args.get("date")
+            address = args.get("address")
+            print("Booking:", contact, email, date_str, address)
+
+            if not (contact and email and date_str and address):
+                raise HTTPException(status_code=400, detail="Missing required fields")
+
+            # Parse datetime
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+                booking_date = dt.date()
+                booking_time = dt.time()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD HH:MM")
+
+            with Session(engine) as session:
+                # Find the listing by matching address substring in text
+                statement = select(ApartmentListing).where(ApartmentListing.text.contains(address))
+                listing = session.exec(statement).first()
+                if not listing:
+                    raise HTTPException(status_code=404, detail="Listing not found for address")
+
+                # Get source using source_id
+                print("Source ID:", listing.source_id)
+                statement = select(Source).where(Source.id == listing.source_id)
+                source = session.exec(statement).first()
+                if not source:
+                    raise HTTPException(status_code=404, detail="Source not found")
+
+                # Access realtor_id from source
+                realtor_id = source.realtor_id
+                print("Realtor ID:", realtor_id)
+
+            # Initialize calendar client with correct token
+            calendar = GoogleCalendar(realtor_id)
+
+            # Check availability
+            if not calendar.is_time_available(date_str):
+                return {"results": [{"toolCallId": tool_call.id, "result": f"Time {date_str} not available."}]}
+
+            # Create calendar event
+            summary = f"Apartment Visit for: {address}"
+            description = f"Apartment Visit Booking\nEmail: {email}\nAddress: {address}"
+            event = calendar.create_event(date_str, summary=summary, email=email, description=description)
+
+            try:
+                created = create_booking_entry(address, booking_date, booking_time, contact)
+                print("Booking created:", created)
+            except Exception as e:
+                print("Failed to create booking:", e)
+
+            return {"results": [{"toolCallId": tool_call.id, "result": f"Booking confirmed! Event link: {event.get('htmlLink')}"}]}
+
+    raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
 @app.post("/get_slots/")
@@ -181,116 +258,111 @@ def get_slots(request: VapiRequest):
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "getAvailableSlots":
             args = tool_call.function.arguments
-
-            # Decode arguments if they come as JSON string
             if isinstance(args, str):
                 try:
-                    # Try loading as JSON
                     args = json.loads(args)
                 except json.JSONDecodeError:
-                    # Fallback: treat plain string as a date
                     args = {"date": args}
 
-            # Validate presence of date
             date = args.get("date")
+            address=args.get("address")
+            print("Address:",address)
             if not date:
-                raise HTTPException(status_code=400, detail="Missing 'date' field in arguments.")
+                raise HTTPException(status_code=400, detail="Missing 'date' or 'address' field")
+            
 
-            try:
-                # Get slots from calendar
-                slots = calendar.get_free_slots(date)
-                return {
-                    "results": [
-                        {
-                            "toolCallId": tool_call.id,
-                            "result": f"Available time slots on {date}:\n" + ", ".join(slots)
-                        }
-                    ]
-                }
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to retrieve calendar slots: {str(e)}")
+            # 1. Find the listing by matching address substring in text
+            statement = select(ApartmentListing).where(ApartmentListing.text.contains(address))
+            listing = session.exec(statement).first()
+            if not listing:
+                raise HTTPException(status_code=404, detail="Listing not found for address")
 
-    raise HTTPException(status_code=400, detail="No valid 'getAvailableSlots' tool call found.")
+            # 2. Get source using the source_id
+            print("Source ID (slots):", listing.source_id)
+            statement = select(Source).where(Source.id == listing.source_id)
+            source = session.exec(statement).first()
+            if not source:
+                raise HTTPException(status_code=404, detail="Source not found")
 
-TOKEN_PATH = "token.pkl"
-@app.get("/download-token")
-def download_token():
-    if os.path.exists(TOKEN_PATH):
-        return FileResponse(TOKEN_PATH, filename="token.pkl")
-    return {"error": "token.pkl not found"}
+            # 3. Access the realtor_id from the source
+            realtor_id = source.realtor_id
+            print("Realtor ID (slots):", source.realtor_id)
+
+            # 🧠 3. Initialize calendar client with correct token
+            calendar = GoogleCalendar(realtor_id)
+
+  
+            slots = calendar.get_free_slots(date)
+            return {"results": [{"toolCallId": tool_call.id, "result": f"Available slots on {date}:\n" + ", ".join(slots)}]}
+    raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
-def restore_token():
-    token_b64 = os.getenv("TOKEN_PKL")
-    if token_b64:
-        with open(TOKEN_PATH, "wb") as f:
-            f.write(base64.b64decode(token_b64))
-        print("token.pkl restored from environment variable")
-restore_token()
+# temp store
+temp_state_store = {}
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+@app.get("/authorize/")
+def authorize_realtor(realtor_id: int):
+    flow = Flow.from_client_secrets_file(
+        CREDENTIALS_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    auth_url, state = flow.authorization_url(prompt="consent", include_granted_scopes="true")
+    
+    temp_state_store[state] = realtor_id  
+    return RedirectResponse(auth_url)
 
-@app.get("/authorize")
-def authorize():
-        return _handle_authorize()
-        
+
+
 @app.get("/oauth2callback")
-def oauth2callback(request: FastAPIRequest):
-    return _handle_oauth2callback(request)
+def oauth2callback(request: Request):
+    with Session(engine) as session:
+        state = request.query_params.get("state")
+        realtor_id = temp_state_store.get(state)
 
-@staticmethod
-def _handle_authorize() -> Response:
-        """Handle Google Calendar authorization."""
-        try:
-            flow = Flow.from_client_secrets_file(
-                CREDENTIALS_FILE,
-                scopes=['https://www.googleapis.com/auth/calendar'],
-                redirect_uri=REDIRECT_URI
-            )
-            auth_url, _ = flow.authorization_url(prompt='consent')
-            return RedirectResponse(auth_url)
-        except Exception as e:
-            return Response(content=f"Failed to generate authorization URL: {str(e)}", media_type="text/html", status_code=500)
+        if not realtor_id:
+            return Response(content="Invalid or expired state", status_code=400)
 
-@staticmethod
-def _handle_oauth2callback( request: FastAPIRequest) -> Response:
-        """Handle OAuth callback."""
-        try:
-            flow = Flow.from_client_secrets_file(
-                CREDENTIALS_FILE,
-                scopes=['https://www.googleapis.com/auth/calendar'],
-                redirect_uri=REDIRECT_URI
-            )
-            
-            authorization_response = str(request.url)
-            flow.fetch_token(authorization_response=authorization_response)
-            credentials = flow.credentials
-            
-            with open(TOKEN_FILE, "wb") as token:
-                pickle.dump(credentials, token)
-            
-            return Response(content="Authorization successful. You can now schedule visits.", media_type="text/html")
-        except Exception as e:
-            return Response(content=f"Authorization failed: {str(e)}", media_type="text/html", status_code=400)
+        flow = Flow.from_client_secrets_file(
+        CREDENTIALS_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+        state=state
+        )
+
+        flow.fetch_token(authorization_response=str(request.url))
+
+   
+        credentials_data = {
+        "token": flow.credentials.token,
+        "refresh_token": flow.credentials.refresh_token,
+        "token_uri": flow.credentials.token_uri,
+        "client_id": flow.credentials.client_id,
+        "client_secret": flow.credentials.client_secret,
+        "scopes": flow.credentials.scopes,
+        "expiry": flow.credentials.expiry.isoformat() if flow.credentials.expiry else None
+        }
+
+    
+        stmt = (
+            update(Realtor)
+            .where(Realtor.id == realtor_id)
+            .values(credentials=json.dumps(credentials_data))
+        )
+
+        session.exec(stmt)
+        session.commit()
+
+        return Response(content=f"Authorization successful for realtor_id {realtor_id}.")
 
 
-message_limiter = MessageLimiter(LIMIT_FILE, DAILY_LIMIT)
 
-# Store chat IDs per WhatsApp user
-def load_chat_sessions():
-    if os.path.exists(CHAT_SESSIONS_FILE):
-        with open(CHAT_SESSIONS_FILE, "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-    return {}
+# ------------------ Health Check ------------------ #
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "message": "Lease Copilot is running"}
 
-# Save chat sessions to file
-def save_chat_sessions(chat_sessions):
-    with open(CHAT_SESSIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(chat_sessions, f, indent=2)
-
-# Use persistent chat sessions
-chat_sessions = load_chat_sessions()
+# ------------------ Twilio WhatsApp ------------------ #
 
 @app.post("/twilio-incoming")
 async def twilio_incoming(
@@ -298,12 +370,18 @@ async def twilio_incoming(
     From: str = Form(...),
     Body: str = Form(...)
 ):
-    #print("Incoming WhatsApp message from:", From)
+    if From.startswith("whatsapp:"):
+        number = From.replace("whatsapp:", "")
+    else:
+        number = From
+    
     print("Message content:", Body)
-    if not message_limiter.check_message_limit(From):
+    if not message_limiter.check_message_limit(number):
             twiml = MessagingResponse()
             twiml.message(" You've reached the daily message limit. Please try again tomorrow.")
             return Response(content=str(twiml), media_type="application/xml")
+    
+    
     # Build the payload
     payload = {
         "assistantId": VAPI_ASSISTANT_ID,
@@ -311,11 +389,13 @@ async def twilio_incoming(
     }
 
     # If this number has an ongoing chat, include previousChatId
-    if From in chat_sessions:
-        payload["previousChatId"] = chat_sessions[From]
-
+    prev_chat_id = get_chat_session(number)
+    if prev_chat_id:
+         payload["previousChatId"] = prev_chat_id
 
     # Send to Vapi
+    print(f"Sending message to Vapi with previousChatId={prev_chat_id}")
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
@@ -331,14 +411,10 @@ async def twilio_incoming(
     except Exception as e:
         return PlainTextResponse(f"Unexpected error: {str(e)}", status_code=500)
 
-    print("Vapi status:", response.status_code)
-    print("Vapi response:", response.text)
-
     if response.status_code not in [200, 201]:
         return PlainTextResponse("Error with Vapi", status_code=500)
-
+    
     response_json = response.json()
-    #print("JSON",response_json)
     output = response_json.get("output", [])
 
     if not output or not isinstance(output, list):
@@ -352,19 +428,18 @@ async def twilio_incoming(
             vapi_reply = item["content"]
             break
 
-    #vapi_reply = first_message.get("content")
-
     if not vapi_reply:
-        #print("Vapi output missing 'content' key:", first_message)
         return PlainTextResponse("No content in Vapi response", status_code=500)
+    
 
-    # Save chat ID for future continuity
+     # Save chat ID to Postgres
     chat_id = response_json.get("id")
+    
     if chat_id:
-        chat_sessions[From] = chat_id
-        save_chat_sessions(chat_sessions)
+        save_chat_session(number, chat_id)
 
     # Send reply via Twilio
+    
     async with httpx.AsyncClient() as client:
         await client.post(
             f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
@@ -376,3 +451,112 @@ async def twilio_incoming(
             }
         )
     return PlainTextResponse( status_code=200)
+
+
+# ------------------- CRUD ----------------------
+
+
+
+@app.post("/sources/", response_model=Source)
+def create_source_endpoint(data: Source):
+    return create_source( data.realtor_id)
+
+
+# class FileNameInput(BaseModel):
+#     filename: str
+# @app.post("/ingest_vector_data/")
+# async def ingest_test_vector_data(req: FileNameInput):
+#     file_path = req.filename
+
+#     if not os.path.exists(file_path):
+#         raise HTTPException(status_code=404, detail=f"File '{file_path}' not found.")
+
+#     try:
+#         run_test_vector_ingestion(file_path)
+#         return {"message": f"Vector data ingested from '{file_path}' successfully."}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Error during ingestion: {str(e)}")
+
+
+# class SyncRequest(BaseModel):
+#     source_id: int
+# @app.post("/sync_apartments/")
+# def sync_apartments_endpoint(request: SyncRequest):
+#     try:
+#         sync_apartments(request.source_id)
+#         return {"message": f"Sync complete for source_id {request.source_id}"}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+from fastapi import  UploadFile, File, Form, HTTPException
+from supabase import create_client, Client
+
+# SUPABASE_URL = "https://cmpywleowxnvucymvwgv.supabase.co"
+# SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") 
+# supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# BUCKET_NAME = "realtor-files"
+
+@app.post("/upload_docs/")
+async def upload_realtor_files(
+    file: UploadFile = File(...),
+    realtor_id: int = Form(...)
+):
+    try:
+        content = await file.read()
+        file_path = f"realtors/{realtor_id}/{file.filename}"
+        
+        response = supabase.storage.from_(BUCKET_NAME).upload(
+            file_path,
+            content,
+            file_options={"content-type": file.content_type}
+        )
+
+        # Check if response is a dict with an error
+        if isinstance(response, dict) and "error" in response:
+            raise HTTPException(status_code=500, detail=response["error"]["message"])
+
+        file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
+        
+        return {
+            "message": "File uploaded successfully",
+            "file_url": file_url
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException
+from typing import List, Optional
+import json
+
+
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException
+from typing import List, Optional
+
+
+@app.post("/CreateRealtor")
+async def create_realtor_endpoint(
+    name: str = Form(...),
+    email: str = Form(...),
+    contact: str = Form(...),
+    files: List[UploadFile] = File(...),
+    listing_file: Optional[UploadFile] = File(None),
+    listing_api_url: Optional[str] = Form(None)
+):
+    try:
+        result= create_realtor_with_files(
+            name=name,
+            email=email,
+            contact=contact,
+            files=files,
+            listing_file=listing_file,
+            listing_api_url=listing_api_url
+        )
+        print(result)
+        
+
+        return JSONResponse(content=result, status_code=200)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
