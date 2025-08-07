@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Form, Request
+from fastapi import FastAPI, HTTPException, Form, Request,File,UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Union
@@ -7,14 +7,13 @@ import json,os
 from sqlmodel import select, Session
 import httpx
 from httpx import TimeoutException
-
+from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi.responses import FileResponse, RedirectResponse, Response, PlainTextResponse
 from google_auth_oauthlib.flow import Flow
 from twilio.twiml.messaging_response import MessagingResponse
 from contextlib import asynccontextmanager
 from db import *
-from db import init_vector_db
 from calendar_utils import GoogleCalendar
 from vapi.rag import RAGEngine
 from vapi.bounded_usage import MessageLimiter
@@ -462,41 +461,8 @@ def create_source_endpoint(data: Source):
     return create_source( data.realtor_id)
 
 
-# class FileNameInput(BaseModel):
-#     filename: str
-# @app.post("/ingest_vector_data/")
-# async def ingest_test_vector_data(req: FileNameInput):
-#     file_path = req.filename
-
-#     if not os.path.exists(file_path):
-#         raise HTTPException(status_code=404, detail=f"File '{file_path}' not found.")
-
-#     try:
-#         run_test_vector_ingestion(file_path)
-#         return {"message": f"Vector data ingested from '{file_path}' successfully."}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Error during ingestion: {str(e)}")
-
-
-# class SyncRequest(BaseModel):
-#     source_id: int
-# @app.post("/sync_apartments/")
-# def sync_apartments_endpoint(request: SyncRequest):
-#     try:
-#         sync_apartments(request.source_id)
-#         return {"message": f"Sync complete for source_id {request.source_id}"}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
-
-
 from fastapi import  UploadFile, File, Form, HTTPException
 from supabase import create_client, Client
-
-# SUPABASE_URL = "https://cmpywleowxnvucymvwgv.supabase.co"
-# SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") 
-# supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# BUCKET_NAME = "realtor-files"
 
 @app.post("/upload_docs/")
 async def upload_realtor_files(
@@ -526,14 +492,6 @@ async def upload_realtor_files(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException
-from typing import List, Optional
-import json
-
-
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException
-from typing import List, Optional
-
 
 @app.post("/CreateRealtor")
 async def create_realtor_endpoint(
