@@ -20,13 +20,11 @@ from fastapi import UploadFile, File, Form, HTTPException, APIRouter
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
+from config import BUCKET_NAME,SUPABASE_URL,SUPABASE_KEY,DATABASE_URL
 load_dotenv()
 
 # ---------------------- DATABASE CONFIG ----------------------
-DATABASE_URL = (
-    "postgresql+psycopg2://postgres.cmpywleowxnvucymvwgv:Superman%40_%2511223344"
-    "@aws-0-us-west-1.pooler.supabase.com:5432/postgres?sslmode=require"
-)
+
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -119,7 +117,8 @@ class Source(SQLModel, table=True):
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:
     def __init__(self, model_name="models/embedding-001"):
-        genai.configure(api_key="AIzaSyA_kWzpMyEwBv2hxLOVE8f9CUpXYoW6z7U")
+        embd_key = os.getenv("GOOGLE_API_KEY")
+        genai.configure(api_key=embd_key)
         self.model_name = model_name
 
     def embed_text(self, text: str) -> list:
@@ -129,7 +128,7 @@ class GeminiEmbedder:
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [self.embed_text(t) for t in texts]
     
-EMBED_DIM = 768
+
 #embedder = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en")
 embedder = GeminiEmbedder()  
 
@@ -151,7 +150,7 @@ def init_db():
 
 
 #------------------------Embedding Init---------------------------
-def init_vector_db(rules_path="Rules.txt", apartments_path="data.json", listing_to_text=None):
+def init_vector_db():
     init_db()  # Ensure tables and vector extension are initialized
 
     # with SessionLocal() as session:
@@ -211,10 +210,10 @@ def init_vector_db(rules_path="Rules.txt", apartments_path="data.json", listing_
 
 
 
-SUPABASE_URL = "https://cmpywleowxnvucymvwgv.supabase.co"
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-BUCKET_NAME = "realtor-files"
+
 from typing import Optional
 import json, csv, io, requests
 from langchain.schema import Document
@@ -223,9 +222,6 @@ from langchain.text_splitter import CharacterTextSplitter
 
 
 def listing_to_text(listing: dict) -> str:
-    """
-    Convert a listing dictionary into a readable text format.
-    """
     try:
         return (
             f"Address: {listing.get('address', 'N/A')}. "
@@ -368,7 +364,7 @@ def create_realtor_with_files(
 
 
         # 8. Return response
-        auth_link = f"https://2aab9bffd32f.ngrok-free.app/authorize?realtor_id={realtor.id}"
+        auth_link = f"https://d7ca733b5209.ngrok-free.app/authorize?realtor_id={realtor.id}"
 
         return {
             "message": "Realtor created, rules uploaded, listings processed (not stored)",
@@ -555,16 +551,30 @@ def ingest_apartment_data(data: Union[str, List[Dict[str, Any]]], from_file: boo
 
 # ---------------------- SEARCH ----------------------
 
-def search_rules(query: str, k: int = 3) -> List[str]:
+# def search_rules(query: str, k: int = 3) -> List[str]:
+#     qvec = embed_text(query)
+#     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
+#     sql = text(f"""
+#         SELECT content FROM rulechunk
+#         ORDER BY embedding <=> '{qvec_str}'::vector
+#         LIMIT :k
+#     """)
+#     with SessionLocal() as session:
+#         rows = session.execute(sql, {"k": k}).all()
+#         return [r[0] for r in rows]
+def search_rules(query: str, source_id: int, k: int = 3) -> List[str]:
     qvec = embed_text(query)
     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
+
     sql = text(f"""
-        SELECT content FROM rulechunk
+        SELECT content 
+        FROM rulechunk
+        WHERE source_id = :source_id
         ORDER BY embedding <=> '{qvec_str}'::vector
         LIMIT :k
     """)
     with SessionLocal() as session:
-        rows = session.execute(sql, {"k": k}).all()
+        rows = session.execute(sql, {"source_id": source_id, "k": k}).all()
         return [r[0] for r in rows]
 
 

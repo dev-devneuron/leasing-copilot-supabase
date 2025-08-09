@@ -24,12 +24,9 @@ from config import (
     DAILY_LIMIT,
     TWILIO_PHONE_NUMBER,
 )
-
 from sqlalchemy import update
 from fastapi.middleware.cors import CORSMiddleware
-
-
-
+from sync import sync_apartment_listings
 load_dotenv()  # Load .env values
 
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
@@ -37,14 +34,10 @@ VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 
-
 rag = RAGEngine()  # pgvector RAG
-
-
 
 message_limiter = MessageLimiter(DAILY_LIMIT)
 session=Session(engine)
-
 
 # ------------------ ToolCall Models ------------------ #
 class ToolCallFunction(BaseModel):
@@ -67,16 +60,16 @@ async def lifespan(app: FastAPI):
     print("Checking and initializing pgvector indexes and Relational DB tables")
     #vector db is being initialized in  
     init_vector_db()
-    try:
-        rules = rag.query("test", k=1)
-        if "Here are the most relevant parts:" in rules and len(rules.splitlines()) <= 1:
-            rag.build_rules_index()
+    # try:
+    #     rules = rag.query("test", k=1)
+    #     if "Here are the most relevant parts:" in rules and len(rules.splitlines()) <= 1:
+    #         rag.build_rules_index()
 
-        apartments = rag.search_apartments("test", k=1)
-        if not apartments:
-            rag.build_apartment_index()
-    except Exception as e:
-        print(f"Error initializing indexes: {e}")
+    #     apartments = rag.search_apartments("test", k=1)
+    #     if not apartments:
+    #         rag.build_apartment_index()
+    # except Exception as e:
+    #     print(f"Error initializing indexes: {e}")
 
     yield  # This is where FastAPI app runs
 
@@ -125,19 +118,71 @@ def create_customer(request: VapiRequest):
 
 
 # ------------------ Query Docs ------------------ #
+# @app.post("/query_docs/")
+# def query_docs(request: VapiRequest):
+#     for tool_call in request.message.toolCalls:
+#         if tool_call.function.name == "queryDocs":
+#             args = tool_call.function.arguments
+#             if isinstance(args, str):
+#                 args = json.loads(args)
+#             question = args.get("query")
+#             if not question:
+#                 raise HTTPException(status_code=400, detail="Missing query text")
+
+#             response = rag.query(question)
+#             return {"results": [{"toolCallId": tool_call.id, "result": response}]}
+#     raise HTTPException(status_code=400, detail="Invalid tool call")
 @app.post("/query_docs/")
 def query_docs(request: VapiRequest):
+
+
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "queryDocs":
             args = tool_call.function.arguments
             if isinstance(args, str):
                 args = json.loads(args)
             question = args.get("query")
+            address = args.get("address")
             if not question:
                 raise HTTPException(status_code=400, detail="Missing query text")
+            
+    print("Address:",address)
+    with Session(engine) as session:
+        # Step 1: Get count of listings for the given address (case-insensitive)
+        count_sql = text("""
+        SELECT COUNT(*) 
+        FROM apartmentlisting
+        WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
+    """).params(addr=address)  
+    
+        total_matches = session.exec(count_sql).scalar()
+        
+        if total_matches == 0:
+            raise HTTPException(status_code=404, detail="No listings found for given address")
+        # Step 2: Choose a random offset
+        import random
+        random_offset = random.randint(0, total_matches - 1)
 
-            response = rag.query(question)
-            return {"results": [{"toolCallId": tool_call.id, "result": response}]}
+        # Step 3: Fetch one random source_id using OFFSET
+        source_sql = text("""
+    SELECT source_id
+    FROM apartmentlisting
+    WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
+    OFFSET :offset LIMIT 1
+""").params(addr=address, offset=random_offset)
+
+        
+        row = session.exec(source_sql).first()
+        if row:
+            source_id = row[0]
+        else:
+            source_id = None
+
+    # Step 4: Process tool call
+
+        response = rag.query(question, source_id=source_id)
+        return {"results": [{"toolCallId": tool_call.id, "result": response}]}
+
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
@@ -181,8 +226,6 @@ def get_date(request: VapiRequest):
                 ]
             }
     return {"error": "Invalid tool call"}
-
-
 
 @app.post("/book_visit/")
 def book_visit(request: VapiRequest):
@@ -311,8 +354,6 @@ def authorize_realtor(realtor_id: int):
     temp_state_store[state] = realtor_id  
     return RedirectResponse(auth_url)
 
-
-
 @app.get("/oauth2callback")
 def oauth2callback(request: Request):
     with Session(engine) as session:
@@ -354,8 +395,6 @@ def oauth2callback(request: Request):
 
         return Response(content=f"Authorization successful for realtor_id {realtor_id}.")
 
-
-
 # ------------------ Health Check ------------------ #
 @app.get("/health")
 def health_check():
@@ -380,7 +419,7 @@ async def twilio_incoming(
             twiml.message(" You've reached the daily message limit. Please try again tomorrow.")
             return Response(content=str(twiml), media_type="application/xml")
     
-    
+
     # Build the payload
     payload = {
         "assistantId": VAPI_ASSISTANT_ID,
@@ -453,16 +492,10 @@ async def twilio_incoming(
 
 
 # ------------------- CRUD ----------------------
-
-
-
 @app.post("/sources/", response_model=Source)
 def create_source_endpoint(data: Source):
     return create_source( data.realtor_id)
 
-
-from fastapi import  UploadFile, File, Form, HTTPException
-from supabase import create_client, Client
 
 @app.post("/upload_docs/")
 async def upload_realtor_files(
@@ -518,3 +551,7 @@ async def create_realtor_endpoint(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/sync-listings")
+def run_sync():
+    return sync_apartment_listings()

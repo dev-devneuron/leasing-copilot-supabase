@@ -3,21 +3,18 @@ from typing import List, Dict, Any
 from sqlmodel import SQLModel, Field, Session, create_engine
 from sqlalchemy import Column, String, JSON, text
 from pgvector.sqlalchemy import Vector
+from dotenv import load_dotenv
+from config import EMBED_DIM
+
+load_dotenv()
 
 # Config for engine1 (test DB)
-DATABASE_URL = (
-    "postgresql+psycopg2://postgres.cadkbesvlgkpwyjccobk:Superman%40_%2511223344"
-    "@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
-)
+DATABASE_URL = os.getenv("DATABASE_2_URL")
 engine1 = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-EMBED_DIM = 768
+
 
 def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
-    """
-    Inserts a list of listings into a dynamically created table named realtor_{realtor_id}_listings.
-    Each listing should contain keys: 'text', 'metadata', 'embedding'.
-    """
     table_name = f"realtor_{realtor_id}_listings"
 
     class DynamicListing(SQLModel, table=True):
@@ -48,4 +45,4 @@ def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
             except Exception as e:
                 print(f"[Insert Error] Failed to add listing: {e}")
         session.commit()
-        print("✅ Listing records inserted successfully.")
+        print("Listing records inserted successfully.")

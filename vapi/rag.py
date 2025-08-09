@@ -13,38 +13,33 @@ from db import (
 
 
 class RAGEngine:
-    def __init__(
-        self,
-        rules_path: str = "Rules.txt",
-        apartments_json: str = "data.json",
-    ):
-        self.rules_path = rules_path
-        self.apartments_json = apartments_json  
+    def __init__(self):
+       pass  
 
     # --------- INDEXING ---------
-    def build_rules_index(self):
-        """Reads Rules.txt, splits into chunks, and stores them in pgvector DB."""
-        loader = TextLoader(self.rules_path)
-        documents = loader.load()
+    # def build_rules_index(self):
+    #     """Reads Rules.txt, splits into chunks, and stores them in pgvector DB."""
+    #     loader = TextLoader(self.rules_path)
+    #     documents = loader.load()
 
-        splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = [doc.page_content for doc in splitter.split_documents(documents)]
+    #     splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    #     chunks = [doc.page_content for doc in splitter.split_documents(documents)]
 
-        insert_rule_chunks(chunks)
-        print(f"Inserted {len(chunks)} rule chunks into pgvector.")
+    #     insert_rule_chunks(chunks)
+    #     print(f"Inserted {len(chunks)} rule chunks into pgvector.")
 
-    def build_apartment_index(self):
-        """Reads data.json and stores apartment embeddings in pgvector DB."""
-        with open(self.apartments_json, "r", encoding="utf-8") as f:
-            listings = json.load(f)
+    # def build_apartment_index(self):
+    #     """Reads data.json and stores apartment embeddings in pgvector DB."""
+    #     with open(self.apartments_json, "r", encoding="utf-8") as f:
+    #         listings = json.load(f)
 
-        insert_apartments(listings, self.listing_to_text)
-        print(f"Inserted {len(listings)} apartment listings into pgvector.")
+    #     insert_apartments(listings, self.listing_to_text)
+    #     print(f"Inserted {len(listings)} apartment listings into pgvector.")
 
-    # --------- QUERYING ---------
-    def query(self, question: str, k: int = 3) -> str:
-        """Finds top-k relevant rule chunks for a question."""
-        results = search_rules(question, k=k)
+
+    def query(self, question: str, source_id: int, k: int = 3) -> str:
+        """Finds top-k relevant rule chunks for a question, filtered by source_id."""
+        results = search_rules(question, source_id=source_id, k=k)
         return "Here are the most relevant parts:\n\n" + "\n".join(results)
 
     def search_apartments(self, query: str, k: int = 5):

@@ -7,6 +7,23 @@ import httpx
 
 load_dotenv()
 
+
+#---------------------------------------------------------------------
+#                    SUPABASE CONFIG
+#---------------------------------------------------------------------
+BUCKET_NAME = "realtor-files"
+
+#for bucket collection
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+DATABASE_URL = os.getenv("DATABASE_1_URL")
+
+#--------------------------------------------------------------------
+
+# Embedding dimensions
+EMBED_DIM = 768
+
+
 TWILIO_PHONE_NUMBER = "whatsapp:+14155238886"
 # ========================================
 # API Keys and URLs
