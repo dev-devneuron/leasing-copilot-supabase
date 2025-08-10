@@ -5,12 +5,9 @@ from typing import Dict, Any, List
 from sqlmodel import Session, SQLModel, Field, select
 from sqlalchemy import Column, String, JSON
 from pgvector.sqlalchemy import Vector
-
+from config import EMBED_DIM
 from db import engine, ApartmentListing, Source
 from secondary_db import engine1
-
-EMBED_DIM = 768
-
 
 def listing_hash(text: str, metadata: dict) -> str:
     serialized = text + json.dumps(metadata, sort_keys=True)

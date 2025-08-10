@@ -364,7 +364,7 @@ def create_realtor_with_files(
 
 
         # 8. Return response
-        auth_link = f"https://d7ca733b5209.ngrok-free.app/authorize?realtor_id={realtor.id}"
+        auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
 
         return {
             "message": "Realtor created, rules uploaded, listings processed (not stored)",

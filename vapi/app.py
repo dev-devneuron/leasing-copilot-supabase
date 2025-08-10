@@ -23,6 +23,7 @@ from config import (
     timeout,
     DAILY_LIMIT,
     TWILIO_PHONE_NUMBER,
+    SCOPES
 )
 from sqlalchemy import update
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,24 +58,14 @@ class VapiRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Checking and initializing pgvector indexes and Relational DB tables")
-    #vector db is being initialized in  
-    init_vector_db()
-    # try:
-    #     rules = rag.query("test", k=1)
-    #     if "Here are the most relevant parts:" in rules and len(rules.splitlines()) <= 1:
-    #         rag.build_rules_index()
 
-    #     apartments = rag.search_apartments("test", k=1)
-    #     if not apartments:
-    #         rag.build_apartment_index()
-    # except Exception as e:
-    #     print(f"Error initializing indexes: {e}")
+    init_vector_db()
 
     yield  # This is where FastAPI app runs
 
     print("Shutting down fastapi app...")
 
+# set orgin here
 # origins = [
 #     "https://react-app-form.onrender.com"
 # ]
@@ -118,20 +109,6 @@ def create_customer(request: VapiRequest):
 
 
 # ------------------ Query Docs ------------------ #
-# @app.post("/query_docs/")
-# def query_docs(request: VapiRequest):
-#     for tool_call in request.message.toolCalls:
-#         if tool_call.function.name == "queryDocs":
-#             args = tool_call.function.arguments
-#             if isinstance(args, str):
-#                 args = json.loads(args)
-#             question = args.get("query")
-#             if not question:
-#                 raise HTTPException(status_code=400, detail="Missing query text")
-
-#             response = rag.query(question)
-#             return {"results": [{"toolCallId": tool_call.id, "result": response}]}
-#     raise HTTPException(status_code=400, detail="Invalid tool call")
 @app.post("/query_docs/")
 def query_docs(request: VapiRequest):
 
@@ -341,7 +318,8 @@ def get_slots(request: VapiRequest):
 
 # temp store
 temp_state_store = {}
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+
 @app.get("/authorize/")
 def authorize_realtor(realtor_id: int):
     flow = Flow.from_client_secrets_file(
