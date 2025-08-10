@@ -22,3 +22,4 @@ psycopg2-binary
 pgvector
 sqlalchemy
 supabase
+google-generativeai
