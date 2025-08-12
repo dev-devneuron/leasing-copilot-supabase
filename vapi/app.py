@@ -1,9 +1,11 @@
-from fastapi import FastAPI, HTTPException, Form, Request,File,UploadFile
+from fastapi import FastAPI, HTTPException, Form, Request,File,UploadFile,Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Union
 from datetime import datetime
 import json,os
+import numpy as np
+from fastapi.encoders import jsonable_encoder
 from sqlmodel import select, Session
 import httpx
 from httpx import TimeoutException
@@ -28,6 +30,13 @@ from config import (
 from sqlalchemy import update
 from fastapi.middleware.cors import CORSMiddleware
 from sync import sync_apartment_listings
+from auth_module import get_current_realtor_id 
+from fastapi import Body
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from sqlmodel import select, Session
+
+
 load_dotenv()  # Load .env values
 
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
@@ -72,7 +81,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -410,7 +421,7 @@ async def twilio_incoming(
          payload["previousChatId"] = prev_chat_id
 
     # Send to Vapi
-    print(f"Sending message to Vapi with previousChatId={prev_chat_id}")
+    #print(f"Sending message to Vapi with previousChatId={prev_chat_id}")
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -429,7 +440,7 @@ async def twilio_incoming(
 
     if response.status_code not in [200, 201]:
         error_details = response.text  
-        print(f"Vapi error: {response.status_code} - {error_details}")
+        #print(f"Vapi error: {response.status_code} - {error_details}")
         return PlainTextResponse(
         f"Error with Vapi: {response.status_code} - {error_details}",
         status_code=response.status_code
@@ -440,7 +451,6 @@ async def twilio_incoming(
     output = response_json.get("output", [])
 
     if not output or not isinstance(output, list):
-        print("Vapi returned empty or invalid output:", output)
         return PlainTextResponse("Vapi returned no output", status_code=500)
 
    
@@ -514,13 +524,27 @@ async def upload_realtor_files(
 async def create_realtor_endpoint(
     name: str = Form(...),
     email: str = Form(...),
+    password: str = Form(...),
     contact: str = Form(...),
     files: List[UploadFile] = File(...),
     listing_file: Optional[UploadFile] = File(None),
     listing_api_url: Optional[str] = Form(None)
 ):
     try:
-        result= create_realtor_with_files(
+        # Step 1: Create Supabase Auth user
+        auth_response = supabase.auth.sign_up({
+            "email": email,
+            "password": password
+        })
+
+        if not auth_response.user:
+            raise HTTPException(status_code=400, detail="Failed to create Supabase user")
+
+        auth_user_id = str(auth_response.user.id)  # Supabase UUID
+
+        # Step 2: Pass auth_user_id into DB creation function
+        result = create_realtor_with_files(
+            auth_user_id=auth_user_id,
             name=name,
             email=email,
             contact=contact,
@@ -528,14 +552,150 @@ async def create_realtor_endpoint(
             listing_file=listing_file,
             listing_api_url=listing_api_url
         )
-        print(result)
-        
 
         return JSONResponse(content=result, status_code=200)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
 @app.post("/sync-listings")
 def run_sync():
     return sync_apartment_listings()
+
+
+@app.post("/login")
+async def login(response: Response, payload: dict = Body(...), request: Request = None):
+    email = payload.get("email")
+    password = payload.get("password")
+    print("received", email, password)
+    try:
+        # Authenticate with Supabase
+        auth_result = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+
+        if not auth_result.user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        uid = auth_result.user.id
+        refresh_token = auth_result.session.refresh_token
+
+        # Get realtor_id from your DB
+        with Session(engine) as session:
+            realtor = session.exec(
+                select(Realtor).where(Realtor.auth_user_id == uid)
+            ).first()
+
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            print(realtor.id)
+
+        # Store refresh token in secure cookie
+            response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=True,  # Use HTTPS in production
+            samesite="strict",
+            max_age=60 * 60 * 24 * 30  # 30 days
+            )
+            print("login successful")
+            
+
+        return {
+    "message": "Login successful",
+    "access_token": auth_result.session.access_token,  # or wherever your token is
+    "refresh_token": refresh_token,
+    "user": {
+        "uid": uid,
+        "realtor_id": realtor.id,
+        "name": realtor.name,
+        "email": realtor.email
+    }
+}
+
+
+    except HTTPException:
+        raise  # re-raise known HTTP errors as is
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"Exception during login: {e}\nTraceback:\n{tb}")
+        raise HTTPException(status_code=400, detail=f"Login failed: {e}")
+    
+#----------------------------------------------------
+#                   CRUD Operations
+#----------------------------------------------------
+
+@app.get("/apartments")
+async def get_apartments(realtor_id: int = Depends(get_current_realtor_id)):
+    print("apartment was hit:", realtor_id)
+
+    with Session(engine) as session:
+        # Step 1: Get source_ids for this realtor
+        source_ids = session.exec(
+            select(Source.id).where(Source.realtor_id == realtor_id)
+        ).all()
+
+        if not source_ids:
+            return JSONResponse(content={"message": "No sources found"}, status_code=404)
+
+        # Step 2: Get apartments for these source_ids
+        apartments = session.exec(
+            select(ApartmentListing).where(ApartmentListing.source_id.in_(source_ids))
+        ).all()
+
+        # Step 3: Serialize and exclude embeddings
+        def serialize(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if hasattr(obj, "model_dump"):  # SQLModel / Pydantic model
+                data = obj.model_dump()
+                data.pop("embedding", None)  # remove embeddings field
+                return {k: serialize(v) for k, v in data.items()}
+            if isinstance(obj, list):
+                return [serialize(i) for i in obj]
+            if isinstance(obj, dict):
+                obj.pop("embedding", None)
+                return {k: serialize(v) for k, v in obj.items()}
+            return obj
+
+        apartments_data = serialize(apartments)
+        return JSONResponse(content=apartments_data)
+
+
+@app.get("/bookings")
+async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
+    print("bookings endpoint hit:", realtor_id)
+
+    with Session(engine) as session:
+        # Step 1: Get bookings for this realtor directly
+        bookings = session.exec(
+            select(Booking).where(Booking.realtor_id == realtor_id)
+        ).all()
+
+        if not bookings:
+            return JSONResponse(content={"message": "You dont have any booking at the moment."}, status_code=404)
+
+        # Step 2: Serialize and remove embeddings if present
+        def serialize(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if hasattr(obj, "model_dump"):  # SQLModel / Pydantic model
+                data = obj.model_dump()
+                data.pop("embedding", None)  # remove embeddings if exists
+                return {k: serialize(v) for k, v in data.items()}
+            if isinstance(obj, list):
+                return [serialize(i) for i in obj]
+            if isinstance(obj, dict):
+                obj.pop("embedding", None)
+                return {k: serialize(v) for k, v in obj.items()}
+            return obj
+
+        bookings_data = serialize(bookings)
+        return JSONResponse(content=bookings_data)
+

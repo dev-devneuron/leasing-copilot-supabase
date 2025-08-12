@@ -21,6 +21,8 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
 from config import BUCKET_NAME,SUPABASE_URL,SUPABASE_KEY,DATABASE_URL
+from uuid import UUID
+
 load_dotenv()
 
 # ---------------------- DATABASE CONFIG ----------------------
@@ -33,6 +35,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Realtor(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, alias="realtor_id")
+    auth_user_id: UUID = Field(index=True)
     name: str
     email: str
     contact: str
@@ -235,6 +238,7 @@ def listing_to_text(listing: dict) -> str:
         return "Invalid listing format."
 
 def create_realtor_with_files(
+    auth_user_id: str,
     name: str,
     email: str,
     contact: str,
@@ -243,7 +247,7 @@ def create_realtor_with_files(
     listing_api_url: Optional[str] = None
 ):
     with Session(engine) as session:
-        # 1. Check for duplicate realtor
+        # Check for duplicate realtor
         existing_realtor = session.exec(
             select(Realtor).where((Realtor.email == email) | (Realtor.contact == contact))
         ).first()
@@ -251,8 +255,9 @@ def create_realtor_with_files(
         if existing_realtor:
             raise HTTPException(status_code=400, detail="Realtor with this email or contact already exists")
 
-        # 2. Create new Realtor
+        # Create new Realtor with Supabase auth UUID
         realtor = Realtor(
+            auth_user_id=auth_user_id,  # new field
             name=name,
             email=email,
             contact=contact,
@@ -273,7 +278,7 @@ def create_realtor_with_files(
         uploaded_files = []
         splitter = CharacterTextSplitter(separator="\n", chunk_size=500, chunk_overlap=50)
         all_chunks = []
-
+        print("chunking done")
         # 4. Process each document file (rules/guidelines)
         for file in files:
             content_bytes = file.file.read()
@@ -365,6 +370,10 @@ def create_realtor_with_files(
 
         # 8. Return response
         auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
+        
+        #9. Sync Main DB
+        from sync import sync_apartment_listings
+        sync_apartment_listings()
 
         return {
             "message": "Realtor created, rules uploaded, listings processed (not stored)",

@@ -1,4 +1,3 @@
-# sync.py
 import json
 import hashlib
 from typing import Dict, Any, List
