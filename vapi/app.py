@@ -697,3 +697,7 @@ async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
         bookings_data = serialize(bookings)
         return JSONResponse(content=bookings_data)
 
+@app.middleware("http")
+async def log_origin(request, call_next):
+    print("Origin received:", request.headers.get("origin"))
+    return await call_next(request)
