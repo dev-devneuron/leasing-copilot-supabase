@@ -156,64 +156,8 @@ def init_db():
 def init_vector_db():
     init_db()  # Ensure tables and vector extension are initialized
 
-    # with SessionLocal() as session:
-        # Ensure a Realtor exists
-        # realtor = session.query(Realtor).first()
-        # if not realtor:
-        #     realtor = Realtor(name="Default Realtor", email="default@example.com", contact="0000000000", twilio_contact="default_twilio")
-        #     session.add(realtor)
-        #     session.commit()
-        #     session.refresh(realtor)
-
-        # # Ensure a Source exists for that Realtor
-        # source = session.query(Source).filter_by(realtor_id=realtor.id).first()
-        # if not source:
-        #     source = Source(name="Default Source", realtor_id=realtor.id)
-        #     session.add(source)
-        #     session.commit()
-        #     session.refresh(source)
-
-        # default_source_id = source.id
-
-    # Default text formatter for listings
-    # if listing_to_text is None:
-    #     def listing_to_text(d):
-    #         return (
-    #             f"{d.get('bedrooms', '?')} bed, {d.get('bathrooms', '?')} bath "
-    #             f"{d.get('property_type', '')} in {d.get('address', '')}, "
-    #             f"listed at ${d.get('price', '?')} with {d.get('square_feet', '?')} sqft. "
-    #             f"Features: {', '.join(d.get('features', []))}"
-    #         )
-
-    #Dont need this now as rule chunks are created when realtors are created
-    # with SessionLocal() as session:
-    #     # Insert Rule Chunks if missing
-    #     if not session.query(RuleChunk).first() and os.path.exists(rules_path):
-            
-
-    #         loader = TextLoader(rules_path)
-    #         docs = loader.load()
-    #         splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    #         chunks = [c.page_content for c in splitter.split_documents(docs)]
-
-    #         print(f"Inserting {len(chunks)} rule chunks...")
-    #         insert_rule_chunks(chunks, source_id=default_source_id)
-
-        # Insert Apartment Listings if missing
-        # if not session.query(ApartmentListing).first() and os.path.exists(apartments_path):
-        #     with open(apartments_path, "r", encoding="utf-8") as f:
-        #         listings = json.load(f)
-
-        #     print(f"Inserting {len(listings)} apartment listings...")
-        #     insert_apartments(listings, listing_to_text, source_id=default_source_id)
-
-
-
+    
 #---------------------CRUD OPERATIONS----------------------------
-
-
-
-
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -560,17 +504,6 @@ def ingest_apartment_data(data: Union[str, List[Dict[str, Any]]], from_file: boo
 
 # ---------------------- SEARCH ----------------------
 
-# def search_rules(query: str, k: int = 3) -> List[str]:
-#     qvec = embed_text(query)
-#     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
-#     sql = text(f"""
-#         SELECT content FROM rulechunk
-#         ORDER BY embedding <=> '{qvec_str}'::vector
-#         LIMIT :k
-#     """)
-#     with SessionLocal() as session:
-#         rows = session.execute(sql, {"k": k}).all()
-#         return [r[0] for r in rows]
 def search_rules(query: str, source_id: int, k: int = 3) -> List[str]:
     qvec = embed_text(query)
     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
@@ -665,57 +598,3 @@ def create_customer_entry(name: str, email: str, contact: str, if_tenant: Option
             session.commit()
             session.refresh(new_customer)
             return new_customer
-
-
-
-
-#----------------testing-----------------------------
-# from sqlmodel import Session, select
-# from typing import List
-# import numpy as np
-# from sqlalchemy import text
-# from secondary_db import ApartmentListingStore
-# COSINE_SIM_THRESHOLD = 0.1  # Lower is more similar (0 = identical)
-
-
-# def sync_apartments(source_id: int):
-#     with Session(engine1) as test_session, Session(engine) as main_session:
-        
-#         test_listings: List[ApartmentListingStore] = test_session.exec(
-#             select(ApartmentListingStore)
-#         ).all()
-
-#         inserted_count = 0
-
-#         for test_listing in test_listings:
-#             # Format embedding as a Postgres vector literal
-#             embedding_str = "[" + ",".join(map(str, test_listing.embedding)) + "]"
-
-#             # Prepare raw SQL with parameters and cosine search
-#             result = main_session.exec(
-#                 text("""
-#                     SELECT id, embedding <-> :embedding AS cosine_distance
-#                     FROM apartmentlisting
-#                     ORDER BY embedding <-> :embedding
-#                     LIMIT 1
-#                 """).params(embedding=embedding_str)
-#             ).first()
-
-#             # If similar listing exists (below threshold), skip insertion
-#             if result and result.cosine_distance < COSINE_SIM_THRESHOLD:
-#                 print(result.cosine_distance)
-#                 print("Skipped due to similarity.")
-#                 continue
-
-#             # Insert new unique listing
-#             new_listing = ApartmentListing(
-#                 source_id=source_id,
-#                 text=test_listing.text,
-#                 listing_metadata=test_listing.listing_metadata,
-#                 embedding=test_listing.embedding,
-#             )
-#             main_session.add(new_listing)
-#             inserted_count += 1
-
-#         main_session.commit()
-#         print(f"Sync complete: {inserted_count} new listings added from test DB.")
