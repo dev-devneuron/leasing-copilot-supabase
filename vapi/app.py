@@ -76,7 +76,8 @@ async def lifespan(app: FastAPI):
 
 # set orgin here
 origins = [
-     "https://react-app-form.onrender.com/"
+     "https://react-app-form.onrender.com/",
+     "https://react-app-form.onrender.com"
  ]
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
