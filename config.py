@@ -18,6 +18,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 DATABASE_URL = os.getenv("DATABASE_1_URL")
 SUPABASE_JWT_SECRET =os.getenv("SUPABASE_JWT_SECRET")
+SUPABASE_SERVICE_ROLE_KEY= os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 #--------------------------------------------------------------------
 
 # Embedding dimensions

@@ -20,7 +20,7 @@ from fastapi import UploadFile, File, Form, HTTPException, APIRouter
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
-from config import BUCKET_NAME,SUPABASE_URL,SUPABASE_KEY,DATABASE_URL
+from config import BUCKET_NAME,SUPABASE_URL,SUPABASE_KEY,DATABASE_URL,SUPABASE_SERVICE_ROLE_KEY
 from uuid import UUID
 
 load_dotenv()
@@ -159,7 +159,7 @@ def init_vector_db():
     
 #---------------------CRUD OPERATIONS----------------------------
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 from typing import Optional
 import json, csv, io, requests
