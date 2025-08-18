@@ -79,6 +79,7 @@ origins = [
      "https://react-app-form.onrender.com/",
      "https://react-app-form.onrender.com",
      "https://leaseap.com",
+     "https://www.leasap.com",
      "https://your-render-subdomain.onrender.com",
  ]
 app = FastAPI(lifespan=lifespan)
