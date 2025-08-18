@@ -77,7 +77,9 @@ async def lifespan(app: FastAPI):
 # set orgin here
 origins = [
      "https://react-app-form.onrender.com/",
-     "https://react-app-form.onrender.com"
+     "https://react-app-form.onrender.com",
+     "https://leaseap.com",
+     "https://your-render-subdomain.onrender.com",
  ]
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -525,9 +527,9 @@ async def create_realtor_endpoint(
     email: str = Form(...),
     password: str = Form(...),
     contact: str = Form(...),
-    files: List[UploadFile] = File(...),
-    listing_file: Optional[UploadFile] = File(None),
-    listing_api_url: Optional[str] = Form(None)
+    #files: List[UploadFile] = File(...),
+    #listing_file: Optional[UploadFile] = File(None),
+    #listing_api_url: Optional[str] = Form(None)
 ):
     try:
         # Step 1: Create Supabase Auth user
@@ -547,9 +549,9 @@ async def create_realtor_endpoint(
             name=name,
             email=email,
             contact=contact,
-            files=files,
-            listing_file=listing_file,
-            listing_api_url=listing_api_url
+            #files=files,
+            #listing_file=listing_file,
+            #listing_api_url=listing_api_url
         )
 
         return JSONResponse(content=result, status_code=200)

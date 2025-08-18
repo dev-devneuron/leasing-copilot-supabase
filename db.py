@@ -186,9 +186,9 @@ def create_realtor_with_files(
     name: str,
     email: str,
     contact: str,
-    files: List[UploadFile],
-    listing_file: Optional[UploadFile] = None,
-    listing_api_url: Optional[str] = None
+    #files: List[UploadFile],
+    #listing_file: Optional[UploadFile] = None,
+    #listing_api_url: Optional[str] = None
 ):
     with Session(engine) as session:
         # Check for duplicate realtor
@@ -219,105 +219,105 @@ def create_realtor_with_files(
         session.refresh(source)
         print("source created")
 
-        uploaded_files = []
-        splitter = CharacterTextSplitter(separator="\n", chunk_size=500, chunk_overlap=50)
-        all_chunks = []
-        print("chunking done")
-        # 4. Process each document file (rules/guidelines)
-        for file in files:
-            content_bytes = file.file.read()
-            file_content = content_bytes.decode("utf-8")
-            file_path = f"realtors/{realtor.id}/{file.filename}"
+        # uploaded_files = []
+        # splitter = CharacterTextSplitter(separator="\n", chunk_size=500, chunk_overlap=50)
+        # all_chunks = []
+        # print("chunking done")
+        # # 4. Process each document file (rules/guidelines)
+        # for file in files:
+        #     content_bytes = file.file.read()
+        #     file_content = content_bytes.decode("utf-8")
+        #     file_path = f"realtors/{realtor.id}/{file.filename}"
 
-            # Upload to Supabase
-            response = supabase.storage.from_(BUCKET_NAME).upload(
-                file_path,
-                content_bytes,
-                file_options={"content-type": file.content_type}
-            )
+        #     # Upload to Supabase
+        #     response = supabase.storage.from_(BUCKET_NAME).upload(
+        #         file_path,
+        #         content_bytes,
+        #         file_options={"content-type": file.content_type}
+        #     )
 
-            if isinstance(response, dict) and "error" in response:
-                raise HTTPException(status_code=500, detail=response["error"]["message"])
+        #     if isinstance(response, dict) and "error" in response:
+        #         raise HTTPException(status_code=500, detail=response["error"]["message"])
 
-            file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
-            uploaded_files.append(file_url)
-            print("files uploaded:",uploaded_files)
+        #     file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
+        #     uploaded_files.append(file_url)
+        #     print("files uploaded:",uploaded_files)
 
-            # Split and collect chunks
-            document = Document(page_content=file_content, metadata={"source": file.filename})
-            chunk_docs = splitter.split_documents([document])
-            chunks = [doc.page_content for doc in chunk_docs]
-            all_chunks.extend(chunks)
+        #     # Split and collect chunks
+        #     document = Document(page_content=file_content, metadata={"source": file.filename})
+        #     chunk_docs = splitter.split_documents([document])
+        #     chunks = [doc.page_content for doc in chunk_docs]
+        #     all_chunks.extend(chunks)
 
 
-        # 5. Insert rule chunks into DB
-        insert_rule_chunks(all_chunks, source_id=source.id)
-        print("rules chunk inserted")
+        # # 5. Insert rule chunks into DB
+        # insert_rule_chunks(all_chunks, source_id=source.id)
+        # print("rules chunk inserted")
 
-        # 6. Handle listing data: file OR API URL
-        listing_chunks = []
-        listing_text = ""
+        # # 6. Handle listing data: file OR API URL
+        # listing_chunks = []
+        # listing_text = ""
 
-        if listing_file:
-            content = listing_file.file.read()
-            if listing_file.filename.endswith(".json"):
-                print("received json")
-                parsed = json.loads(content)
-                listing_text = json.dumps(parsed, indent=2)
-            elif listing_file.filename.endswith(".csv"):
-                print("received csv")
-                decoded = content.decode("utf-8")
-                reader = csv.DictReader(io.StringIO(decoded))
-                rows = [row for row in reader]
-                listing_text = json.dumps(rows, indent=2)
-            else:
-                raise HTTPException(status_code=400, detail="Unsupported listing file format")
+        # if listing_file:
+        #     content = listing_file.file.read()
+        #     if listing_file.filename.endswith(".json"):
+        #         print("received json")
+        #         parsed = json.loads(content)
+        #         listing_text = json.dumps(parsed, indent=2)
+        #     elif listing_file.filename.endswith(".csv"):
+        #         print("received csv")
+        #         decoded = content.decode("utf-8")
+        #         reader = csv.DictReader(io.StringIO(decoded))
+        #         rows = [row for row in reader]
+        #         listing_text = json.dumps(rows, indent=2)
+        #     else:
+        #         raise HTTPException(status_code=400, detail="Unsupported listing file format")
 
-            # Upload the listing file to Supabase
-            listing_path = f"realtors/{realtor.id}/listings/{listing_file.filename}"
-            response = supabase.storage.from_(BUCKET_NAME).upload(
-                listing_path,
-                content,
-                file_options={"content-type": listing_file.content_type}
-            )
-            print("uploaded lisitng file")
+        #     # Upload the listing file to Supabase
+        #     listing_path = f"realtors/{realtor.id}/listings/{listing_file.filename}"
+        #     response = supabase.storage.from_(BUCKET_NAME).upload(
+        #         listing_path,
+        #         content,
+        #         file_options={"content-type": listing_file.content_type}
+        #     )
+        #     print("uploaded lisitng file")
 
-        elif listing_api_url:
-            response = requests.get(listing_api_url)
-            if response.status_code != 200:
-                raise HTTPException(status_code=400, detail="Failed to fetch data from API URL")
-            listing_data = response.json()
-            listing_text = json.dumps(listing_data, indent=2)
-            print("fetched data")
+        # elif listing_api_url:
+        #     response = requests.get(listing_api_url)
+        #     if response.status_code != 200:
+        #         raise HTTPException(status_code=400, detail="Failed to fetch data from API URL")
+        #     listing_data = response.json()
+        #     listing_text = json.dumps(listing_data, indent=2)
+        #     print("fetched data")
 
-        if listing_text:
-            try:
-                listings = json.loads(listing_text)
-                if isinstance(listings, dict):  # ensure it's a list
-                    listings = [listings]
+        # if listing_text:
+        #     try:
+        #         listings = json.loads(listing_text)
+        #         if isinstance(listings, dict):  # ensure it's a list
+        #             listings = [listings]
         
-                formatted_texts = [listing_to_text(l) for l in listings]
-                embeddings = embed_documents(formatted_texts)
+        #         formatted_texts = [listing_to_text(l) for l in listings]
+        #         embeddings = embed_documents(formatted_texts)
 
-                listing_records = [
-                    {"text": formatted_texts[i], "metadata": listings[i], "embedding": embeddings[i]}
-                    for i in range(len(listings))
-                ]
+        #         listing_records = [
+        #             {"text": formatted_texts[i], "metadata": listings[i], "embedding": embeddings[i]}
+        #             for i in range(len(listings))
+        #         ]
 
-                insert_listing_records(realtor.id, listing_records)
+        #         insert_listing_records(realtor.id, listing_records)
 
-                print("Listings processed successfully.")
-            except Exception as e:
-                print("add_listings error:", e)
-                raise HTTPException(status_code=500, detail=f"Failed to process listing: {e}")
+        #         print("Listings processed successfully.")
+        #     except Exception as e:
+        #         print("add_listings error:", e)
+        #         raise HTTPException(status_code=500, detail=f"Failed to process listing: {e}")
 
 
         # 8. Return response
         auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
         
         #9. Sync Main DB
-        from sync import sync_apartment_listings
-        sync_apartment_listings()
+        #from sync import sync_apartment_listings
+        #sync_apartment_listings()
 
         return {
             "message": "Realtor created, rules uploaded, listings processed (not stored)",
@@ -327,9 +327,9 @@ def create_realtor_with_files(
                 "email": realtor.email,
                 "contact": realtor.contact
             },
-            "uploaded_files": uploaded_files,
-            "listing_file_provided": bool(listing_file),
-            "listing_api_url": listing_api_url,
+            # "uploaded_files": uploaded_files,
+            #"listing_file_provided": bool(listing_file),
+            #"listing_api_url": listing_api_url,
             "auth_link": auth_link
         }
 
