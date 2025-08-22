@@ -365,7 +365,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
         all_chunks.extend(chunks)
 
     # Insert into DB (vector store / pgvector table etc.)
-    insert_rule_chunks(all_chunks, source_id=source_id)
+    insert_rule_chunks(all_chunks, source_id=source_id,realtor_id=realtor_id)
     return uploaded_files
 
 
@@ -538,9 +538,20 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 # ---------------------- EMBEDDING HELPERS ----------------------
 
 
-def insert_rule_chunks(chunks: List[str], source_id: int):
-    embeddings = embedder.embed_documents(chunks)
+def insert_rule_chunks(chunks: List[str], source_id: int, realtor_id: int):
     with SessionLocal() as session:
+        # ✅ Validate that the source_id belongs to this realtor
+        source = session.exec(
+            select(Source).where(Source.id == source_id, Source.realtor_id == realtor_id)
+        ).first()
+        if not source:
+            raise HTTPException(
+                status_code=403,
+                detail="Source does not belong to the current realtor"
+            )
+
+        # ✅ Only insert if validation passes
+        embeddings = embedder.embed_documents(chunks)
         for chunk, emb in zip(chunks, embeddings):
             session.add(RuleChunk(content=chunk, embedding=emb, source_id=source_id))
         session.commit()
