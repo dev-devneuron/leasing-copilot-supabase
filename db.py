@@ -91,7 +91,6 @@ class RuleChunk(SQLModel, table=True):
     source_id: int = Field(foreign_key="source.id")
 
     content: str
-    realtor_id: int = Field(index=True)
     embedding: List[float] = Field(sa_column=Column(Vector(768)))
 
     source: Optional["Source"] = Relationship(back_populates="rule_chunks")
@@ -366,7 +365,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
         all_chunks.extend(chunks)
 
     # Insert into DB (vector store / pgvector table etc.)
-    insert_rule_chunks(all_chunks, source_id=source_id,realtor_id=realtor_id)
+    insert_rule_chunks(all_chunks, source_id=source_id)
     return uploaded_files
 
 
@@ -539,17 +538,8 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 # ---------------------- EMBEDDING HELPERS ----------------------
 
 
-def insert_rule_chunks( source_id: int, realtor_id: int, chunks: List[str], embeddings: List[List[float]]):
-    """
-    Insert rule chunks into the database, tied to both Source and Realtor.
+def insert_rule_chunks( source_id: int, chunks: List[str]):
     
-    Args:
-        session (Session): Active DB session
-        source_id (int): ID of the Source these chunks belong to
-        realtor_id (int): ID of the Realtor (FK enforced)
-        chunks (List[str]): List of chunk contents
-        embeddings (List[List[float]]): Corresponding embeddings
-    """
     with Session(engine) as session: 
         # Generate embeddings for all chunks in one go
         embeddings =embedder.embed_documents(chunks) # returns List[List[float]]
@@ -560,7 +550,6 @@ def insert_rule_chunks( source_id: int, realtor_id: int, chunks: List[str], embe
                 content=chunk,
                 embedding=embedding,
                 source_id=source_id,
-                realtor_id=realtor_id
             )
             for chunk, embedding in zip(chunks, embeddings)
         ]
@@ -568,9 +557,6 @@ def insert_rule_chunks( source_id: int, realtor_id: int, chunks: List[str], embe
         session.add_all(rule_chunks)
         session.commit()
         session.close()
-
-
-
 
 
 

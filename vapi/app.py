@@ -569,19 +569,16 @@ async def upload_rules(
     files: list[UploadFile] = File(...),
     realtor_id: int = Depends(get_current_realtor_id)
 ):
-    try:
-        with Session(engine) as session:
-            source = session.exec(
-                select(Source).where(Source.realtor_id == realtor_id)
-            ).first()
-            if not source:
-                raise HTTPException(status_code=404, detail="Source not found for realtor")
+    with Session(engine) as session:
+        source = session.exec(select(Source).where(Source.realtor_id == realtor_id)).first()
+        if not source:
+            raise HTTPException(status_code=404, detail="Source not found for realtor")
 
-        uploaded_files = embed_and_store_rules(files, realtor_id, source.id)
-        return {"message": "Rules uploaded & embedded", "files": uploaded_files}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
+    uploaded_files = embed_and_store_rules(files, realtor_id, source.id)
+    return JSONResponse(
+        content={"message": "Rules uploaded & embedded", "files": uploaded_files},
+        status_code=200
+    )
 
 
 @app.post("/UploadListings")
