@@ -540,6 +540,9 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 def insert_rule_chunks(chunks: List[str], source_id: int, realtor_id: int):
     with SessionLocal() as session:
+        # ✅ Tell Postgres which realtor is active (for RLS policies)
+        session.exec(f"SET app.current_realtor_id = {realtor_id}")
+
         # ✅ Validate that the source_id belongs to this realtor
         source = session.exec(
             select(Source).where(Source.id == source_id, Source.realtor_id == realtor_id)
@@ -554,7 +557,10 @@ def insert_rule_chunks(chunks: List[str], source_id: int, realtor_id: int):
         embeddings = embedder.embed_documents(chunks)
         for chunk, emb in zip(chunks, embeddings):
             session.add(RuleChunk(content=chunk, embedding=emb, source_id=source_id))
+
         session.commit()
+
+
 
 def insert_apartments(listings: List[dict], listing_to_text, source_id: int):
     texts = [listing_to_text(l) for l in listings]
