@@ -540,25 +540,23 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 def insert_rule_chunks(chunks: List[str], source_id: int, realtor_id: int):
     with Session(engine) as session:
-        # ✅ Tell Postgres which realtor is active for this session
-        session.exec(f"SET app.current_realtor_id = {realtor_id}")
+        # ✅ Persist variable for the connection, not just one statement
+        conn = session.connection()
+        conn.exec_driver_sql(f"SET app.current_realtor_id = {realtor_id}")
 
-        # ✅ Double-check that source belongs to the realtor
+        # ✅ Verify source belongs to realtor
         source = session.exec(
             select(Source).where(Source.id == source_id, Source.realtor_id == realtor_id)
         ).first()
-        
         if not source:
-            raise HTTPException(
-                status_code=403,
-                detail="Source does not belong to the current realtor"
-            )
+            raise HTTPException(status_code=403, detail="Source does not belong to the current realtor")
 
         # ✅ Insert chunks with embeddings
         embeddings = embedder.embed_documents(chunks)
         for chunk, emb in zip(chunks, embeddings):
             session.add(RuleChunk(content=chunk, embedding=emb, source_id=source_id))
         session.commit()
+
 
 
 
