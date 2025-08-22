@@ -74,15 +74,15 @@ async def lifespan(app: FastAPI):
 
     print("Shutting down fastapi app...")
 
+
+app = FastAPI(lifespan=lifespan)
 # set orgin here
 origins = [
      "https://react-app-form.onrender.com/",
      "https://react-app-form.onrender.com",
      "https://leaseap.com",
      "https://www.leasap.com",
-     "https://your-render-subdomain.onrender.com",
  ]
-app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
