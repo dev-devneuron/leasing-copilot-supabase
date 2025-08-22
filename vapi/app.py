@@ -575,6 +575,7 @@ async def upload_rules(
         source = session.exec(select(Source).where(Source.realtor_id == realtor_id)).first()
         if not source:
             raise HTTPException(status_code=404, detail="Source not found for realtor")
+    
 
     uploaded_files = embed_and_store_rules(files, realtor_id, source.id)
     return JSONResponse(

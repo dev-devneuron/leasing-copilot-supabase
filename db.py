@@ -341,32 +341,59 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
     splitter = CharacterTextSplitter(separator="\n", chunk_size=500, chunk_overlap=50)
     all_chunks = []
 
-    for file in files:
-        content_bytes = file.file.read()
-        file_content = content_bytes.decode("utf-8")
-        file_path = f"realtors/{realtor_id}/{file.filename}"
+    try:
+        for file in files:
+            try:
+                # Read file content
+                content_bytes = file.file.read()
+                if not content_bytes:
+                    raise ValueError(f"File {file.filename} is empty or unreadable")
 
-        # Upload to Supabase
-        response = supabase.storage.from_(BUCKET_NAME).upload(
-            file_path,
-            content_bytes,
-            file_options={"content-type": file.content_type}
-        )
-        if isinstance(response, dict) and "error" in response:
-            raise HTTPException(status_code=500, detail=response["error"]["message"])
+                file_content = content_bytes.decode("utf-8")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to read/parse file {file.filename}: {str(e)}")
 
-        file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
-        uploaded_files.append(file_url)
+            file_path = f"realtors/{realtor_id}/{file.filename}"
 
-        # Split into chunks
-        document = Document(page_content=file_content, metadata={"source": file.filename})
-        chunk_docs = splitter.split_documents([document])
-        chunks = [doc.page_content for doc in chunk_docs]
-        all_chunks.extend(chunks)
+            # Upload to Supabase storage
+            try:
+                response = supabase.storage.from_(BUCKET_NAME).upload(
+                    file_path,
+                    content_bytes,
+                    file_options={"content-type": file.content_type}
+                )
+                if isinstance(response, dict) and "error" in response:
+                    raise Exception(response["error"]["message"])
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename} to Supabase storage: {str(e)}")
 
-    # Insert into DB (vector store / pgvector table etc.)
-    insert_rule_chunks(all_chunks, source_id=source_id)
-    return uploaded_files
+            file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
+            uploaded_files.append(file_url)
+
+            # Split into chunks
+            try:
+                document = Document(page_content=file_content, metadata={"source": file.filename})
+                chunk_docs = splitter.split_documents([document])
+                chunks = [doc.page_content for doc in chunk_docs]
+                all_chunks.extend(chunks)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to split {file.filename} into chunks: {str(e)}")
+
+        # Insert into DB
+        try:
+            insert_rule_chunks(all_chunks, source_id=source_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to insert rule chunks into DB: {str(e)}")
+
+        return uploaded_files
+
+    except HTTPException:
+        # re-raise explicit HTTP errors
+        raise
+    except Exception as e:
+        # catch anything unexpected
+        raise HTTPException(status_code=500, detail=f"Unexpected error in embed_and_store_rules: {str(e)}")
+
 
 
 def embed_and_store_listings(listing_file: UploadFile = None, listing_api_url: str = None, realtor_id: int = None):
@@ -538,25 +565,46 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 # ---------------------- EMBEDDING HELPERS ----------------------
 
 
-def insert_rule_chunks( source_id: int, chunks: List[str]):
-    
-    with Session(engine) as session: 
-        # Generate embeddings for all chunks in one go
-        embeddings =embedder.embed_documents(chunks) # returns List[List[float]]
+from sqlalchemy.exc import SQLAlchemyError
+from fastapi import HTTPException
+from typing import List
 
-        # Build RuleChunk objects
-        rule_chunks = [
-            RuleChunk(
-                content=chunk,
-                embedding=embedding,
-                source_id=source_id,
-            )
-            for chunk, embedding in zip(chunks, embeddings)
-        ]
+def insert_rule_chunks(source_id: int, chunks: List[str]):
+    try:
+        with Session(engine) as session:
+            # Generate embeddings for all chunks in one go
+            embeddings = embedder.embed_documents(chunks)  # List[List[float]]
 
-        session.add_all(rule_chunks)
-        session.commit()
-        session.close()
+            # Build RuleChunk objects
+            rule_chunks = [
+                RuleChunk(
+                    content=chunk,
+                    embedding=embedding,
+                    source_id=source_id,
+                )
+                for chunk, embedding in zip(chunks, embeddings)
+            ]
+
+            session.add_all(rule_chunks)
+            session.commit()
+            return {"message": f"Inserted {len(rule_chunks)} rule chunks successfully."}
+
+    except SQLAlchemyError as e:
+        # SQLAlchemy-specific errors (DB connection, constraint violation, etc.)
+        error_msg = str(e.__cause__) if e.__cause__ else str(e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while inserting rule chunks: {error_msg}"
+        )
+
+    except Exception as e:
+        # Catch any other kind of error
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error while inserting rule chunks: {str(e)}"
+        )
+
+
 
 
 
