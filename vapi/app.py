@@ -81,7 +81,9 @@ origins = [
      "https://react-app-form.onrender.com/",
      "https://react-app-form.onrender.com",
      "https://leaseap.com",
+     "https://leaseap.com/",
      "https://www.leasap.com",
+     "https://www.leasap.com/",
  ]
 app.add_middleware(
     CORSMiddleware,
