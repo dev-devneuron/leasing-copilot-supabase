@@ -335,6 +335,90 @@ def create_realtor_with_files(
 
 
 
+
+def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: int):
+    uploaded_files = []
+    splitter = CharacterTextSplitter(separator="\n", chunk_size=500, chunk_overlap=50)
+    all_chunks = []
+
+    for file in files:
+        content_bytes = file.file.read()
+        file_content = content_bytes.decode("utf-8")
+        file_path = f"realtors/{realtor_id}/{file.filename}"
+
+        # Upload to Supabase
+        response = supabase.storage.from_(BUCKET_NAME).upload(
+            file_path,
+            content_bytes,
+            file_options={"content-type": file.content_type}
+        )
+        if isinstance(response, dict) and "error" in response:
+            raise HTTPException(status_code=500, detail=response["error"]["message"])
+
+        file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
+        uploaded_files.append(file_url)
+
+        # Split into chunks
+        document = Document(page_content=file_content, metadata={"source": file.filename})
+        chunk_docs = splitter.split_documents([document])
+        chunks = [doc.page_content for doc in chunk_docs]
+        all_chunks.extend(chunks)
+
+    # Insert into DB (vector store / pgvector table etc.)
+    insert_rule_chunks(all_chunks, source_id=source_id)
+    return uploaded_files
+
+
+def embed_and_store_listings(listing_file: UploadFile = None, listing_api_url: str = None, realtor_id: int = None):
+    listing_text = ""
+
+    if listing_file:
+        content = listing_file.file.read()
+        if listing_file.filename.endswith(".json"):
+            parsed = json.loads(content)
+            listing_text = json.dumps(parsed, indent=2)
+        elif listing_file.filename.endswith(".csv"):
+            decoded = content.decode("utf-8")
+            reader = csv.DictReader(io.StringIO(decoded))
+            rows = [row for row in reader]
+            listing_text = json.dumps(rows, indent=2)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported listing file format")
+
+        # Upload listing file
+        listing_path = f"realtors/{realtor_id}/listings/{listing_file.filename}"
+        response = supabase.storage.from_(BUCKET_NAME).upload(
+            listing_path,
+            content,
+            file_options={"content-type": listing_file.content_type}
+        )
+        if isinstance(response, dict) and "error" in response:
+            raise HTTPException(status_code=500, detail=response["error"]["message"])
+
+    elif listing_api_url:
+        response = requests.get(listing_api_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch data from API URL")
+        listing_data = response.json()
+        listing_text = json.dumps(listing_data, indent=2)
+
+    if listing_text:
+        listings = json.loads(listing_text)
+        if isinstance(listings, dict):
+            listings = [listings]
+
+        formatted_texts = [listing_to_text(l) for l in listings]
+        embeddings = embed_documents(formatted_texts)
+
+        listing_records = [
+            {"text": formatted_texts[i], "metadata": listings[i], "embedding": embeddings[i]}
+            for i in range(len(listings))
+        ]
+        insert_listing_records(realtor_id, listing_records)
+
+    return True
+
+
 def create_source(realtor_id: int) -> Source:
     with Session(engine) as session:
         source = Source(realtor_id=realtor_id)

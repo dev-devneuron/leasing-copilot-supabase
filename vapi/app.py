@@ -561,6 +561,41 @@ async def create_realtor_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# -----------------------------
+# Endpoints
+# -----------------------------
+@app.post("/UploadRules")
+async def upload_rules(
+    files: list[UploadFile] = File(...),
+    realtor_id: int = Depends(get_current_realtor_id)
+):
+    with Session(engine) as session:
+        source = session.exec(select(Source).where(Source.realtor_id == realtor_id)).first()
+        if not source:
+            raise HTTPException(status_code=404, detail="Source not found for realtor")
+
+    uploaded_files = embed_and_store_rules(files, realtor_id, source.id)
+    return JSONResponse(
+        content={"message": "Rules uploaded & embedded", "files": uploaded_files},
+        status_code=200
+    )
+
+
+@app.post("/UploadListings")
+async def upload_listings(
+    listing_file: UploadFile = File(None),
+    listing_api_url: str = Form(None),
+    realtor_id: int = Depends(get_current_realtor_id)
+):
+    embed_and_store_listings(listing_file, listing_api_url, realtor_id)
+    return JSONResponse(
+        content={"message": "Listings uploaded & embedded"},
+        status_code=200
+    )
+
+
+
+
 
 @app.post("/sync-listings")
 def run_sync():
@@ -605,10 +640,12 @@ async def login(response: Response, payload: dict = Body(...), request: Request 
             max_age=60 * 60 * 24 * 30  # 30 days
             )
             print("login successful")
+            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
             
 
         return {
     "message": "Login successful",
+    "auth_link":auth_link,
     "access_token": auth_result.session.access_token,  # or wherever your token is
     "refresh_token": refresh_token,
     "user": {
