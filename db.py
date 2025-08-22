@@ -565,40 +565,42 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 # ---------------------- EMBEDDING HELPERS ----------------------
 
 
-from sqlalchemy.exc import SQLAlchemyError
+
+from supabase import Client
 from fastapi import HTTPException
 from typing import List
 
-def insert_rule_chunks(source_id: int, chunks: List[str]):
+
+def insert_rule_chunks(source_id: int, chunks: List[str], embedder) -> dict:
     try:
-        with Session(engine) as session:
-            # Generate embeddings for all chunks in one go
-            embeddings = embedder.embed_documents(chunks)  # List[List[float]]
+        # Generate embeddings for all chunks
+        embeddings = embedder.embed_documents(chunks)  # returns List[List[float]]
 
-            # Build RuleChunk objects
-            rule_chunks = [
-                RuleChunk(
-                    content=chunk,
-                    embedding=embedding,
-                    source_id=source_id,
-                )
-                for chunk, embedding in zip(chunks, embeddings)
-            ]
+        # Insert each chunk with embedding using Supabase service role client
+        records = []
+        for chunk, embedding in zip(chunks, embeddings):
+            records.append({
+                "content": chunk,
+                "embedding": embedding,
+                "source_id": source_id
+            })
 
-            session.add_all(rule_chunks)
-            session.commit()
-            return {"message": f"Inserted {len(rule_chunks)} rule chunks successfully."}
+        # Supabase insert
+        response = supabase.table("rulechunk").insert(records).execute()
 
-    except SQLAlchemyError as e:
-        # SQLAlchemy-specific errors (DB connection, constraint violation, etc.)
-        error_msg = str(e.__cause__) if e.__cause__ else str(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database error while inserting rule chunks: {error_msg}"
-        )
+        if response.error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase insert error: {response.error.message}"
+            )
 
+        return {"message": f"Inserted {len(records)} rule chunks successfully."}
+
+    except HTTPException:
+        # Re-raise HTTP errors
+        raise
     except Exception as e:
-        # Catch any other kind of error
+        # Catch all other errors
         raise HTTPException(
             status_code=500,
             detail=f"Unexpected error while inserting rule chunks: {str(e)}"
