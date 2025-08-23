@@ -561,24 +561,24 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 # ---------------------- EMBEDDING HELPERS ----------------------
 
-def insert_rule_chunks(source_id: int, chunks: List[str], embedder) -> dict:
+def insert_rule_chunks(source_id: int, chunks: List[str], embedder):
     try:
-        # Generate embeddings for all chunks
-        embeddings = embedder.embed_documents(chunks)  # returns List[List[float]]
-        print("Embeddings:",embeddings)
-        # Insert each chunk with embedding using Supabase service role client
+        print("function insert rule chunks called")
+        embeddings = embedder.embed_documents(chunks)
+        print("embeddings:",embeddings)
+
         records = []
         for chunk, embedding in zip(chunks, embeddings):
             records.append({
-                "source_id": source_id,
                 "content": chunk,
                 "embedding": embedding,
+                "source_id": source_id
             })
 
-        # Supabase insert
         response = supabase.table("rulechunk").insert(records).execute()
+        print(response.__dict__)  # <-- log full response for debugging
 
-        if response.error:
+        if hasattr(response, "error") and response.error:
             raise HTTPException(
                 status_code=500,
                 detail=f"Supabase insert error: {response.error.message}"
@@ -586,15 +586,9 @@ def insert_rule_chunks(source_id: int, chunks: List[str], embedder) -> dict:
 
         return {"message": f"Inserted {len(records)} rule chunks successfully."}
 
-    except HTTPException:
-        # Re-raise HTTP errors
-        raise
     except Exception as e:
-        # Catch all other errors
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unexpected error while inserting rule chunks: {str(e)}"
-        )
+        print("Error inserting rule chunks:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
