@@ -361,8 +361,9 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
                 response = supabase.storage.from_(BUCKET_NAME).upload(
                     file_path,
                     content_bytes,
-                    file_options={"content-type": file.content_type}
+                    file_options={"content-type": file.content_type or "application/octet-stream", "upsert": "true"}
                 )
+                print(f"Upload response: {response}")
                 if isinstance(response, dict) and "error" in response:
                     raise Exception(response["error"]["message"])
             except Exception as e:
