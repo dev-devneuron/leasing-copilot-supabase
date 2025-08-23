@@ -389,7 +389,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
         # Insert into DB
         try:
             print("calling insert rule chunks")
-            insert_rule_chunks(all_chunks, source_id=source_id)
+            insert_rule_chunks(source_id=source_id,chunks=all_chunks)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to insert rule chunks into DB: {str(e)}")
 
