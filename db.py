@@ -355,7 +355,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
                 raise HTTPException(status_code=400, detail=f"Failed to read/parse file {file.filename}: {str(e)}")
 
             file_path = f"realtors/{realtor_id}/{file.filename}"
-
+            print("fine till here")
             # Upload to Supabase storage
             try:
                 response = supabase.storage.from_(BUCKET_NAME).upload(
@@ -367,7 +367,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
                     raise Exception(response["error"]["message"])
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename} to Supabase storage: {str(e)}")
-
+            print("files uploaded to supabase")
             file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
             uploaded_files.append(file_url)
 
