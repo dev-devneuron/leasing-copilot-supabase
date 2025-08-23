@@ -559,30 +559,20 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
         session.commit()
 
-
-
-
 # ---------------------- EMBEDDING HELPERS ----------------------
-
-
-
-from supabase import Client
-from fastapi import HTTPException
-from typing import List
-
 
 def insert_rule_chunks(source_id: int, chunks: List[str], embedder) -> dict:
     try:
         # Generate embeddings for all chunks
         embeddings = embedder.embed_documents(chunks)  # returns List[List[float]]
-
+        print("Embeddings:",embeddings)
         # Insert each chunk with embedding using Supabase service role client
         records = []
         for chunk, embedding in zip(chunks, embeddings):
             records.append({
+                "source_id": source_id,
                 "content": chunk,
                 "embedding": embedding,
-                "source_id": source_id
             })
 
         # Supabase insert
