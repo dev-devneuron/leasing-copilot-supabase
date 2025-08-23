@@ -159,7 +159,11 @@ def init_vector_db():
     
 #---------------------CRUD OPERATIONS----------------------------
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+import os
+
+print("SUPABASE_URL:", os.getenv("SUPABASE_URL"))
+print("SUPABASE_SERVICE_ROLE_KEY:", os.getenv("SUPABASE_SERVICE_ROLE_KEY")[:10] + "...")
 
 from typing import Optional
 import json, csv, io, requests
@@ -361,7 +365,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
                 response = supabase.storage.from_(BUCKET_NAME).upload(
                     file_path,
                     content_bytes,
-                    file_options={"content-type": file.content_type or "application/octet-stream", "upsert": "true"}
+                    file_options={"content-type": file.content_type}
                 )
                 print(f"Upload response: {response}")
                 if isinstance(response, dict) and "error" in response:
