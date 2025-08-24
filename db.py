@@ -569,7 +569,7 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 # ---------------------- EMBEDDING HELPERS ----------------------
 
-def insert_rule_chunks(source_id: int, chunks: List[str], embedder):
+def insert_rule_chunks(source_id: int, chunks: List[str]):
     try:
         print("function insert rule chunks called")
         embeddings = embedder.embed_documents(chunks)
