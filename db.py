@@ -162,8 +162,6 @@ def init_vector_db():
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
 import os
 
-print("SUPABASE_URL:", os.getenv("SUPABASE_URL"))
-print("SUPABASE_SERVICE_ROLE_KEY:", os.getenv("SUPABASE_SERVICE_ROLE_KEY")[:10] + "...")
 
 from typing import Optional
 import json, csv, io, requests
