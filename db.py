@@ -158,9 +158,12 @@ def init_vector_db():
 
     
 #---------------------CRUD OPERATIONS----------------------------
+import jwt
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+decoded = jwt.decode(SUPABASE_SERVICE_KEY, options={"verify_signature": False})
+print("ROLEEEEE:",decoded.get("role"))
 
-supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
-import os
 
 
 from typing import Optional
