@@ -565,7 +565,6 @@ def insert_rule_chunks(source_id: int, chunks: List[str]):
     try:
     
         embeddings = embedder.embed_documents(chunks)
-        print(embeddings)
         records = []
         for chunk, embedding in zip(chunks, embeddings):
             records.append({
@@ -573,7 +572,7 @@ def insert_rule_chunks(source_id: int, chunks: List[str]):
                 "embedding": embedding,
                 "source_id": source_id
             })
-        print("records created, storing in supbase")
+        print("records created, storing in supabase")
         response = supabase.table("rulechunk").insert(records).execute()
         print("inserted")
         print(response.__dict__)  # <-- log full response for debugging
