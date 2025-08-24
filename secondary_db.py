@@ -20,6 +20,7 @@ DynamicBase = declarative_base()
 
 def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
     table_name = f"realtor_{realtor_id}_listings"
+    print(table_name)
 
     # Define dynamic table class only once per table name
     if table_name not in DynamicBase.metadata.tables:
