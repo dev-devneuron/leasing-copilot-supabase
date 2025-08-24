@@ -6,7 +6,7 @@ from pgvector.sqlalchemy import Vector
 from dotenv import load_dotenv
 from config import EMBED_DIM
 from sqlalchemy.orm import declarative_base
-from sync import sync_apartment_listings
+
 
 load_dotenv()
 
@@ -45,7 +45,7 @@ def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
         SQLModel.metadata.create_all(engine1, tables=[DynamicBase.metadata.tables[table_name]])
     else:
         print(f"[INFO] Table {table_name} already exists, skipping creation.")
-
+    from sync import sync_apartment_listings
     # Insert listings
     with Session(engine1) as session:
         for listing in listings:
