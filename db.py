@@ -404,9 +404,11 @@ def embed_and_store_listings(listing_file: UploadFile = None, listing_api_url: s
 
     if listing_file:
         content = listing_file.file.read()
+        print("reading done")
         if listing_file.filename.endswith(".json"):
             parsed = json.loads(content)
             listing_text = json.dumps(parsed, indent=2)
+            print("it was json")
         elif listing_file.filename.endswith(".csv"):
             decoded = content.decode("utf-8")
             reader = csv.DictReader(io.StringIO(decoded))
@@ -422,6 +424,7 @@ def embed_and_store_listings(listing_file: UploadFile = None, listing_api_url: s
             content,
             file_options={"content-type": listing_file.content_type}
         )
+        print("file uploaded to supabase")
         if isinstance(response, dict) and "error" in response:
             raise HTTPException(status_code=500, detail=response["error"]["message"])
 
@@ -439,11 +442,13 @@ def embed_and_store_listings(listing_file: UploadFile = None, listing_api_url: s
 
         formatted_texts = [listing_to_text(l) for l in listings]
         embeddings = embed_documents(formatted_texts)
+        print("embedding done")
 
         listing_records = [
             {"text": formatted_texts[i], "metadata": listings[i], "embedding": embeddings[i]}
             for i in range(len(listings))
         ]
+        print("calling insert function")
         insert_listing_records(realtor_id, listing_records)
 
     return True

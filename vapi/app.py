@@ -590,6 +590,7 @@ async def upload_listings(
     listing_api_url: str = Form(None),
     realtor_id: int = Depends(get_current_realtor_id)
 ):
+    print("Realtor Id:",realtor_id)
     embed_and_store_listings(listing_file, listing_api_url, realtor_id)
     return JSONResponse(
         content={"message": "Listings uploaded & embedded"},
