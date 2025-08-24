@@ -318,7 +318,7 @@ def create_realtor_with_files(
 
 
         # 8. Return response
-        auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
+        auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?realtor_id={realtor.id}"
         
         #9. Sync Main DB
         #from sync import sync_apartment_listings
