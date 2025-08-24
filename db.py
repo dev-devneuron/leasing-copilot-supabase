@@ -346,7 +346,6 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
     all_chunks = []
 
     try:
-        print("called embed rules function")
         for file in files:
             try:
                 # Read file content
@@ -359,7 +358,6 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
                 raise HTTPException(status_code=400, detail=f"Failed to read/parse file {file.filename}: {str(e)}")
 
             file_path = f"realtors/{realtor_id}/{file.filename}"
-            print("fine till here")
             # Upload to Supabase storage
             try:
                 response = supabase.storage.from_(BUCKET_NAME).upload(
@@ -367,12 +365,10 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
                     content_bytes,
                     file_options={"content-type": file.content_type}
                 )
-                print(f"Upload response: {response}")
                 if isinstance(response, dict) and "error" in response:
                     raise Exception(response["error"]["message"])
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename} to Supabase storage: {str(e)}")
-            print("files uploaded to supabase")
             file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
             uploaded_files.append(file_url)
 
@@ -385,10 +381,8 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to split {file.filename} into chunks: {str(e)}")
 
-        print("going to call insert chunks...")
         # Insert into DB
         try:
-            print("calling insert rule chunks")
             insert_rule_chunks(source_id=source_id,chunks=all_chunks)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to insert rule chunks into DB: {str(e)}")
@@ -571,10 +565,9 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 def insert_rule_chunks(source_id: int, chunks: List[str]):
     try:
-        print("function insert rule chunks called")
+    
         embeddings = embedder.embed_documents(chunks)
-        print("embeddings:",embeddings)
-
+        print(embeddings)
         records = []
         for chunk, embedding in zip(chunks, embeddings):
             records.append({
@@ -582,8 +575,9 @@ def insert_rule_chunks(source_id: int, chunks: List[str]):
                 "embedding": embedding,
                 "source_id": source_id
             })
-
+        print("records created, storing in supbase")
         response = supabase.table("rulechunk").insert(records).execute()
+        print("inserted")
         print(response.__dict__)  # <-- log full response for debugging
 
         if hasattr(response, "error") and response.error:
