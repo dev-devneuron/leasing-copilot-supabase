@@ -569,36 +569,61 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 # ---------------------- EMBEDDING HELPERS ----------------------
 
+# def insert_rule_chunks(source_id: int, chunks: List[str]):
+#     try:
+    
+#         embeddings = embedder.embed_documents(chunks)
+#         records = []
+#         for chunk, embedding in zip(chunks, embeddings):
+#             records.append({
+#                 "content": chunk,
+#                 "embedding": embedding,
+#                 "source_id": source_id
+#             })
+#         print("records created, storing in supabase")
+#         response = supabase.table("rulechunk").insert(records).execute()
+#         print("inserted")
+#         print(response.__dict__)  # <-- log full response for debugging
+
+#         if hasattr(response, "error") and response.error:
+#             raise HTTPException(
+#                 status_code=500,
+#                 detail=f"Supabase insert error: {response.error.message}"
+#             )
+
+#         return {"message": f"Inserted {len(records)} rule chunks successfully."}
+
+#     except Exception as e:
+#         print("Error inserting rule chunks:", str(e))
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+
 def insert_rule_chunks(source_id: int, chunks: List[str]):
     try:
-    
         embeddings = embedder.embed_documents(chunks)
-        records = []
-        for chunk, embedding in zip(chunks, embeddings):
-            records.append({
-                "content": chunk,
-                "embedding": embedding,
-                "source_id": source_id
-            })
-        print("records created, storing in supabase")
-        response = supabase.table("rulechunk").insert(records).execute()
-        print("inserted")
-        print(response.__dict__)  # <-- log full response for debugging
-
-        if hasattr(response, "error") and response.error:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Supabase insert error: {response.error.message}"
+        records = [
+            RuleChunk(
+                content=chunk,
+                embedding=embedding,
+                source_id=source_id
             )
+            for chunk, embedding in zip(chunks, embeddings)
+        ]
+
+        print("records created, storing in database")
+
+        with Session(engine) as session:
+            session.add_all(records)
+            session.commit()
+
+        print("inserted")
 
         return {"message": f"Inserted {len(records)} rule chunks successfully."}
 
     except Exception as e:
         print("Error inserting rule chunks:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
 
 
 def insert_apartments(listings: List[dict], listing_to_text, source_id: int):
