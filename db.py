@@ -399,7 +399,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
 
 
 
-def embed_and_store_listings(listing_file: UploadFile = None, listing_api_url: str = None, realtor_id: int = None):
+def embed_and_store_listings(listing_file, listing_api_url: str = None, realtor_id: int = None):
     listing_text = ""
 
     if listing_file:
