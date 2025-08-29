@@ -748,10 +748,6 @@ import jwt  # PyJWT
 from twilio.rest import Client  
 
 
-
-supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
-
-
 TWILIO_ACCOUNT_SID2=os.getenv("TWILIO_ACCOUNT_SID2")
 TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN")
 VAPI_API_KEY2=os.getenv("VAPI_API_KEY2")
