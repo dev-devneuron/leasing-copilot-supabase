@@ -742,6 +742,112 @@ async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
         bookings_data = serialize(bookings)
         return JSONResponse(content=bookings_data)
 
+from fastapi import Depends, Header, HTTPException
+from sqlmodel import Session, select
+from supabase import create_client, Client
+import jwt  # PyJWT
+
+# Supabase setup
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+TWILIO_ACCOUNT_SID2=os.getenv("TWILIO_ACCOUNT_SID2")
+TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN")
+VAPI_API_KEY2=os.getenv("VAPI_API_KEY2")
+VAPI_ASSISTANT_ID2=os.getenv("VAPI_ASSISTANT_ID2")
+
+twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN)
+
+def get_db():
+    with Session(engine) as session:
+        yield session
+
+
+@app.post("/buy-number")
+def buy_number(
+    area_code: str = "412",
+    authorization: str = Header(...),  # Extract JWT from frontend Authorization: Bearer <token>
+    db: Session = Depends(get_db),
+):
+    """Buy Twilio number, link with Vapi, and save to DB."""
+
+    # Step 1: Decode JWT → get auth user id (supabase UID)
+    try:
+        token = authorization.split(" ")[1]
+        decoded = jwt.decode(token, options={"verify_signature": False})  # in dev, skip sig verify
+        auth_user_id = decoded.get("sub")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid auth token")
+
+    # Step 2: Get Realtor by auth_user_id
+    realtor = db.exec(select(Realtor).where(Realtor.auth_user_id == auth_user_id)).first()
+    print("Realtor id recv:",realtor.id)
+    if not realtor:
+        raise HTTPException(status_code=404, detail="Realtor not found")
+
+    # Step 3: Buy Twilio number
+    available = twillio_client.available_phone_numbers("US").local.list(area_code=area_code, limit=1)
+    if not available:
+        raise HTTPException(status_code=400, detail=f"No numbers available for area code {area_code}")
+
+    number_to_buy = available[0].phone_number
+
+    purchased = twillio_client.incoming_phone_numbers.create(
+        phone_number=number_to_buy,
+        sms_url=f"https://api.vapi.ai/sms/twilio/{VAPI_ASSISTANT_ID2}",
+        voice_url="https://api.vapi.ai/twilio/inbound_call",
+    )
+
+    # Step 4: Link with Vapi assistant
+    payload = {
+        "provider": "twilio",
+        "number": purchased.phone_number,
+        "twilioAccountSid": TWILIO_ACCOUNT_SID,
+        "twilioAuthToken": TWILIO_AUTH_TOKEN,
+        "assistantId": VAPI_ASSISTANT_ID,
+        "name": f"Realtor {realtor.id} Bot Number",
+    }
+
+    response = requests.post(
+        "https://api.vapi.ai/phone-number",
+        headers={
+            "Authorization": f"Bearer {VAPI_API_KEY2}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+    )
+
+    # Step 5: Save to TwilioNumber table
+    with Session(engine) as session:
+        realtor = session.get(Realtor, realtor.id)  # fetch existing realtor by ID
+        if realtor:
+            realtor.twilio_number = purchased.phone_number
+            realtor.twilio_sid = purchased.sid
+
+            session.add(realtor)
+            session.commit()
+            session.refresh(realtor)
+
+            return {
+            "twilio_number": realtor.twilio_number,
+            "twilio_sid": realtor.twilio_sid,
+            "realtor_id": realtor.id,
+            "vapi_response": response.json(),
+            }
+        else:
+            return {"error": "Realtor not found"}
+
+@app.get("/my-number")
+def get_my_number(current_user: dict = Depends(get_current_realtor_id)):
+    with SessionLocal() as session:
+        realtor = session.query(Realtor).filter(Realtor.id == current_user["id"]).first()
+        if not realtor or not realtor.twilio_number:
+            raise HTTPException(status_code=404, detail="You havn't bought the number yet!")
+
+        return {"twilio_number": realtor.twilio_number}
+    
 @app.middleware("http")
 async def log_origin(request, call_next):
     print("Origin received:", request.headers.get("origin"))
