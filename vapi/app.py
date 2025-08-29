@@ -799,8 +799,8 @@ def buy_number(
     payload = {
         "provider": "twilio",
         "number": purchased.phone_number,
-        "twilioAccountSid": TWILIO_ACCOUNT_SID,
-        "twilioAuthToken": TWILIO_AUTH_TOKEN,
+        "twilioAccountSid": TWILIO_ACCOUNT_SID2,
+        "twilioAuthToken": TWILIO_AUTH_TOKEN2,
         "assistantId": VAPI_ASSISTANT_ID,
         "name": f"Realtor {realtor.id} Bot Number",
     }
