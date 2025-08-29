@@ -40,6 +40,7 @@ class Realtor(SQLModel, table=True):
     email: str
     contact: str
     twilio_contact: str
+    twilio_sid: Optional[str] = None
     credentials: Optional[str] = Field(default=None)  # Store as serialized JSON string
 
     sources: List["Source"] = Relationship(back_populates="realtor")

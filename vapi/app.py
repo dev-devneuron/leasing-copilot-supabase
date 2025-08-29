@@ -814,11 +814,13 @@ def buy_number(
         json=payload,
     )
 
-    # Step 5: Save to TwilioNumber table
+    # Step 5: Save Twilio number to realtor table
     with Session(engine) as session:
         realtor = session.get(Realtor, realtor.id)  # fetch existing realtor by ID
         if realtor:
-            realtor.twilio_number = purchased.phone_number
+            # Save the Twilio number in the twilio_contact field
+            realtor.twilio_contact = purchased.phone_number
+            # Save the Twilio SID
             realtor.twilio_sid = purchased.sid
 
             session.add(realtor)
@@ -826,13 +828,14 @@ def buy_number(
             session.refresh(realtor)
 
             return {
-            "twilio_number": realtor.twilio_number,
-            "twilio_sid": realtor.twilio_sid,
-            "realtor_id": realtor.id,
-            "vapi_response": response.json(),
+                "twilio_contact": realtor.twilio_contact,
+                "twilio_sid": realtor.twilio_sid,
+                "realtor_id": realtor.id,
+                "vapi_response": response.json(),
             }
         else:
             return {"error": "Realtor not found"}
+
 
 @app.get("/my-number")
 def get_my_number(current_user: int = Depends(get_current_realtor_id)):
@@ -841,10 +844,10 @@ def get_my_number(current_user: int = Depends(get_current_realtor_id)):
         realtor = session.exec(statement).first()
         print("Hey realtor:", realtor)
         
-        if not realtor or not realtor.twilio_number:
+        if not realtor or not realtor.twilio_contact:
             raise HTTPException(status_code=404, detail="You haven't bought the number yet!")
 
-        return {"twilio_number": realtor.twilio_number}
+        return {"twilio_number": realtor.twilio_contact}
     
 @app.middleware("http")
 async def log_origin(request, call_next):
