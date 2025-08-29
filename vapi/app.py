@@ -747,9 +747,8 @@ from sqlmodel import Session, select
 from supabase import create_client, Client
 import jwt  # PyJWT
 
-# Supabase setup
-from config import SUPABASE_URL,SUPABASE_KEY
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
 
 
 TWILIO_ACCOUNT_SID2=os.getenv("TWILIO_ACCOUNT_SID2")
