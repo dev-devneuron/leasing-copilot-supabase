@@ -753,7 +753,7 @@ TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN")
 VAPI_API_KEY2=os.getenv("VAPI_API_KEY2")
 VAPI_ASSISTANT_ID2=os.getenv("VAPI_ASSISTANT_ID2")
 
-twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN)
+twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN2)
 
 def get_db():
     with Session(engine) as session:
