@@ -835,11 +835,14 @@ def buy_number(
             return {"error": "Realtor not found"}
 
 @app.get("/my-number")
-def get_my_number(current_user: dict = Depends(get_current_realtor_id)):
-    with SessionLocal() as session:
-        realtor = session.query(Realtor).filter(Realtor.id == current_user["id"]).first()
+def get_my_number(current_user: int = Depends(get_current_realtor_id)):
+    with Session(engine) as session:
+        statement = select(Realtor).where(Realtor.id == current_user)
+        realtor = session.exec(statement).first()
+        print("Hey realtor:", realtor)
+        
         if not realtor or not realtor.twilio_number:
-            raise HTTPException(status_code=404, detail="You havn't bought the number yet!")
+            raise HTTPException(status_code=404, detail="You haven't bought the number yet!")
 
         return {"twilio_number": realtor.twilio_number}
     
