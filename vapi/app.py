@@ -744,8 +744,9 @@ async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
 
 from fastapi import Depends, Header, HTTPException
 from sqlmodel import Session, select
-from supabase import create_client, Client
 import jwt  # PyJWT
+from twilio.rest import Client  
+
 
 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
