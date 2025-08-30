@@ -800,7 +800,7 @@ def buy_number(
         "number": purchased.phone_number,
         "twilioAccountSid": TWILIO_ACCOUNT_SID2,
         "twilioAuthToken": TWILIO_AUTH_TOKEN2,
-        "assistantId": VAPI_ASSISTANT_ID,
+        "assistantId": VAPI_ASSISTANT_ID2,
         "name": f"Realtor {realtor.id} Bot Number",
     }
 
