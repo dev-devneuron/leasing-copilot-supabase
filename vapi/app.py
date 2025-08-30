@@ -745,11 +745,10 @@ async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
 from fastapi import Depends, Header, HTTPException
 from sqlmodel import Session, select
 import jwt  # PyJWT
-from twilio.rest import Client  
-
+from twilio.rest import Client
 
 TWILIO_ACCOUNT_SID2=os.getenv("TWILIO_ACCOUNT_SID2")
-TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN2")
 VAPI_API_KEY2=os.getenv("VAPI_API_KEY2")
 VAPI_ASSISTANT_ID2=os.getenv("VAPI_ASSISTANT_ID2")
 
