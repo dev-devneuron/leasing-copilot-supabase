@@ -39,10 +39,13 @@ from sqlmodel import select, Session
 
 load_dotenv()  # Load .env values
 
+
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
 VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+VAPI_BASE_URL = "https://api.vapi.ai"
+headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
 
 rag = RAGEngine()  # pgvector RAG
 
@@ -92,6 +95,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 #------------------ CreateCustomer ----------------#
 @app.post("/create_customer/")
@@ -767,7 +771,7 @@ def buy_number(
 ):
     """Buy Twilio number, link with Vapi, and save to DB."""
 
-    # Step 1: Decode JWT → get auth user id (supabase UID)
+    
     try:
         token = authorization.split(" ")[1]
         decoded = jwt.decode(token, options={"verify_signature": False})  # in dev, skip sig verify
@@ -775,13 +779,13 @@ def buy_number(
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid auth token")
 
-    # Step 2: Get Realtor by auth_user_id
+    
     realtor = db.exec(select(Realtor).where(Realtor.auth_user_id == auth_user_id)).first()
     print("Realtor id recv:",realtor.id)
     if not realtor:
         raise HTTPException(status_code=404, detail="Realtor not found")
 
-    # Step 3: Buy Twilio number
+    #  Buy Twilio number
     available = twillio_client.available_phone_numbers("US").local.list(area_code=area_code, limit=1)
     if not available:
         raise HTTPException(status_code=400, detail=f"No numbers available for area code {area_code}")
@@ -794,7 +798,7 @@ def buy_number(
         voice_url="https://api.vapi.ai/twilio/inbound_call",
     )
 
-    # Step 4: Link with Vapi assistant
+    #  Link with Vapi assistant
     payload = {
         "provider": "twilio",
         "number": purchased.phone_number,
@@ -813,7 +817,7 @@ def buy_number(
         json=payload,
     )
 
-    # Step 5: Save Twilio number to realtor table
+    #  Save Twilio number to realtor table
     with Session(engine) as session:
         realtor = session.get(Realtor, realtor.id)  # fetch existing realtor by ID
         if realtor:
@@ -848,7 +852,69 @@ def get_my_number(current_user: int = Depends(get_current_realtor_id)):
 
         return {"twilio_number": realtor.twilio_contact}
     
-@app.middleware("http")
-async def log_origin(request, call_next):
-    print("Origin received:", request.headers.get("origin"))
-    return await call_next(request)
+
+@app.get("/recordings")
+def get_recordings(
+     realtor_id: int = Depends(get_current_realtor_id)
+     ):
+    recordings = []
+
+    # Step 1: Look up the realtor in DB to get their Twilio number
+    with Session(engine) as session:
+        realtor = session.exec(
+            select(Realtor).where(Realtor.id == realtor_id)
+        ).first()
+
+        if not realtor:
+            raise HTTPException(status_code=404, detail="Realtor not found")
+
+        if not realtor.twilio_contact:
+            raise HTTPException(
+                status_code=400,
+                detail="Realtor does not have a Twilio contact configured"
+            )
+
+        twilio_number = realtor.twilio_contact
+        print("from supabse got twilio contact:",twilio_number)
+
+    # Step 2: Fetch all calls from VAPI
+    resp = requests.get(f"{VAPI_BASE_URL}/call", headers=headers)
+    calls = resp.json()
+
+    for call in calls:
+        # Step 3: Get the phoneNumberId from the call
+        phone_number_id = call.get("phoneNumberId")
+        print("phone from vapi call id",phone_number_id)
+        if not phone_number_id:
+            continue
+
+        # Step 4: Look up the number against the phoneNumberId
+        pn_resp = requests.get(
+            f"{VAPI_BASE_URL}/phone-number/{phone_number_id}", headers=headers
+        )
+        if pn_resp.status_code != 200:
+            continue
+
+        bot_number = pn_resp.json().get("number")
+        print("bot number from vapi",bot_number)
+
+        # Step 5: Match with realtor’s Twilio contact
+        if bot_number != twilio_number:
+            continue
+
+        # Step 7: Extract recordings if available
+        recording_url = call.get("artifact", {}).get("recordingUrl")
+        
+        if recording_url:
+                recordings.append(
+                    {
+                        "url": recording_url
+                    }
+                )
+
+    return {"recordings": recordings}
+
+
+
+
+

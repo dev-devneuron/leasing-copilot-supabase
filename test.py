@@ -1,69 +1,78 @@
-# file: twilio_number_service.py
-
-import os
-import requests
-from fastapi import FastAPI
-from twilio.rest import Client
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Load Twilio + Vapi credentials from .env
-TWILIO_ACCOUNT_SID = "ACfd1c9eecc6f1a1e119cf3ff00325a5af"
-TWILIO_AUTH_TOKEN = "fd7a7291b3bb8dcc9347bc32af4f8aff"
-VAPI_API_KEY = "541ffaff-3f6d-4365-9320-0bb171f12bd7"
-VAPI_ASSISTANT_ID = "d37218d3-0b5f-4683-87ea-9ed447d925ae"
+# from fastapi import Depends, HTTPException, Security,FastAPI
+# from sqlmodel import Session, select
+# import httpx
+# import os
+# from db import *
+# from auth_module import get_current_realtor_id
+# from sqlmodel import Session, select
 
 
-if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-    raise ValueError("Missing Twilio credentials in .env")
+# VAPI_API_KEY = "541ffaff-3f6d-4365-9320-0bb171f12bd7"
+# VAPI_BASE_URL = "https://api.vapi.ai"
+# headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
 
-if not VAPI_API_KEY or not VAPI_ASSISTANT_ID:
-    raise ValueError("Missing Vapi credentials in .env")
-
-client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-app = FastAPI()
+# app=FastAPI()
 
 
-@app.post("/buy-number")
-def buy_number(area_code: str = "412"):
-    """Buy a Twilio number, set Voice/SMS URLs, and link to Vapi bot."""
 
-    # Step 1: Search number
-    available = client.available_phone_numbers("US").local.list(area_code=area_code, limit=1)
-    if not available:
-        return {"error": f"No numbers available for area code {area_code}"}
+# @app.get("/recordings")
+# def get_recordings(
+#      #realtor_id: int = Depends(get_current_realtor_id)
+#      ):
+#     realtor_id=71
+#     recordings = []
 
-    number_to_buy = available[0].phone_number
+#     # Step 1: Look up the realtor in DB to get their Twilio number
+#     with Session(engine) as session:
+#         realtor = session.exec(
+#             select(Realtor).where(Realtor.id == realtor_id)
+#         ).first()
 
-    # Step 2: Purchase number with SMS + Voice webhooks
-    purchased = client.incoming_phone_numbers.create(
-        phone_number=number_to_buy,
-        sms_url=f"https://api.vapi.ai/sms/twilio/{VAPI_ASSISTANT_ID}",
-        voice_url="https://api.vapi.ai/twilio/inbound_call",  # correct inbound call URL
-    )
+#         if not realtor:
+#             raise HTTPException(status_code=404, detail="Realtor not found")
 
-    # Step 3: Link with Vapi assistant
-    payload = {
-        "provider": "twilio",
-        "number": purchased.phone_number,
-        "twilioAccountSid": TWILIO_ACCOUNT_SID,
-        "twilioAuthToken": TWILIO_AUTH_TOKEN,
-        "assistantId": VAPI_ASSISTANT_ID,
-        "name": "Realtor Bot Number",
-    }
+#         if not realtor.twilio_contact:
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail="Realtor does not have a Twilio contact configured"
+#             )
 
-    response = requests.post(
-        "https://api.vapi.ai/phone-number",
-        headers={
-            "Authorization": f"Bearer {VAPI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-    )
+#         twilio_number = realtor.twilio_contact
+#         print("from supabse got twilio contact:",twilio_number)
 
-    return {
-        "twilio_number": purchased.phone_number,
-        "twilio_sid": purchased.sid,
-        "vapi_response": response.json(),
-    }
+#     # Step 2: Fetch all calls from VAPI
+#     resp = requests.get(f"{VAPI_BASE_URL}/call", headers=headers)
+#     calls = resp.json()
+
+#     for call in calls:
+#         # Step 3: Get the phoneNumberId from the call
+#         phone_number_id = call.get("phoneNumberId")
+#         print("phone from vapi call id",phone_number_id)
+#         if not phone_number_id:
+#             continue
+
+#         # Step 4: Look up the number against the phoneNumberId
+#         pn_resp = requests.get(
+#             f"{VAPI_BASE_URL}/phone-number/{phone_number_id}", headers=headers
+#         )
+#         if pn_resp.status_code != 200:
+#             continue
+
+#         bot_number = pn_resp.json().get("number")
+#         print("bot number from vapi",bot_number)
+
+#         # Step 5: Match with realtor’s Twilio contact
+#         if bot_number != twilio_number:
+#             continue
+
+#         # Step 7: Extract recordings if available
+#         recording_url = call.get("artifact", {}).get("recordingUrl")
+        
+#         if recording_url:
+#                 recordings.append(
+#                     {
+#                         "url": recording_url
+#                     }
+#                 )
+
+#     return {"recordings": recordings}
