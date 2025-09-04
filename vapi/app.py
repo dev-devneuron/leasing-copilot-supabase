@@ -744,7 +744,7 @@ async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
             return obj
 
         bookings_data = serialize(bookings)
-        return JSONResponse(content=bookings_data)
+        return JSONResponse(content=jsonable_encoder(bookings_data))
 
 from fastapi import Depends, Header, HTTPException
 from sqlmodel import Session, select
