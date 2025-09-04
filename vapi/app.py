@@ -603,8 +603,6 @@ async def upload_listings(
 
 
 
-
-
 @app.post("/sync-listings")
 def run_sync():
     return sync_apartment_listings()
@@ -696,23 +694,21 @@ async def get_apartments(realtor_id: int = Depends(get_current_realtor_id)):
             select(ApartmentListing).where(ApartmentListing.source_id.in_(source_ids))
         ).all()
 
-        # Step 3: Serialize and exclude embeddings
-        def serialize(obj):
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            if hasattr(obj, "model_dump"):  # SQLModel / Pydantic model
-                data = obj.model_dump()
-                data.pop("embedding", None)  # remove embeddings field
-                return {k: serialize(v) for k, v in data.items()}
-            if isinstance(obj, list):
-                return [serialize(i) for i in obj]
-            if isinstance(obj, dict):
-                obj.pop("embedding", None)
-                return {k: serialize(v) for k, v in obj.items()}
-            return obj
+        # Step 3: Transform into frontend-friendly shape
+        result = []
+        for apt in apartments:
+            meta = apt.listing_metadata or {}
+            result.append({
+                "id": apt.id,
+                "address": meta.get("address"),
+                "price": meta.get("price"),
+                "bedrooms": meta.get("bedrooms"),
+                "bathrooms": meta.get("bathrooms"),
+                "description": meta.get("description"),
+            })
 
-        apartments_data = serialize(apartments)
-        return JSONResponse(content=apartments_data)
+        return JSONResponse(content=result)
+
 
 
 @app.get("/bookings")
