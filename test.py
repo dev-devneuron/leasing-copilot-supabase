@@ -1,78 +1,61 @@
-# from fastapi import Depends, HTTPException, Security,FastAPI
-# from sqlmodel import Session, select
-# import httpx
-# import os
-# from db import *
-# from auth_module import get_current_realtor_id
-# from sqlmodel import Session, select
+from twilio.rest import Client
+from collections import defaultdict
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
+# Load your Twilio creds from env or hardcode for testing
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
-# VAPI_API_KEY = "541ffaff-3f6d-4365-9320-0bb171f12bd7"
-# VAPI_BASE_URL = "https://api.vapi.ai"
-# headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# app=FastAPI()
+def get_all_chats(realtor_number: str):
+    # Ensure WhatsApp format
+    if not realtor_number.startswith("whatsapp:"):
+        realtor_number = f"whatsapp:{realtor_number}"
 
+    print(f"Fetching chats for {realtor_number}...")
 
+    # Fetch all incoming and outgoing messages
+    incoming = client.messages.list(to=realtor_number)   # no limit
+    print(f"Got {len(incoming)} incoming")
 
-# @app.get("/recordings")
-# def get_recordings(
-#      #realtor_id: int = Depends(get_current_realtor_id)
-#      ):
-#     realtor_id=71
-#     recordings = []
+    outgoing = client.messages.list(from_=realtor_number)  # no limit
+    print(f"Got {len(outgoing)} outgoing")
 
-#     # Step 1: Look up the realtor in DB to get their Twilio number
-#     with Session(engine) as session:
-#         realtor = session.exec(
-#             select(Realtor).where(Realtor.id == realtor_id)
-#         ).first()
+    messages = incoming + outgoing
+    print(f"Total messages fetched: {len(messages)}")
 
-#         if not realtor:
-#             raise HTTPException(status_code=404, detail="Realtor not found")
+    # Sort messages by sent date
+    messages = sorted(messages, key=lambda m: m.date_sent or datetime.min)
 
-#         if not realtor.twilio_contact:
-#             raise HTTPException(
-#                 status_code=400,
-#                 detail="Realtor does not have a Twilio contact configured"
-#             )
+    # Group messages by customer
+    chats = {}
+    for msg in messages:
+        if msg.from_ == realtor_number:
+            customer_number = msg.to
+        else:
+            customer_number = msg.from_
 
-#         twilio_number = realtor.twilio_contact
-#         print("from supabse got twilio contact:",twilio_number)
+        if customer_number not in chats:
+            chats[customer_number] = []
 
-#     # Step 2: Fetch all calls from VAPI
-#     resp = requests.get(f"{VAPI_BASE_URL}/call", headers=headers)
-#     calls = resp.json()
+        chats[customer_number].append({
+            "from": msg.from_,
+            "to": msg.to,
+            "body": msg.body,
+            "date": msg.date_sent.isoformat() if msg.date_sent else None
+        })
 
-#     for call in calls:
-#         # Step 3: Get the phoneNumberId from the call
-#         phone_number_id = call.get("phoneNumberId")
-#         print("phone from vapi call id",phone_number_id)
-#         if not phone_number_id:
-#             continue
+    return chats
 
-#         # Step 4: Look up the number against the phoneNumberId
-#         pn_resp = requests.get(
-#             f"{VAPI_BASE_URL}/phone-number/{phone_number_id}", headers=headers
-#         )
-#         if pn_resp.status_code != 200:
-#             continue
-
-#         bot_number = pn_resp.json().get("number")
-#         print("bot number from vapi",bot_number)
-
-#         # Step 5: Match with realtor’s Twilio contact
-#         if bot_number != twilio_number:
-#             continue
-
-#         # Step 7: Extract recordings if available
-#         recording_url = call.get("artifact", {}).get("recordingUrl")
-        
-#         if recording_url:
-#                 recordings.append(
-#                     {
-#                         "url": recording_url
-#                     }
-#                 )
-
-#     return {"recordings": recordings}
+if __name__ == "__main__":
+    chats = get_all_chats("+14155238886")  # sandbox number
+    if not chats:
+        print("No chats found.")
+    else:
+        for customer, msgs in chats.items():
+            print(f"\n--- Chat with {customer} ---")
+            for m in msgs:
+                print(f"[{m['date']}] {m['from']} -> {m['to']}: {m['body']}")

@@ -9,7 +9,6 @@ from fastapi.encoders import jsonable_encoder
 from sqlmodel import select, Session
 import httpx
 from httpx import TimeoutException
-from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi.responses import FileResponse, RedirectResponse, Response, PlainTextResponse
 from google_auth_oauthlib.flow import Flow
@@ -748,11 +747,14 @@ import jwt  # PyJWT
 from twilio.rest import Client
 
 TWILIO_ACCOUNT_SID2=os.getenv("TWILIO_ACCOUNT_SID2")
+TWILIO_ACCOUNT_SID1=os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN2")
+TWILIO_AUTH_TOKEN1=os.getenv("TWILIO_AUTH_TOKEN")
 VAPI_API_KEY2=os.getenv("VAPI_API_KEY2")
 VAPI_ASSISTANT_ID2=os.getenv("VAPI_ASSISTANT_ID2")
 
 twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN2)
+twillio_client1 = Client(TWILIO_ACCOUNT_SID1, TWILIO_AUTH_TOKEN1)
 
 def get_db():
     with Session(engine) as session:
@@ -836,6 +838,9 @@ def buy_number(
             return {"error": "Realtor not found"}
 
 
+
+
+
 @app.get("/my-number")
 def get_my_number(current_user: int = Depends(get_current_realtor_id)):
     with Session(engine) as session:
@@ -909,6 +914,51 @@ def get_recordings(
                 )
 
     return {"recordings": recordings}
+
+
+@app.get("/chat-history")
+async def get_all_chats(realtor_id: int = Depends(get_current_realtor_id)):
+    with Session(engine) as session:
+        realtor = session.get(Realtor, realtor_id)
+        realtor_number = realtor.twilio_contact  
+        realtor_number = "+14155238886"  
+
+    chats = get_all_chats(realtor_number)  # reuse the working function
+    return {"chats": chats}
+
+def get_all_chats(realtor_number: str):
+    # Ensure WhatsApp format
+    if not realtor_number.startswith("whatsapp:"):
+        realtor_number = f"whatsapp:{realtor_number}"
+
+    print(f"Fetching chats for {realtor_number}...")
+
+    # Fetch all incoming and outgoing messages
+    incoming = twillio_client1.messages.list(to=realtor_number)   # no limit
+    outgoing = twillio_client1.messages.list(from_=realtor_number)  # no limit
+    messages = incoming + outgoing
+    # Sort messages by sent date
+    messages = sorted(messages, key=lambda m: m.date_sent or datetime.min)
+
+    # Group messages by customer
+    chats = {}
+    for msg in messages:
+        if msg.from_ == realtor_number:
+            customer_number = msg.to
+        else:
+            customer_number = msg.from_
+
+        if customer_number not in chats:
+            chats[customer_number] = []
+
+        chats[customer_number].append({
+            "from": msg.from_,
+            "to": msg.to,
+            "body": msg.body,
+            "date": msg.date_sent.isoformat() if msg.date_sent else None
+        })
+
+    return chats
 
 
 

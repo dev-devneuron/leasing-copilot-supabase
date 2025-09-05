@@ -38,8 +38,6 @@ def get_current_realtor_id(
                     status_code=404,
                     detail="Realtor not found"
                 )
-
-            print(f"Authenticated Realtor ID: {realtor.id}")
             return realtor.id
 
     except jwt.ExpiredSignatureError:
