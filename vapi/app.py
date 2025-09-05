@@ -933,11 +933,12 @@ def get_all_chats(realtor_number: str):
 
     print(f"Fetching chats for {realtor_number}...")
 
-    # Fetch all incoming and outgoing messages
-    incoming = twillio_client1.messages.list(to=realtor_number)   # no limit
-    outgoing = twillio_client1.messages.list(from_=realtor_number)  # no limit
+    # Fetch all incoming and outgoing messages (pagination will be handled automatically by Twilio)
+    incoming = twillio_client1.messages.list(to=realtor_number)
+    outgoing = twillio_client1.messages.list(from_=realtor_number)
     messages = incoming + outgoing
-    # Sort messages by sent date
+
+    # Sort by date
     messages = sorted(messages, key=lambda m: m.date_sent or datetime.min)
 
     # Group messages by customer
@@ -945,21 +946,21 @@ def get_all_chats(realtor_number: str):
     for msg in messages:
         if msg.from_ == realtor_number:
             customer_number = msg.to
+            sender = "realtor"
         else:
             customer_number = msg.from_
+            sender = "customer"
 
         if customer_number not in chats:
             chats[customer_number] = []
 
         chats[customer_number].append({
-            "from": msg.from_,
-            "to": msg.to,
-            "body": msg.body,
-            "date": msg.date_sent.isoformat() if msg.date_sent else None
+            "sender": sender,  # realtor / customer
+            "message": msg.body,
+            "timestamp": msg.date_sent.isoformat() if msg.date_sent else None
         })
 
-    return chats
-
+    return {"chats": chats}
 
 
 
