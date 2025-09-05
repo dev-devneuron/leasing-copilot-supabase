@@ -917,14 +917,15 @@ def get_recordings(
 
 
 @app.get("/chat-history")
-async def get_all_chats(realtor_id: int = Depends(get_current_realtor_id)):
+async def get_all_chats_endpoint(realtor_id: int = Depends(get_current_realtor_id)):
     with Session(engine) as session:
         realtor = session.get(Realtor, realtor_id)
         realtor_number = realtor.twilio_contact  
         realtor_number = "+14155238886"  
 
-    chats = get_all_chats(realtor_number)  # reuse the working function
-    return {"chats": chats}
+    chats = get_all_chats(realtor_number)  # already returns {"chats": ...}
+    return chats   # don't wrap again!
+
 
 def get_all_chats(realtor_number: str):
     # Ensure WhatsApp format
