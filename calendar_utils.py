@@ -45,26 +45,6 @@ class GoogleCalendar(BaseCalendar):
 
         return build("calendar", "v3", credentials=creds)
 
-
-# class GoogleCalendar(BaseCalendar):
-#     def __init__(self, realtor_id: int):
-#         self.realtor_id = realtor_id
-#         self.token_file = f"tokens/token_{realtor_id}.pkl"
-#         print(self.token_file)
-
-#     def get_calendar_service(self):
-#         creds = None
-#         if os.path.exists(self.token_file):
-#             with open(self.token_file, "rb") as token:
-#                 print(self.token_file)
-#                 creds = pickle.load(token)
-#         if not creds or not creds.valid:
-#             if creds and creds.expired and creds.refresh_token:
-#                 creds.refresh(Request())
-#             else:
-#                 raise Exception(f"User {self.realtor_id} not authenticated. Please visit /authorize?realtor_id={self.realtor_id}")
-#         return build("calendar", "v3", credentials=creds)
-
     def create_event(self, start_time_str, summary, email, description="Apartment Visit Booking"):
         service = self.get_calendar_service()
         tz = timezone(DEFAULT_TIMEZONE)

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Form, Request,File,UploadFile,Depends
+from fastapi import FastAPI, HTTPException, Form, Request,File,UploadFile,Depends,Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Union
@@ -34,6 +34,8 @@ from fastapi import Body
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from sqlmodel import select, Session
+import jwt 
+from twilio.rest import Client
 
 
 load_dotenv()  # Load .env values
@@ -45,6 +47,24 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 VAPI_BASE_URL = "https://api.vapi.ai"
 headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+
+
+#--------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------
+# ----------------- For Automatic Number Buying from Twilio ---------------------
+TWILIO_ACCOUNT_SID2=os.getenv("TWILIO_ACCOUNT_SID2")
+TWILIO_ACCOUNT_SID1=os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN2")
+TWILIO_AUTH_TOKEN1=os.getenv("TWILIO_AUTH_TOKEN")
+VAPI_API_KEY2=os.getenv("VAPI_API_KEY2")
+VAPI_ASSISTANT_ID2=os.getenv("VAPI_ASSISTANT_ID2")
+
+twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN2)
+twillio_client1 = Client(TWILIO_ACCOUNT_SID1, TWILIO_AUTH_TOKEN1)
+
+#---------------------------------------------------------------------
+#---------------------------------------------------------------------
+
 
 rag = RAGEngine()  # pgvector RAG
 
@@ -533,9 +553,6 @@ async def create_realtor_endpoint(
     email: str = Form(...),
     password: str = Form(...),
     contact: str = Form(...),
-    #files: List[UploadFile] = File(...),
-    #listing_file: Optional[UploadFile] = File(None),
-    #listing_api_url: Optional[str] = Form(None)
 ):
     try:
         # Step 1: Create Supabase Auth user
@@ -550,14 +567,12 @@ async def create_realtor_endpoint(
         auth_user_id = str(auth_response.user.id)  # Supabase UUID
 
         # Step 2: Pass auth_user_id into DB creation function
-        result = create_realtor_with_files(
+        result = create_realtor(
             auth_user_id=auth_user_id,
             name=name,
             email=email,
             contact=contact,
-            #files=files,
-            #listing_file=listing_file,
-            #listing_api_url=listing_api_url
+           
         )
 
         return JSONResponse(content=result, status_code=200)
@@ -599,7 +614,6 @@ async def upload_listings(
         content={"message": "Listings uploaded & embedded"},
         status_code=200
     )
-
 
 
 @app.post("/sync-listings")
@@ -709,7 +723,6 @@ async def get_apartments(realtor_id: int = Depends(get_current_realtor_id)):
         return JSONResponse(content=result)
 
 
-
 @app.get("/bookings")
 async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
     print("bookings endpoint hit:", realtor_id)
@@ -741,20 +754,6 @@ async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
         bookings_data = serialize(bookings)
         return JSONResponse(content=jsonable_encoder(bookings_data))
 
-from fastapi import Depends, Header, HTTPException
-from sqlmodel import Session, select
-import jwt  # PyJWT
-from twilio.rest import Client
-
-TWILIO_ACCOUNT_SID2=os.getenv("TWILIO_ACCOUNT_SID2")
-TWILIO_ACCOUNT_SID1=os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN2=os.getenv("TWILIO_AUTH_TOKEN2")
-TWILIO_AUTH_TOKEN1=os.getenv("TWILIO_AUTH_TOKEN")
-VAPI_API_KEY2=os.getenv("VAPI_API_KEY2")
-VAPI_ASSISTANT_ID2=os.getenv("VAPI_ASSISTANT_ID2")
-
-twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN2)
-twillio_client1 = Client(TWILIO_ACCOUNT_SID1, TWILIO_AUTH_TOKEN1)
 
 def get_db():
     with Session(engine) as session:
@@ -836,10 +835,6 @@ def buy_number(
             }
         else:
             return {"error": "Realtor not found"}
-
-
-
-
 
 @app.get("/my-number")
 def get_my_number(current_user: int = Depends(get_current_realtor_id)):
@@ -923,8 +918,8 @@ async def get_all_chats_endpoint(realtor_id: int = Depends(get_current_realtor_i
         realtor_number = realtor.twilio_contact  
         realtor_number = "+14155238886"  
 
-    chats = get_all_chats(realtor_number)  # already returns {"chats": ...}
-    return chats   # don't wrap again!
+    chats = get_all_chats(realtor_number)  
+    return chats   
 
 
 def get_all_chats(realtor_number: str):

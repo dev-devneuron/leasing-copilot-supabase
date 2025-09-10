@@ -22,6 +22,10 @@ from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
 from config import BUCKET_NAME,SUPABASE_URL,SUPABASE_KEY,DATABASE_URL,SUPABASE_SERVICE_ROLE_KEY
 from uuid import UUID
+import jwt
+import json, csv, io, requests
+from langchain.schema import Document
+from langchain.text_splitter import CharacterTextSplitter
 
 load_dotenv()
 
@@ -68,8 +72,6 @@ class ChatSession(SQLModel, table=True):
 
     customer: Optional["Customer"] = Relationship(back_populates="chat_sessions")
 
-
-
 class Booking(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     address: str
@@ -84,9 +86,6 @@ class Booking(SQLModel, table=True):
     customer: Optional[Customer] = Relationship(back_populates="bookings_as_customer", sa_relationship_kwargs={"foreign_keys": "[Booking.cust_id]"})
     realtor: Optional[Realtor] = Relationship(back_populates="bookings")
 
-
-
-
 class RuleChunk(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)  # Auto-increment primary key
     source_id: int = Field(foreign_key="source.id")
@@ -95,7 +94,6 @@ class RuleChunk(SQLModel, table=True):
     embedding: List[float] = Field(sa_column=Column(Vector(768)))
 
     source: Optional["Source"] = Relationship(back_populates="rule_chunks")
-
 
 class ApartmentListing(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True) 
@@ -107,7 +105,6 @@ class ApartmentListing(SQLModel, table=True):
 
     source: Optional["Source"] = Relationship(back_populates="listings")
 
-
 class Source(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, alias="source_id")
     realtor_id: int = Field(foreign_key="realtor.id")
@@ -115,7 +112,6 @@ class Source(SQLModel, table=True):
     realtor: Optional[Realtor] = Relationship(back_populates="sources")
     rule_chunks: List["RuleChunk"] = Relationship(back_populates="source")
     listings: List["ApartmentListing"] = Relationship(back_populates="source")
-
 
 
 # ---------------------- EMBEDDING SETUP ----------------------
@@ -140,7 +136,7 @@ embedder = GeminiEmbedder()
 
 def embed_text(text: str) -> List[float]:
     return embedder.embed_text(text)
-#embedder.embed_query(text)
+#embedder.embed_query(text) if using huggingface embedder
 def embed_documents(texts: List[str]) -> List[List[float]]:
     return embedder.embed_documents(texts)
 
@@ -159,18 +155,11 @@ def init_vector_db():
 
     
 #---------------------CRUD OPERATIONS----------------------------
-import jwt
+
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 decoded = jwt.decode(SUPABASE_SERVICE_KEY, options={"verify_signature": False})
 print("ROLEEEEE:",decoded.get("role"))
-
-
-
-from typing import Optional
-import json, csv, io, requests
-from langchain.schema import Document
-from langchain.text_splitter import CharacterTextSplitter
 
 
 
@@ -187,14 +176,11 @@ def listing_to_text(listing: dict) -> str:
         print("listing_to_text error:", e)
         return "Invalid listing format."
 
-def create_realtor_with_files(
+def create_realtor(
     auth_user_id: str,
     name: str,
     email: str,
     contact: str,
-    #files: List[UploadFile],
-    #listing_file: Optional[UploadFile] = None,
-    #listing_api_url: Optional[str] = None
 ):
     with Session(engine) as session:
         # Check for duplicate realtor
@@ -224,107 +210,9 @@ def create_realtor_with_files(
         session.commit()
         session.refresh(source)
         print("source created")
-
-        # uploaded_files = []
-        # splitter = CharacterTextSplitter(separator="\n", chunk_size=500, chunk_overlap=50)
-        # all_chunks = []
-        # print("chunking done")
-        # # 4. Process each document file (rules/guidelines)
-        # for file in files:
-        #     content_bytes = file.file.read()
-        #     file_content = content_bytes.decode("utf-8")
-        #     file_path = f"realtors/{realtor.id}/{file.filename}"
-
-        #     # Upload to Supabase
-        #     response = supabase.storage.from_(BUCKET_NAME).upload(
-        #         file_path,
-        #         content_bytes,
-        #         file_options={"content-type": file.content_type}
-        #     )
-
-        #     if isinstance(response, dict) and "error" in response:
-        #         raise HTTPException(status_code=500, detail=response["error"]["message"])
-
-        #     file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
-        #     uploaded_files.append(file_url)
-        #     print("files uploaded:",uploaded_files)
-
-        #     # Split and collect chunks
-        #     document = Document(page_content=file_content, metadata={"source": file.filename})
-        #     chunk_docs = splitter.split_documents([document])
-        #     chunks = [doc.page_content for doc in chunk_docs]
-        #     all_chunks.extend(chunks)
-
-
-        # # 5. Insert rule chunks into DB
-        # insert_rule_chunks(all_chunks, source_id=source.id)
-        # print("rules chunk inserted")
-
-        # # 6. Handle listing data: file OR API URL
-        # listing_chunks = []
-        # listing_text = ""
-
-        # if listing_file:
-        #     content = listing_file.file.read()
-        #     if listing_file.filename.endswith(".json"):
-        #         print("received json")
-        #         parsed = json.loads(content)
-        #         listing_text = json.dumps(parsed, indent=2)
-        #     elif listing_file.filename.endswith(".csv"):
-        #         print("received csv")
-        #         decoded = content.decode("utf-8")
-        #         reader = csv.DictReader(io.StringIO(decoded))
-        #         rows = [row for row in reader]
-        #         listing_text = json.dumps(rows, indent=2)
-        #     else:
-        #         raise HTTPException(status_code=400, detail="Unsupported listing file format")
-
-        #     # Upload the listing file to Supabase
-        #     listing_path = f"realtors/{realtor.id}/listings/{listing_file.filename}"
-        #     response = supabase.storage.from_(BUCKET_NAME).upload(
-        #         listing_path,
-        #         content,
-        #         file_options={"content-type": listing_file.content_type}
-        #     )
-        #     print("uploaded lisitng file")
-
-        # elif listing_api_url:
-        #     response = requests.get(listing_api_url)
-        #     if response.status_code != 200:
-        #         raise HTTPException(status_code=400, detail="Failed to fetch data from API URL")
-        #     listing_data = response.json()
-        #     listing_text = json.dumps(listing_data, indent=2)
-        #     print("fetched data")
-
-        # if listing_text:
-        #     try:
-        #         listings = json.loads(listing_text)
-        #         if isinstance(listings, dict):  # ensure it's a list
-        #             listings = [listings]
         
-        #         formatted_texts = [listing_to_text(l) for l in listings]
-        #         embeddings = embed_documents(formatted_texts)
-
-        #         listing_records = [
-        #             {"text": formatted_texts[i], "metadata": listings[i], "embedding": embeddings[i]}
-        #             for i in range(len(listings))
-        #         ]
-
-        #         insert_listing_records(realtor.id, listing_records)
-
-        #         print("Listings processed successfully.")
-        #     except Exception as e:
-        #         print("add_listings error:", e)
-        #         raise HTTPException(status_code=500, detail=f"Failed to process listing: {e}")
-
-
-        # 8. Return response
         auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?realtor_id={realtor.id}"
         
-        #9. Sync Main DB
-        #from sync import sync_apartment_listings
-        #sync_apartment_listings()
-
         return {
             "message": "Realtor created, rules uploaded, listings processed (not stored)",
             "realtor": {
@@ -333,9 +221,6 @@ def create_realtor_with_files(
                 "email": realtor.email,
                 "contact": realtor.contact
             },
-            # "uploaded_files": uploaded_files,
-            #"listing_file_provided": bool(listing_file),
-            #"listing_api_url": listing_api_url,
             "auth_link": auth_link
         }
 
@@ -570,33 +455,6 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 # ---------------------- EMBEDDING HELPERS ----------------------
 
-# def insert_rule_chunks(source_id: int, chunks: List[str]):
-#     try:
-    
-#         embeddings = embedder.embed_documents(chunks)
-#         records = []
-#         for chunk, embedding in zip(chunks, embeddings):
-#             records.append({
-#                 "content": chunk,
-#                 "embedding": embedding,
-#                 "source_id": source_id
-#             })
-#         print("records created, storing in supabase")
-#         response = supabase.table("rulechunk").insert(records).execute()
-#         print("inserted")
-#         print(response.__dict__)  # <-- log full response for debugging
-
-#         if hasattr(response, "error") and response.error:
-#             raise HTTPException(
-#                 status_code=500,
-#                 detail=f"Supabase insert error: {response.error.message}"
-#             )
-
-#         return {"message": f"Inserted {len(records)} rule chunks successfully."}
-
-#     except Exception as e:
-#         print("Error inserting rule chunks:", str(e))
-#         raise HTTPException(status_code=500, detail=str(e))
 
 
 
