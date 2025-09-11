@@ -89,8 +89,7 @@ class VapiRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
-    init_vector_db()
+    init_db()
 
     yield  # This is where FastAPI app runs
 
@@ -150,7 +149,6 @@ def create_customer(request: VapiRequest):
 @app.post("/query_docs/")
 def query_docs(request: VapiRequest):
 
-
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "queryDocs":
             args = tool_call.function.arguments
@@ -199,7 +197,6 @@ def query_docs(request: VapiRequest):
         return {"results": [{"toolCallId": tool_call.id, "result": response}]}
 
     raise HTTPException(status_code=400, detail="Invalid tool call")
-
 
 
 @app.post("/confirm_address/")
@@ -357,7 +354,7 @@ def get_slots(request: VapiRequest):
 # temp store
 temp_state_store = {}
 
-
+#-------------------- Google Calendar ------------------------------------
 @app.get("/authorize/")
 def authorize_realtor(realtor_id: int):
     flow = Flow.from_client_secrets_file(
@@ -417,7 +414,7 @@ def health_check():
     return {"status": "healthy", "message": "Lease Copilot is running"}
 
 # ------------------ Twilio WhatsApp ------------------ #
-
+# specifically for chat bot 
 @app.post("/twilio-incoming")
 async def twilio_incoming(
     request: Request,

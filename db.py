@@ -50,7 +50,6 @@ class Realtor(SQLModel, table=True):
     sources: List["Source"] = Relationship(back_populates="realtor")
     bookings: List["Booking"] = Relationship(back_populates="realtor")
 
-
 class Customer(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, alias="cust_id")
     name: Optional[str] = None
@@ -62,7 +61,6 @@ class Customer(SQLModel, table=True):
         back_populates="customer", sa_relationship_kwargs={"foreign_keys": "[Booking.cust_id]"}
     )
     chat_sessions: List["ChatSession"] = Relationship(back_populates="customer")
-
 
 class ChatSession(SQLModel, table=True):
     chat_id: str = Field(primary_key=True)
@@ -148,19 +146,12 @@ def init_db():
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     SQLModel.metadata.create_all(engine)
 
-
-#------------------------Embedding Init---------------------------
-def init_vector_db():
-    init_db()  # Ensure tables and vector extension are initialized
-
     
 #---------------------CRUD OPERATIONS----------------------------
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 decoded = jwt.decode(SUPABASE_SERVICE_KEY, options={"verify_signature": False})
-print("ROLEEEEE:",decoded.get("role"))
-
 
 
 def listing_to_text(listing: dict) -> str:
@@ -282,7 +273,6 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
     except Exception as e:
         # catch anything unexpected
         raise HTTPException(status_code=500, detail=f"Unexpected error in embed_and_store_rules: {str(e)}")
-
 
 
 def embed_and_store_listings(listing_file, listing_api_url: str = None, realtor_id: int = None):
@@ -457,7 +447,6 @@ def increment_message_count(contact_number: str, on_date: date) -> None:
 
 
 
-
 def insert_rule_chunks(source_id: int, chunks: List[str]):
     try:
         embeddings = embedder.embed_documents(chunks)
@@ -565,6 +554,7 @@ def fetch_apartments_from_url():
         ingest_apartment_data(listings, from_file=False)
     else:
         print("API call failed:", response.status_code)
+
 
 def create_booking_entry(address: str, booking_date: date, booking_time: time, contact: str) -> Booking:
     with Session(engine) as session:
