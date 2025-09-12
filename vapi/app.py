@@ -97,6 +97,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
 # set orgin here
 origins = [
      "https://react-app-form.onrender.com/",
@@ -414,7 +415,7 @@ def health_check():
     return {"status": "healthy", "message": "Lease Copilot is running"}
 
 # ------------------ Twilio WhatsApp ------------------ #
-# specifically for chat bot 
+# specifically for whatsapp chat bot 
 @app.post("/twilio-incoming")
 async def twilio_incoming(
     request: Request,
@@ -445,7 +446,7 @@ async def twilio_incoming(
          payload["previousChatId"] = prev_chat_id
 
     # Send to Vapi
-    #print(f"Sending message to Vapi with previousChatId={prev_chat_id}")
+
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -464,7 +465,6 @@ async def twilio_incoming(
 
     if response.status_code not in [200, 201]:
         error_details = response.text  
-        #print(f"Vapi error: {response.status_code} - {error_details}")
         return PlainTextResponse(
         f"Error with Vapi: {response.status_code} - {error_details}",
         status_code=response.status_code
@@ -581,6 +581,7 @@ async def create_realtor_endpoint(
 # -----------------------------
 # Endpoints
 # -----------------------------
+
 @app.post("/UploadRules")
 async def upload_rules(
     files: list[UploadFile] = File(...),

@@ -33,6 +33,7 @@ load_dotenv()
 
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 # ---------------------- MODELS ----------------------
@@ -176,7 +177,9 @@ def create_realtor(
     with Session(engine) as session:
         # Check for duplicate realtor
         existing_realtor = session.exec(
+
             select(Realtor).where((Realtor.email == email) | (Realtor.contact == contact))
+            
         ).first()
 
         if existing_realtor:
@@ -253,6 +256,7 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
             # Split into chunks
             try:
                 document = Document(page_content=file_content, metadata={"source": file.filename})
+
                 chunk_docs = splitter.split_documents([document])
                 chunks = [doc.page_content for doc in chunk_docs]
                 all_chunks.extend(chunks)
@@ -520,7 +524,7 @@ def ingest_apartment_data(data: Union[str, List[Dict[str, Any]]], from_file: boo
 def search_rules(query: str, source_id: int, k: int = 3) -> List[str]:
     qvec = embed_text(query)
     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
-
+   
     sql = text(f"""
         SELECT content 
         FROM rulechunk
@@ -547,6 +551,7 @@ def search_apartments(query: str, k: int = 5) -> List[Dict]:
 
 # ---------------------- OPTIONAL: Fetch from URL ----------------------
 
+#needed later
 def fetch_apartments_from_url():
     response = requests.get("https://zillow.com/mls/listings")
     if response.ok:

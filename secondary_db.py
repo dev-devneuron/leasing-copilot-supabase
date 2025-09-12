@@ -118,5 +118,7 @@ def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
             except Exception as e:
                 print(f"[Insert Error] Failed to add listing: {e}")
         session.commit()
+
         sync_apartment_listings()
+        
         print(f"[SUCCESS] Listings inserted into {table_name}")
