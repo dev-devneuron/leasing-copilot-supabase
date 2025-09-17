@@ -52,7 +52,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-# ---------------------- MODELS ----------------------
+# ----------------------Table MODELS ----------------------
 
 
 class Realtor(SQLModel, table=True):
@@ -138,7 +138,6 @@ class Source(SQLModel, table=True):
     realtor: Optional[Realtor] = Relationship(back_populates="sources")
     rule_chunks: List["RuleChunk"] = Relationship(back_populates="source")
     listings: List["ApartmentListing"] = Relationship(back_populates="source")
-
 
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:
