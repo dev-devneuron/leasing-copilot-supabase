@@ -8,9 +8,10 @@ from config import EMBED_DIM
 from db import engine, ApartmentListing, Source
 from secondary_db import engine1
 
+
 def listing_hash(text: str, metadata: dict) -> str:
     serialized = text + json.dumps(metadata, sort_keys=True)
-    return hashlib.md5(serialized.encode('utf-8')).hexdigest()
+    return hashlib.md5(serialized.encode("utf-8")).hexdigest()
 
 
 def create_dynamic_listing_class(table_name: str):
@@ -59,9 +60,7 @@ def sync_apartment_listings() -> Dict[str, Any]:
         sec_map = {
             listing_hash(l.text, l.listing_metadata): l for l in secondary_listings
         }
-        main_map = {
-            listing_hash(l.text, l.listing_metadata): l for l in main_listings
-        }
+        main_map = {listing_hash(l.text, l.listing_metadata): l for l in main_listings}
 
         new_hashes = set(sec_map) - set(main_map)
         removed_hashes = set(main_map) - set(sec_map)
@@ -78,24 +77,28 @@ def sync_apartment_listings() -> Dict[str, Any]:
         with Session(engine) as main_session:
             for h in new_hashes:
                 l = sec_map[h]
-                main_session.add(ApartmentListing(
-                    source_id=source_id,
-                    text=l.text,
-                    listing_metadata=l.listing_metadata,
-                    embedding=l.embedding
-                ))
+                main_session.add(
+                    ApartmentListing(
+                        source_id=source_id,
+                        text=l.text,
+                        listing_metadata=l.listing_metadata,
+                        embedding=l.embedding,
+                    )
+                )
 
             for h in removed_hashes:
                 main_session.delete(main_map[h])
 
             main_session.commit()
 
-        summary.append({
-            "realtor_id": realtor_id,
-            "status": "success",
-            "added": len(new_hashes),
-            "removed": len(removed_hashes)
-        })
+        summary.append(
+            {
+                "realtor_id": realtor_id,
+                "status": "success",
+                "added": len(new_hashes),
+                "removed": len(removed_hashes),
+            }
+        )
 
     print("\nSync finished for all sources.")
     return {"sync_summary": summary}

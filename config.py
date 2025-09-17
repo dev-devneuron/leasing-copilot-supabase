@@ -8,18 +8,18 @@ import httpx
 load_dotenv()
 
 
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 #                    SUPABASE CONFIG
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 BUCKET_NAME = "realtor-files"
 
-#for bucket collection
+# for bucket collection
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 DATABASE_URL = os.getenv("DATABASE_1_URL")
-SUPABASE_JWT_SECRET =os.getenv("SUPABASE_JWT_SECRET")
-SUPABASE_SERVICE_ROLE_KEY= os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-#--------------------------------------------------------------------
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# --------------------------------------------------------------------
 
 # Embedding dimensions
 EMBED_DIM = 768
@@ -41,19 +41,15 @@ RULES_FILE = os.getenv("RULES_FILE", "Rules.txt")
 DATA_FILE = os.getenv("DATA_FILE", "data.json")
 CHAT_SESSIONS_FILE = "chat_session.json"
 timeout = httpx.Timeout(25.0)
-LIMIT_FILE="messageLimits.json"
-DAILY_LIMIT= 50
-
+LIMIT_FILE = "messageLimits.json"
+DAILY_LIMIT = 50
 
 
 # ========================================
 # Application Settings
 # ========================================
 DEFAULT_TIMEZONE = "Asia/Karachi"
-WORKING_HOURS = {
-     "start": 8,  # 8 AM
-     "end": 21    # 9 PM
- }
+WORKING_HOURS = {"start": 8, "end": 21}  # 8 AM  # 9 PM
 SLOT_DURATION = 30  # minutes
 
 
@@ -61,19 +57,13 @@ SLOT_DURATION = 30  # minutes
 # Zillow URL Settings
 # ========================================
 ZILLOW_BASE_URL = "https://www.zillow.com/_sp/homes/for_sale/"
-DEFAULT_MAP_BOUNDS = {
-    "west": -77.2,
-    "east": -76.8,
-    "south": 35.6,
-    "north": 35.9
-}
-
+DEFAULT_MAP_BOUNDS = {"west": -77.2, "east": -76.8, "south": 35.6, "north": 35.9}
 
 
 # ========================================
 # Google Calendar Settings
 # ========================================
-GOOGLE_CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar']
+GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 # Model names
@@ -82,4 +72,4 @@ LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "models/gemini-2.0-flash")
 
 # Other constants (add as needed)
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 800))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50)) 
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))

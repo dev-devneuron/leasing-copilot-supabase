@@ -1,8 +1,11 @@
-
 from datetime import date, datetime
 from typing import Dict, Any
 
-from db import increment_message_count, get_message_count, init_db  # Import from your db.py
+from db import (
+    increment_message_count,
+    get_message_count,
+    init_db,
+)  # Import from your db.py
 from sqlmodel import Session
 
 
@@ -32,6 +35,5 @@ class MessageLimiter:
             "current_count": current_count,
             "daily_limit": self.daily_limit,
             "remaining": max(0, self.daily_limit - current_count),
-            "date": today.isoformat()
+            "date": today.isoformat(),
         }
-

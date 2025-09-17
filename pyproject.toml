@@ -1,0 +1,59 @@
+[tool.poetry]
+name = "fastapi-app"
+version = "0.1.0"
+description = "FastAPI backend application"
+authors = ["Ahmad Fraz"]
+readme = "README.md"
+package-mode = false
+
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+# Core framework
+fastapi = "0.115.13"
+uvicorn = { extras = ["standard"], version = "0.34.3" }
+pydantic = "2.11.7"
+
+# Machine Learning / AI
+torch = { version = "2.7.1", source = "pytorch-cpu" }
+transformers = "4.53.0"
+sentence-transformers = "5.0.0"
+faiss-cpu = "1.11.0"
+langchain = "0.3.26"
+langchain-community = "0.3.27"
+langchain-huggingface = "0.3.0"
+
+# Utils
+python-multipart = "0.0.20"
+httpx = "0.28.1"
+python-dotenv = "1.1.1"
+pytz = "2025.2"
+
+# Database
+sqlmodel = "*"
+sqlalchemy = "*"
+psycopg2-binary = "*"
+pgvector = "*"
+supabase = "*"
+
+# External APIs
+twilio = "*"
+google-auth = "2.40.3"
+google-auth-oauthlib = "1.2.2"
+google-api-python-client = "2.173.0"
+google-generativeai = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+black = "*"
+ruff = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "supplemental"

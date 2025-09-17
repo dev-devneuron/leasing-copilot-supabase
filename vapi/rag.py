@@ -1,4 +1,3 @@
-
 # vapi/rag.py
 import json
 from langchain_community.document_loaders import TextLoader
@@ -12,7 +11,7 @@ from db import (
 
 class RAGEngine:
     def __init__(self):
-       pass  
+        pass
 
     # --------- INDEXING ---------
     # def build_rules_index(self):
@@ -33,7 +32,6 @@ class RAGEngine:
 
     #     insert_apartments(listings, self.listing_to_text)
     #     print(f"Inserted {len(listings)} apartment listings into pgvector.")
-
 
     def query(self, question: str, source_id: int, k: int = 3) -> str:
         """Finds top-k relevant rule chunks for a question, filtered by source_id."""

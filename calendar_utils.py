@@ -8,6 +8,8 @@ from pytz import timezone, utc
 from config import DEFAULT_TIMEZONE, WORKING_HOURS, SLOT_DURATION
 import abc
 from db import *
+
+
 class BaseCalendar(abc.ABC):
     @abc.abstractmethod
     def create_event(self, start_time_str, summary, email):
@@ -21,31 +23,38 @@ class BaseCalendar(abc.ABC):
     def get_free_slots(self, date_str, tz_str=None):
         pass
 
+
 class GoogleCalendar(BaseCalendar):
     def __init__(self, realtor_id: int):
         self.realtor_id = realtor_id
 
     def get_calendar_service(self):
-     with Session(engine) as session:
-        statement = select(Realtor).where(Realtor.id == self.realtor_id)
-        result = session.exec(statement).first()
+        with Session(engine) as session:
+            statement = select(Realtor).where(Realtor.id == self.realtor_id)
+            result = session.exec(statement).first()
 
-        if not result or not result.credentials:
-            raise Exception(f"User {self.realtor_id} not authenticated. Please visit /authorize?realtor_id={self.realtor_id}")
+            if not result or not result.credentials:
+                raise Exception(
+                    f"User {self.realtor_id} not authenticated. Please visit /authorize?realtor_id={self.realtor_id}"
+                )
 
-        creds = Credentials.from_authorized_user_info(json.loads(result.credentials))
+            creds = Credentials.from_authorized_user_info(
+                json.loads(result.credentials)
+            )
 
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
 
-            # Optional: Save updated credentials back
-            result.credentials = creds.to_json()
-            session.add(result)
-            session.commit()
+                # Optional: Save updated credentials back
+                result.credentials = creds.to_json()
+                session.add(result)
+                session.commit()
 
-        return build("calendar", "v3", credentials=creds)
+            return build("calendar", "v3", credentials=creds)
 
-    def create_event(self, start_time_str, summary, email, description="Apartment Visit Booking"):
+    def create_event(
+        self, start_time_str, summary, email, description="Apartment Visit Booking"
+    ):
         service = self.get_calendar_service()
         tz = timezone(DEFAULT_TIMEZONE)
         if isinstance(start_time_str, datetime):
@@ -57,26 +66,32 @@ class GoogleCalendar(BaseCalendar):
                 try:
                     start_time = datetime.strptime(start_time_str, "%Y-%m-%d %I:%M %p")
                 except ValueError:
-                    raise ValueError("Invalid date format. Use 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM AM/PM'")
+                    raise ValueError(
+                        "Invalid date format. Use 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM AM/PM'"
+                    )
 
         start_time = tz.localize(start_time)
         end_time = start_time + timedelta(minutes=30)
 
         event = {
-            'summary': summary,
-            'description': description,
-            'start': {
-                'dateTime': start_time.isoformat(),
-                'timeZone': DEFAULT_TIMEZONE,
+            "summary": summary,
+            "description": description,
+            "start": {
+                "dateTime": start_time.isoformat(),
+                "timeZone": DEFAULT_TIMEZONE,
             },
-            'end': {
-                'dateTime': end_time.isoformat(),
-                'timeZone': DEFAULT_TIMEZONE,
+            "end": {
+                "dateTime": end_time.isoformat(),
+                "timeZone": DEFAULT_TIMEZONE,
             },
-            'attendees': [{'email': email}],
+            "attendees": [{"email": email}],
         }
 
-        event = service.events().insert(calendarId='primary', body=event, sendUpdates='all').execute()
+        event = (
+            service.events()
+            .insert(calendarId="primary", body=event, sendUpdates="all")
+            .execute()
+        )
         print("Event URL:", event.get("htmlLink"))
         return event
 
@@ -93,21 +108,27 @@ class GoogleCalendar(BaseCalendar):
                 try:
                     start_time = datetime.strptime(start_time_str, "%Y-%m-%d %I:%M %p")
                 except ValueError:
-                    raise ValueError("Invalid date format. Use 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM AM/PM'")
+                    raise ValueError(
+                        "Invalid date format. Use 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM AM/PM'"
+                    )
 
         start_time = tz.localize(start_time)
         start_utc = start_time.astimezone(utc)
         end_utc = (start_time + timedelta(minutes=30)).astimezone(utc)
 
-        events_result = service.events().list(
-            calendarId='primary',
-            timeMin=start_utc.isoformat(),
-            timeMax=end_utc.isoformat(),
-            singleEvents=True,
-            orderBy='startTime'
-        ).execute()
+        events_result = (
+            service.events()
+            .list(
+                calendarId="primary",
+                timeMin=start_utc.isoformat(),
+                timeMax=end_utc.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        )
 
-        events = events_result.get('items', [])
+        events = events_result.get("items", [])
         return len(events) == 0
 
     def get_free_slots(self, date_str, tz_str=None):
@@ -125,7 +146,7 @@ class GoogleCalendar(BaseCalendar):
             "timeMin": start.isoformat(),
             "timeMax": end.isoformat(),
             "timeZone": tz_str,
-            "items": [{"id": "primary"}]
+            "items": [{"id": "primary"}],
         }
 
         events = service.freebusy().query(body=body).execute()
@@ -136,8 +157,8 @@ class GoogleCalendar(BaseCalendar):
         while current < end:
             next_slot = current + timedelta(minutes=SLOT_DURATION)
             overlap = any(
-                datetime.fromisoformat(b["start"]).astimezone(tz) < next_slot and
-                datetime.fromisoformat(b["end"]).astimezone(tz) > current
+                datetime.fromisoformat(b["start"]).astimezone(tz) < next_slot
+                and datetime.fromisoformat(b["end"]).astimezone(tz) > current
                 for b in busy_times
             )
             if not overlap:

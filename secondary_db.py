@@ -83,6 +83,7 @@ def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
 
     # Define dynamic model class dynamically
     if table_name not in SQLModel.metadata.tables:
+
         class DynamicListing(SQLModel, table=True):
             __tablename__ = table_name
             __table_args__ = {"extend_existing": True}
@@ -99,7 +100,9 @@ def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
     # Create table if it doesn’t exist
     if not inspector.has_table(table_name):
         print(f"[INFO] Creating table {table_name}")
-        SQLModel.metadata.create_all(engine1, tables=[SQLModel.metadata.tables[table_name]])
+        SQLModel.metadata.create_all(
+            engine1, tables=[SQLModel.metadata.tables[table_name]]
+        )
     else:
         print(f"[INFO] Table {table_name} already exists, skipping creation.")
 
@@ -109,10 +112,14 @@ def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
     with Session(engine1) as session:
         for listing in listings:
             try:
-                record = SQLModel.metadata.tables[table_name].insert().values(
-                    text=listing["text"],
-                    listing_metadata=listing["metadata"],
-                    embedding=listing["embedding"],
+                record = (
+                    SQLModel.metadata.tables[table_name]
+                    .insert()
+                    .values(
+                        text=listing["text"],
+                        listing_metadata=listing["metadata"],
+                        embedding=listing["embedding"],
+                    )
                 )
                 session.exec(record)
             except Exception as e:
@@ -120,5 +127,5 @@ def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):
         session.commit()
 
         sync_apartment_listings()
-        
+
         print(f"[SUCCESS] Listings inserted into {table_name}")
