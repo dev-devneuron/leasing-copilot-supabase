@@ -143,6 +143,7 @@ class Source(SQLModel, table=True):
 class GeminiEmbedder:
     def __init__(self, model_name="models/embedding-001"):
         embd_key = os.getenv("GEMINI_API_KEY")
+        print("embd_key",embd_key)
         genai.configure(api_key=embd_key)
         self.model_name = model_name
 
