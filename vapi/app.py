@@ -40,9 +40,9 @@ from config import (
     TWILIO_PHONE_NUMBER,
     SCOPES,
 )
-from sqlalchemy import update
+from sqlalchemy import update, text
 from fastapi.middleware.cors import CORSMiddleware
-from sync import sync_apartment_listings
+from DB.sync import sync_apartment_listings
 from utils.auth_module import get_current_realtor_id
 from fastapi import Body
 from fastapi import Request
@@ -50,6 +50,7 @@ from fastapi.responses import JSONResponse
 from sqlmodel import select, Session
 import jwt
 from twilio.rest import Client
+import requests
 
 
 load_dotenv()  # Load .env values
