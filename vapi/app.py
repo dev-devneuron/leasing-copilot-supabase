@@ -40,7 +40,7 @@ from config import (
     TWILIO_PHONE_NUMBER,
     SCOPES,
 )
-from sqlalchemy import update, text
+from sqlalchemy import update
 from fastapi.middleware.cors import CORSMiddleware
 from DB.sync import sync_apartment_listings
 from utils.auth_module import get_current_realtor_id
@@ -50,7 +50,6 @@ from fastapi.responses import JSONResponse
 from sqlmodel import select, Session
 import jwt
 from twilio.rest import Client
-import requests
 
 
 load_dotenv()  # Load .env values
@@ -310,11 +309,6 @@ def book_visit(request: VapiRequest):
 
             with Session(engine) as session:
                 # Find the listing by matching address substring in text
-                if not address:
-                    raise HTTPException(
-                        status_code=400, detail="Address is required"
-                    )
-                
                 statement = select(ApartmentListing).where(
                     ApartmentListing.text.contains(address)
                 )
@@ -396,11 +390,6 @@ def get_slots(request: VapiRequest):
                 )
 
             # 1. Find the listing by matching address substring in text
-            if not address:
-                raise HTTPException(
-                    status_code=400, detail="Address is required"
-                )
-            
             statement = select(ApartmentListing).where(
                 ApartmentListing.text.contains(address)
             )

@@ -4,7 +4,9 @@ from typing import Dict, Any
 from DB.db import (
     increment_message_count,
     get_message_count,
-)  # Import from your DB/db.py
+    init_db,
+)  # Import from your db.py
+from sqlmodel import Session
 
 
 class MessageLimiter:

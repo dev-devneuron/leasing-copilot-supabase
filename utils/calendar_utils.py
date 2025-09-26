@@ -139,15 +139,24 @@ class GoogleCalendar(BaseCalendar):
             # Get calendar service with error handling
             service = self.get_calendar_service()
             if not service:
-                raise Exception("Failed to initialize calendar service")
+                print("Error: Calendar service is None")
+                return []
         except Exception as e:
             print(f"Error getting calendar service: {e}")
             return []
 
         try:
+            # Parse date with error handling
             tz = timezone(tz_str)
             date = datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError as e:
+            print(f"Invalid date format '{date_str}': {e}")
+            return []
+        except Exception as e:
+            print(f"Error parsing date/timezone: {e}")
+            return []
 
+        try:
             start = tz.localize(date.replace(hour=WORKING_HOURS["start"], minute=0))
             end = tz.localize(date.replace(hour=WORKING_HOURS["end"], minute=0))
 
@@ -161,8 +170,12 @@ class GoogleCalendar(BaseCalendar):
             # Execute freebusy query with error handling
             try:
                 events = service.freebusy().query(body=body).execute()
-                if not events or "calendars" not in events:
-                    print("No calendar data received from Google Calendar API")
+                if not events:
+                    print("No response from Google Calendar API")
+                    return []
+                
+                if "calendars" not in events:
+                    print("Invalid response structure from Google Calendar API")
                     return []
                 
                 busy_times = events["calendars"]["primary"].get("busy", [])
@@ -182,7 +195,7 @@ class GoogleCalendar(BaseCalendar):
                         and datetime.fromisoformat(b["end"]).astimezone(tz) > current
                         for b in busy_times
                     )
-                except (ValueError, KeyError) as e:
+                except (ValueError, KeyError, TypeError) as e:
                     print(f"Error parsing busy time data: {e}")
                     # If we can't parse the busy times, assume no overlap
                     overlap = False
@@ -193,9 +206,6 @@ class GoogleCalendar(BaseCalendar):
 
             return slots
 
-        except ValueError as e:
-            print(f"Invalid date format: {e}")
-            return []
         except Exception as e:
             print(f"Unexpected error in get_free_slots: {e}")
             return []
