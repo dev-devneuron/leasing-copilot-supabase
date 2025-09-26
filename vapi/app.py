@@ -28,8 +28,8 @@ from fastapi.responses import (
 from google_auth_oauthlib.flow import Flow
 from twilio.twiml.messaging_response import MessagingResponse
 from contextlib import asynccontextmanager
-from db import *
-from calendar_utils import GoogleCalendar
+from DB.db import *
+from utils.calendar_utils import GoogleCalendar
 from vapi.rag import RAGEngine
 from vapi.bounded_usage import MessageLimiter
 from config import (
@@ -43,7 +43,7 @@ from config import (
 from sqlalchemy import update
 from fastapi.middleware.cors import CORSMiddleware
 from sync import sync_apartment_listings
-from auth_module import get_current_realtor_id
+from utils.auth_module import get_current_realtor_id
 from fastapi import Body
 from fastapi import Request
 from fastapi.responses import JSONResponse

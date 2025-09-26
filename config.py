@@ -36,12 +36,9 @@ REDIRECT_URI = "https://leasing-copilot-mvp.onrender.com/oauth2callback"
 # ========================================
 CREDENTIALS_FILE = "gCalendar.json"
 TOKEN_FILE = "token.pkl"
-LIMIT_FILE = "messageLimits.json"
-RULES_FILE = os.getenv("RULES_FILE", "Rules.txt")
-DATA_FILE = os.getenv("DATA_FILE", "data.json")
-CHAT_SESSIONS_FILE = "chat_session.json"
+#RULES_FILE = os.getenv("RULES_FILE", "Rules.txt")
+#DATA_FILE = os.getenv("DATA_FILE", "data.json")
 timeout = httpx.Timeout(25.0)
-LIMIT_FILE = "messageLimits.json"
 DAILY_LIMIT = 50
 
 

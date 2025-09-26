@@ -5,8 +5,8 @@ from sqlmodel import Session, SQLModel, Field, select
 from sqlalchemy import Column, String, JSON
 from pgvector.sqlalchemy import Vector
 from config import EMBED_DIM
-from db import engine, ApartmentListing, Source
-from secondary_db import engine1
+from DB.db import engine, ApartmentListing, Source
+from DB.secondary_db import engine1
 
 
 def listing_hash(text: str, metadata: dict) -> str:

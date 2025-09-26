@@ -3,7 +3,7 @@ import json
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
 
-from db import (
+from DB.db import (
     search_rules,
     search_apartments,
 )

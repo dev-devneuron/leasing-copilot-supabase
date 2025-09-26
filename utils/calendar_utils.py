@@ -7,7 +7,7 @@ import pickle
 from pytz import timezone, utc
 from config import DEFAULT_TIMEZONE, WORKING_HOURS, SLOT_DURATION
 import abc
-from db import *
+from DB.db import *
 
 
 class BaseCalendar(abc.ABC):
