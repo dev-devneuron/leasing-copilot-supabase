@@ -22,7 +22,7 @@ from langchain_core.documents import Document
 from sqlmodel import SQLModel, Field, Relationship
 from pgvector.sqlalchemy import Vector
 from typing import Optional, List, Dict, Any
-from secondary_db import insert_listing_records
+from .secondary_db import insert_listing_records
 from sqlmodel import Session, select
 from datetime import date
 from supabase import create_client, Client
