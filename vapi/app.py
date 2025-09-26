@@ -310,6 +310,11 @@ def book_visit(request: VapiRequest):
 
             with Session(engine) as session:
                 # Find the listing by matching address substring in text
+                if not address:
+                    raise HTTPException(
+                        status_code=400, detail="Address is required"
+                    )
+                
                 statement = select(ApartmentListing).where(
                     ApartmentListing.text.contains(address)
                 )
@@ -391,6 +396,11 @@ def get_slots(request: VapiRequest):
                 )
 
             # 1. Find the listing by matching address substring in text
+            if not address:
+                raise HTTPException(
+                    status_code=400, detail="Address is required"
+                )
+            
             statement = select(ApartmentListing).where(
                 ApartmentListing.text.contains(address)
             )
