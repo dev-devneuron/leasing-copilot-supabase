@@ -1,7 +1,7 @@
 from fastapi import Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-from db import engine, Realtor
+from DB.db import engine, Realtor
 from sqlmodel import Session, select
 from config import SUPABASE_JWT_SECRET
 
