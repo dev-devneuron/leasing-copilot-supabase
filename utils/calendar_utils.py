@@ -135,34 +135,67 @@ class GoogleCalendar(BaseCalendar):
         if tz_str is None:
             tz_str = DEFAULT_TIMEZONE
 
-        service = self.get_calendar_service()
-        tz = timezone(tz_str)
-        date = datetime.strptime(date_str, "%Y-%m-%d")
+        try:
+            # Get calendar service with error handling
+            service = self.get_calendar_service()
+            if not service:
+                raise Exception("Failed to initialize calendar service")
+        except Exception as e:
+            print(f"Error getting calendar service: {e}")
+            return []
 
-        start = tz.localize(date.replace(hour=WORKING_HOURS["start"], minute=0))
-        end = tz.localize(date.replace(hour=WORKING_HOURS["end"], minute=0))
+        try:
+            tz = timezone(tz_str)
+            date = datetime.strptime(date_str, "%Y-%m-%d")
 
-        body = {
-            "timeMin": start.isoformat(),
-            "timeMax": end.isoformat(),
-            "timeZone": tz_str,
-            "items": [{"id": "primary"}],
-        }
+            start = tz.localize(date.replace(hour=WORKING_HOURS["start"], minute=0))
+            end = tz.localize(date.replace(hour=WORKING_HOURS["end"], minute=0))
 
-        events = service.freebusy().query(body=body).execute()
-        busy_times = events["calendars"]["primary"].get("busy", [])
+            body = {
+                "timeMin": start.isoformat(),
+                "timeMax": end.isoformat(),
+                "timeZone": tz_str,
+                "items": [{"id": "primary"}],
+            }
 
-        slots = []
-        current = start
-        while current < end:
-            next_slot = current + timedelta(minutes=SLOT_DURATION)
-            overlap = any(
-                datetime.fromisoformat(b["start"]).astimezone(tz) < next_slot
-                and datetime.fromisoformat(b["end"]).astimezone(tz) > current
-                for b in busy_times
-            )
-            if not overlap:
-                slots.append(current.strftime("%I:%M %p"))
-            current = next_slot
+            # Execute freebusy query with error handling
+            try:
+                events = service.freebusy().query(body=body).execute()
+                if not events or "calendars" not in events:
+                    print("No calendar data received from Google Calendar API")
+                    return []
+                
+                busy_times = events["calendars"]["primary"].get("busy", [])
+            except Exception as e:
+                print(f"Error querying calendar freebusy: {e}")
+                return []
 
-        return slots
+            slots = []
+            current = start
+            while current < end:
+                next_slot = current + timedelta(minutes=SLOT_DURATION)
+                
+                # Check for overlaps with error handling
+                try:
+                    overlap = any(
+                        datetime.fromisoformat(b["start"]).astimezone(tz) < next_slot
+                        and datetime.fromisoformat(b["end"]).astimezone(tz) > current
+                        for b in busy_times
+                    )
+                except (ValueError, KeyError) as e:
+                    print(f"Error parsing busy time data: {e}")
+                    # If we can't parse the busy times, assume no overlap
+                    overlap = False
+                
+                if not overlap:
+                    slots.append(current.strftime("%I:%M %p"))
+                current = next_slot
+
+            return slots
+
+        except ValueError as e:
+            print(f"Invalid date format: {e}")
+            return []
+        except Exception as e:
+            print(f"Unexpected error in get_free_slots: {e}")
+            return []
