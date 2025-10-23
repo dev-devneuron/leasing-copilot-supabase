@@ -19,8 +19,14 @@ Thumbs.db
 
 # Environment and secrets
 .env
+env_template.txt
+*.env
+.env.local
+.env.production
 
+# Credentials and sensitive files
 token.pkl
+gCalendar.json
 
 # Logs
 *.log
