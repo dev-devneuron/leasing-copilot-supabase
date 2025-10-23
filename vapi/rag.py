@@ -1,7 +1,7 @@
 # vapi/rag.py
 import json
 from langchain_community.document_loaders import TextLoader
-from langchain.text_splitter import CharacterTextSplitter
+from langchain_text_splitters import CharacterTextSplitter
 
 from DB.db import (
     search_rules,
