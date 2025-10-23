@@ -1017,7 +1017,7 @@ def get_data_access_scope(user_type: str, user_id: int) -> Dict[str, Any]:
         elif user_type == "realtor":
             # Realtors can only access their own data
             realtor = session.exec(
-                select(Realtor).where(Realtor.id == user_id)
+                select(Realtor).where(Realtor.realtor_id == user_id)
             ).first()
             
             if not realtor:

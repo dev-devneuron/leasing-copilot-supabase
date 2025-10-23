@@ -39,7 +39,7 @@ def get_current_realtor_id(
                     status_code=404,
                     detail="Realtor not found"
                 )
-            return realtor.id
+            return realtor.realtor_id
 
     except jwt.ExpiredSignatureError:
         raise HTTPException(

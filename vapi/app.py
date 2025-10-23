@@ -320,7 +320,7 @@ def book_visit(request: VapiRequest):
 
                 # Get source using source_id
                 print("Source ID:", listing.source_id)
-                statement = select(Source).where(Source.id == listing.source_id)
+                statement = select(Source).where(Source.source_id == listing.source_id)
                 source = session.exec(statement).first()
                 if not source:
                     raise HTTPException(status_code=404, detail="Source not found")
@@ -401,7 +401,7 @@ def get_slots(request: VapiRequest):
 
             # 2. Get source using the source_id
             print("Source ID (slots):", listing.source_id)
-            statement = select(Source).where(Source.id == listing.source_id)
+            statement = select(Source).where(Source.source_id == listing.source_id)
             source = session.exec(statement).first()
             if not source:
                 raise HTTPException(status_code=404, detail="Source not found")
@@ -472,7 +472,7 @@ def oauth2callback(request: Request):
 
         stmt = (
             update(Realtor)
-            .where(Realtor.id == realtor_id)
+            .where(Realtor.realtor_id == realtor_id)
             .values(credentials=json.dumps(credentials_data))
         )
 
@@ -937,7 +937,7 @@ async def get_bookings(user_data: dict = Depends(get_current_user_data)):
             realtors = session.exec(
                 select(Realtor).where(Realtor.property_manager_id == user_id)
             ).all()
-            realtor_ids = [r.id for r in realtors]
+            realtor_ids = [r.realtor_id for r in realtors]
             
             if not realtor_ids:
                 return JSONResponse(content={"bookings": []})
@@ -995,7 +995,7 @@ def buy_number(
     realtor = db.exec(
         select(Realtor).where(Realtor.auth_user_id == auth_user_id)
     ).first()
-    print("Realtor id recv:", realtor.id)
+    print("Realtor id recv:", realtor.realtor_id)
     if not realtor:
         raise HTTPException(status_code=404, detail="Realtor not found")
 
@@ -1023,7 +1023,7 @@ def buy_number(
         "twilioAccountSid": TWILIO_ACCOUNT_SID2,
         "twilioAuthToken": TWILIO_AUTH_TOKEN2,
         "assistantId": VAPI_ASSISTANT_ID2,
-        "name": f"Realtor {realtor.id} Bot Number",
+        "name": f"Realtor {realtor.realtor_id} Bot Number",
     }
 
     response = requests.post(
@@ -1037,7 +1037,7 @@ def buy_number(
 
     #  Save Twilio number to realtor table
     with Session(engine) as session:
-        realtor = session.get(Realtor, realtor.id)  # fetch existing realtor by ID
+        realtor = session.get(Realtor, realtor.realtor_id)  # fetch existing realtor by ID
         if realtor:
             # Save the Twilio number in the twilio_contact field
             realtor.twilio_contact = purchased.phone_number
@@ -1051,7 +1051,7 @@ def buy_number(
             return {
                 "twilio_contact": realtor.twilio_contact,
                 "twilio_sid": realtor.twilio_sid,
-                "realtor_id": realtor.id,
+                "realtor_id": realtor.realtor_id,
                 "vapi_response": response.json(),
             }
         else:
@@ -1061,7 +1061,7 @@ def buy_number(
 @app.get("/my-number")
 def get_my_number(current_user: int = Depends(get_current_realtor_id)):
     with Session(engine) as session:
-        statement = select(Realtor).where(Realtor.id == current_user)
+        statement = select(Realtor).where(Realtor.realtor_id == current_user)
         realtor = session.exec(statement).first()
         print("Hey realtor:", realtor)
 
@@ -1079,7 +1079,7 @@ def get_recordings(realtor_id: int = Depends(get_current_realtor_id)):
 
     # Step 1: Look up the realtor in DB to get their Twilio number
     with Session(engine) as session:
-        realtor = session.exec(select(Realtor).where(Realtor.id == realtor_id)).first()
+        realtor = session.exec(select(Realtor).where(Realtor.realtor_id == realtor_id)).first()
 
         if not realtor:
             raise HTTPException(status_code=404, detail="Realtor not found")
