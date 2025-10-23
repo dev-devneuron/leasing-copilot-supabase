@@ -43,7 +43,7 @@ from config import (
 from sqlalchemy import update
 from fastapi.middleware.cors import CORSMiddleware
 from DB.sync import sync_apartment_listings
-from utils.auth_module import get_current_realtor_id
+from utils.auth_module import get_current_realtor_id, get_current_user_data
 from fastapi import Body
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -605,13 +605,50 @@ async def upload_realtor_files(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/CreatePropertyManager")
+async def create_property_manager_endpoint(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    contact: str = Form(...),
+    company_name: str = Form(None),
+):
+    """Create a new Property Manager."""
+    try:
+        # Step 1: Create Supabase Auth user
+        auth_response = supabase.auth.sign_up({"email": email, "password": password})
+
+        if not auth_response.user:
+            raise HTTPException(
+                status_code=400, detail="Failed to create Supabase user"
+            )
+
+        auth_user_id = str(auth_response.user.id)  # Supabase UUID
+
+        # Step 2: Pass auth_user_id into DB creation function
+        result = create_property_manager(
+            auth_user_id=auth_user_id,
+            name=name,
+            email=email,
+            contact=contact,
+            company_name=company_name,
+        )
+
+        return JSONResponse(content=result, status_code=200)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/CreateRealtor")
 async def create_realtor_endpoint(
     name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
     contact: str = Form(...),
+    property_manager_id: int = Form(None),
 ):
+    """Create a new Realtor (standalone or under a Property Manager)."""
     try:
         # Step 1: Create Supabase Auth user
         auth_response = supabase.auth.sign_up({"email": email, "password": password})
@@ -629,6 +666,7 @@ async def create_realtor_endpoint(
             name=name,
             email=email,
             contact=contact,
+            property_manager_id=property_manager_id,
         )
 
         return JSONResponse(content=result, status_code=200)
@@ -680,66 +718,69 @@ def run_sync():
 
 
 @app.post("/login")
-async def login(response: Response, payload: dict = Body(...), request: Request = None):
+async def login_realtor(response: Response, payload: dict = Body(...), request: Request = None):
+    """Login endpoint for Realtors (standalone or managed)."""
     email = payload.get("email")
     password = payload.get("password")
-    print("received", email, password)
+    print("Realtor login attempt:", email)
+    
     try:
-        # Authenticate with Supabase
-        auth_result = supabase.auth.sign_in_with_password(
-            {"email": email, "password": password}
+        result = authenticate_realtor(email, password)
+        
+        # Store refresh token in secure cookie
+        response.set_cookie(
+            key="refresh_token",
+            value=result["refresh_token"],
+            httponly=True,
+            secure=True,  # Use HTTPS in production
+            samesite="strict",
+            max_age=60 * 60 * 24 * 30,  # 30 days
         )
-
-        if not auth_result.user:
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-
-        uid = auth_result.user.id
-        refresh_token = auth_result.session.refresh_token
-
-        # Get realtor_id from your DB
-        with Session(engine) as session:
-            realtor = session.exec(
-                select(Realtor).where(Realtor.auth_user_id == uid)
-            ).first()
-
-            if not realtor:
-                raise HTTPException(status_code=404, detail="Realtor not found")
-            print(realtor.id)
-
-            # Store refresh token in secure cookie
-            response.set_cookie(
-                key="refresh_token",
-                value=refresh_token,
-                httponly=True,
-                secure=True,  # Use HTTPS in production
-                samesite="strict",
-                max_age=60 * 60 * 24 * 30,  # 30 days
-            )
-            print("login successful")
-            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
-
-        return {
-            "message": "Login successful",
-            "auth_link": auth_link,
-            "access_token": auth_result.session.access_token,  # or wherever your token is
-            "refresh_token": refresh_token,
-            "user": {
-                "uid": uid,
-                "realtor_id": realtor.id,
-                "name": realtor.name,
-                "email": realtor.email,
-            },
-        }
+        
+        print("Realtor login successful")
+        return result
 
     except HTTPException:
         raise  # re-raise known HTTP errors as is
 
     except Exception as e:
         import traceback
-
         tb = traceback.format_exc()
-        print(f"Exception during login: {e}\nTraceback:\n{tb}")
-        raise HTTPException(status_code=400, detail=f"Login failed: {e}")
+        print(f"Exception during realtor login: {e}\nTraceback:\n{tb}")
+        raise HTTPException(status_code=400, detail=f"Realtor login failed: {e}")
+
+
+@app.post("/property-manager-login")
+async def login_property_manager(response: Response, payload: dict = Body(...), request: Request = None):
+    """Login endpoint for Property Managers."""
+    email = payload.get("email")
+    password = payload.get("password")
+    print("Property Manager login attempt:", email)
+    
+    try:
+        result = authenticate_property_manager(email, password)
+        
+        # Store refresh token in secure cookie
+        response.set_cookie(
+            key="refresh_token",
+            value=result["refresh_token"],
+            httponly=True,
+            secure=True,  # Use HTTPS in production
+            samesite="strict",
+            max_age=60 * 60 * 24 * 30,  # 30 days
+        )
+        
+        print("Property Manager login successful")
+        return result
+
+    except HTTPException:
+        raise  # re-raise known HTTP errors as is
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"Exception during property manager login: {e}\nTraceback:\n{tb}")
+        raise HTTPException(status_code=400, detail=f"Property Manager login failed: {e}")
 
 
 # ----------------------------------------------------
@@ -748,26 +789,29 @@ async def login(response: Response, payload: dict = Body(...), request: Request 
 
 
 @app.get("/apartments")
-async def get_apartments(realtor_id: int = Depends(get_current_realtor_id)):
-    print("apartment was hit:", realtor_id)
+async def get_apartments(user_data: dict = Depends(get_current_user_data)):
+    """Get apartments based on user type and data access scope."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    print(f"Getting apartments for {user_type} ID: {user_id}")
+
+    # Get data access scope
+    access_scope = get_data_access_scope(user_type, user_id)
+    source_ids = access_scope["source_ids"]
+
+    if not source_ids:
+        return JSONResponse(
+            content={"message": "No sources found for this user"}, status_code=404
+        )
 
     with Session(engine) as session:
-        # Step 1: Get source_ids for this realtor
-        source_ids = session.exec(
-            select(Source.id).where(Source.realtor_id == realtor_id)
-        ).all()
-
-        if not source_ids:
-            return JSONResponse(
-                content={"message": "No sources found"}, status_code=404
-            )
-
-        # Step 2: Get apartments for these source_ids
+        # Get apartments for accessible source_ids
         apartments = session.exec(
             select(ApartmentListing).where(ApartmentListing.source_id.in_(source_ids))
         ).all()
 
-        # Step 3: Transform into frontend-friendly shape
+        # Transform into frontend-friendly shape
         result = []
         for apt in apartments:
             meta = apt.listing_metadata or {}
@@ -785,39 +829,143 @@ async def get_apartments(realtor_id: int = Depends(get_current_realtor_id)):
         return JSONResponse(content=result)
 
 
+@app.get("/managed-realtors")
+async def get_managed_realtors(user_data: dict = Depends(get_current_user_data)):
+    """Get managed realtors (only for Property Managers)."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403, 
+            detail="Only Property Managers can access this endpoint"
+        )
+    
+    realtors = get_managed_realtors(user_id)
+    return JSONResponse(content={"managed_realtors": realtors})
+
+
+@app.get("/user-profile")
+async def get_user_profile(user_data: dict = Depends(get_current_user_data)):
+    """Get current user's profile information."""
+    return JSONResponse(content={"user": user_data})
+
+
+# ---------------------- TEST USER MANAGEMENT ----------------------
+
+@app.post("/create-test-team")
+async def create_test_team():
+    """Create a test team: 1 Property Manager + 2 Realtors (for development only)."""
+    try:
+        from utils.password_manager import PasswordManager
+        password_manager = PasswordManager()
+        
+        result = password_manager.create_test_team()
+        
+        if result["success"]:
+            return JSONResponse(content={
+                "message": "Test team created successfully!",
+                "created_users": result["created_users"],
+                "total_users": result["total_users"],
+                "test_credentials": result["test_credentials"]
+            })
+        else:
+            return JSONResponse(
+                content={"error": "Failed to create test team", "details": result},
+                status_code=500
+            )
+            
+    except Exception as e:
+        return JSONResponse(
+            content={"error": f"Failed to create test team: {str(e)}"},
+            status_code=500
+        )
+
+
+@app.get("/test-users")
+async def list_test_users():
+    """List all test users with their credentials (for development only)."""
+    try:
+        from utils.password_manager import PasswordManager
+        password_manager = PasswordManager()
+        
+        users = password_manager.list_all_test_users()
+        
+        return JSONResponse(content={
+            "test_users": users,
+            "count": len(users)
+        })
+        
+    except Exception as e:
+        return JSONResponse(
+            content={"error": f"Failed to list test users: {str(e)}"},
+            status_code=500
+        )
+
+
+@app.post("/reset-test-users")
+async def reset_test_users():
+    """Reset all test users (for development only)."""
+    try:
+        from utils.password_manager import PasswordManager
+        password_manager = PasswordManager()
+        
+        password_manager.reset_test_users()
+        
+        return JSONResponse(content={
+            "message": "All test users have been reset successfully!"
+        })
+        
+    except Exception as e:
+        return JSONResponse(
+            content={"error": f"Failed to reset test users: {str(e)}"},
+            status_code=500
+        )
+
+
 @app.get("/bookings")
-async def get_bookings(realtor_id: int = Depends(get_current_realtor_id)):
-    print("bookings endpoint hit:", realtor_id)
+async def get_bookings(user_data: dict = Depends(get_current_user_data)):
+    """Get bookings based on user type and data access scope."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    print(f"Getting bookings for {user_type} ID: {user_id}")
 
     with Session(engine) as session:
-        # Step 1: Get bookings for this realtor directly
-        bookings = session.exec(
-            select(Booking).where(Booking.realtor_id == realtor_id)
-        ).all()
+        if user_type == "property_manager":
+            # Property managers can see bookings from all their realtors
+            realtors = session.exec(
+                select(Realtor).where(Realtor.property_manager_id == user_id)
+            ).all()
+            realtor_ids = [r.id for r in realtors]
+            
+            if not realtor_ids:
+                return JSONResponse(content={"bookings": []})
+            
+            bookings = session.exec(
+                select(Booking).where(Booking.realtor_id.in_(realtor_ids))
+            ).all()
+        else:
+            # Realtors can only see their own bookings
+            bookings = session.exec(
+                select(Booking).where(Booking.realtor_id == user_id)
+            ).all()
 
-        if not bookings:
-            return JSONResponse(
-                content={"message": "You dont have any booking at the moment."},
-                status_code=404,
-            )
+        # Transform bookings for response
+        result = []
+        for booking in bookings:
+            result.append({
+                "id": booking.id,
+                "address": booking.address,
+                "date": booking.date.isoformat() if booking.date else None,
+                "time": booking.time.isoformat() if booking.time else None,
+                "visited": booking.visited,
+                "customer_feedback": booking.cust_feedback,
+                "customer_id": booking.cust_id,
+                "realtor_id": booking.realtor_id,
+            })
 
-        # Step 2: Serialize and remove embeddings if present
-        def serialize(obj):
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            if hasattr(obj, "model_dump"):  # SQLModel / Pydantic model
-                data = obj.model_dump()
-                data.pop("embedding", None)  # remove embeddings if exists
-                return {k: serialize(v) for k, v in data.items()}
-            if isinstance(obj, list):
-                return [serialize(i) for i in obj]
-            if isinstance(obj, dict):
-                obj.pop("embedding", None)
-                return {k: serialize(v) for k, v in obj.items()}
-            return obj
-
-        bookings_data = serialize(bookings)
-        return JSONResponse(content=jsonable_encoder(bookings_data))
+        return JSONResponse(content={"bookings": result})
 
 
 def get_db():

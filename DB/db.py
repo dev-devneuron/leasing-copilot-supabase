@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict, Union, Any
-from datetime import date, time
+from datetime import date, time, datetime
 from sqlmodel import (
     SQLModel,
     Field,
@@ -54,6 +54,23 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 # ----------------------Table MODELS ----------------------
 
+class PropertyManager(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True, alias="property_manager_id")
+    auth_user_id: UUID = Field(index=True)
+    name: str
+    email: str
+    contact: str
+    company_name: Optional[str] = None
+    twilio_contact: str
+    twilio_sid: Optional[str] = None
+    credentials: Optional[str] = Field(default=None)  # Store as serialized JSON string
+    created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+
+    # Relationships
+    managed_realtors: List["Realtor"] = Relationship(back_populates="property_manager")
+    sources: List["Source"] = Relationship(back_populates="property_manager")
+
 
 class Realtor(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, alias="realtor_id")
@@ -64,7 +81,15 @@ class Realtor(SQLModel, table=True):
     twilio_contact: str
     twilio_sid: Optional[str] = None
     credentials: Optional[str] = Field(default=None)  # Store as serialized JSON string
+    
+    # Property Manager relationship (optional for standalone realtors)
+    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.id")
+    is_standalone: bool = Field(default=True)  # True if not under any property manager
+    created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
 
+    # Relationships
+    property_manager: Optional["PropertyManager"] = Relationship(back_populates="managed_realtors")
     sources: List["Source"] = Relationship(back_populates="realtor")
     bookings: List["Booking"] = Relationship(back_populates="realtor")
 
@@ -133,8 +158,18 @@ class ApartmentListing(SQLModel, table=True):
 
 class Source(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, alias="source_id")
-    realtor_id: int = Field(foreign_key="realtor.id")
+    
+    # Can belong to either a Property Manager or a Realtor
+    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.id")
+    realtor_id: Optional[int] = Field(default=None, foreign_key="realtor.id")
+    
+    # Ensure at least one is set
+    __table_args__ = (
+        PrimaryKeyConstraint('id'),
+        # Add constraint to ensure either property_manager_id or realtor_id is set
+    )
 
+    property_manager: Optional["PropertyManager"] = Relationship(back_populates="sources")
     realtor: Optional[Realtor] = Relationship(back_populates="sources")
     rule_chunks: List["RuleChunk"] = Relationship(back_populates="source")
     listings: List["ApartmentListing"] = Relationship(back_populates="source")
@@ -203,12 +238,72 @@ def listing_to_text(listing: dict) -> str:
         return "Invalid listing format."
 
 
+def create_property_manager(
+    auth_user_id: str,
+    name: str,
+    email: str,
+    contact: str,
+    company_name: str = None,
+):
+    """Create a new Property Manager."""
+    with Session(engine) as session:
+        # Check for duplicate property manager
+        existing_pm = session.exec(
+            select(PropertyManager).where(
+                (PropertyManager.email == email) | (PropertyManager.contact == contact)
+            )
+        ).first()
+
+        if existing_pm:
+            raise HTTPException(
+                status_code=400,
+                detail="Property Manager with this email or contact already exists",
+            )
+
+        # Create new Property Manager
+        property_manager = PropertyManager(
+            auth_user_id=auth_user_id,
+            name=name,
+            email=email,
+            contact=contact,
+            company_name=company_name,
+            twilio_contact="TBD",
+        )
+        session.add(property_manager)
+        session.commit()
+        session.refresh(property_manager)
+        print("Property Manager created")
+
+        # Create Source for Property Manager
+        source = Source(property_manager_id=property_manager.id)
+        session.add(source)
+        session.commit()
+        session.refresh(source)
+        print("Source created for Property Manager")
+
+        auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?property_manager_id={property_manager.id}"
+
+        return {
+            "message": "Property Manager created successfully",
+            "property_manager": {
+                "id": property_manager.id,
+                "name": property_manager.name,
+                "email": property_manager.email,
+                "contact": property_manager.contact,
+                "company_name": property_manager.company_name,
+            },
+            "auth_link": auth_link,
+        }
+
+
 def create_realtor(
     auth_user_id: str,
     name: str,
     email: str,
     contact: str,
+    property_manager_id: Optional[int] = None,
 ):
+    """Create a new Realtor (standalone or under a Property Manager)."""
     with Session(engine) as session:
         # Check for duplicate realtor
         existing_realtor = session.exec(
@@ -223,35 +318,50 @@ def create_realtor(
                 detail="Realtor with this email or contact already exists",
             )
 
-        # Create new Realtor with Supabase auth UUID
+        # Validate property manager if provided
+        if property_manager_id:
+            property_manager = session.exec(
+                select(PropertyManager).where(PropertyManager.id == property_manager_id)
+            ).first()
+            if not property_manager:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Property Manager not found",
+                )
+
+        # Create new Realtor
         realtor = Realtor(
-            auth_user_id=auth_user_id,  # new field
+            auth_user_id=auth_user_id,
             name=name,
             email=email,
             contact=contact,
             twilio_contact="TBD",
+            property_manager_id=property_manager_id,
+            is_standalone=property_manager_id is None,
         )
         session.add(realtor)
         session.commit()
         session.refresh(realtor)
-        print("realtor created")
+        print("Realtor created")
 
-        # 3. Create Source and assign to Realtor
+        # Create Source for Realtor
         source = Source(realtor_id=realtor.id)
         session.add(source)
         session.commit()
         session.refresh(source)
-        print("source created")
+        print("Source created for Realtor")
 
         auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?realtor_id={realtor.id}"
 
         return {
-            "message": "Realtor created, rules uploaded, listings processed (not stored)",
+            "message": "Realtor created successfully",
             "realtor": {
                 "id": realtor.id,
                 "name": realtor.name,
                 "email": realtor.email,
                 "contact": realtor.contact,
+                "property_manager_id": realtor.property_manager_id,
+                "is_standalone": realtor.is_standalone,
             },
             "auth_link": auth_link,
         }
@@ -699,3 +809,223 @@ def create_customer_entry(
             session.commit()
             session.refresh(new_customer)
             return new_customer
+
+
+# ---------------------- HIERARCHICAL AUTHENTICATION ----------------------
+
+def authenticate_property_manager(email: str, password: str) -> Dict[str, Any]:
+    """Authenticate a Property Manager and return their data."""
+    try:
+        # Authenticate with Supabase
+        auth_result = supabase.auth.sign_in_with_password(
+            {"email": email, "password": password}
+        )
+
+        if not auth_result.user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        uid = auth_result.user.id
+        refresh_token = auth_result.session.refresh_token
+
+        # Get property manager from DB
+        with Session(engine) as session:
+            property_manager = session.exec(
+                select(PropertyManager).where(PropertyManager.auth_user_id == uid)
+            ).first()
+
+            if not property_manager:
+                raise HTTPException(status_code=404, detail="Property Manager not found")
+
+            # Get managed realtors
+            managed_realtors = session.exec(
+                select(Realtor).where(Realtor.property_manager_id == property_manager.id)
+            ).all()
+
+            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?property_manager_id={property_manager.id}"
+
+            return {
+                "message": "Property Manager login successful",
+                "auth_link": auth_link,
+                "access_token": auth_result.session.access_token,
+                "refresh_token": refresh_token,
+                "property_manager_id": property_manager.id,
+                "user_type": "property_manager",
+                "user": {
+                    "uid": uid,
+                    "property_manager_id": property_manager.id,
+                    "name": property_manager.name,
+                    "email": property_manager.email,
+                    "company_name": property_manager.company_name,
+                    "managed_realtors_count": len(managed_realtors),
+                },
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Property Manager authentication error: {e}")
+        raise HTTPException(status_code=400, detail=f"Authentication failed: {e}")
+
+
+def authenticate_realtor(email: str, password: str) -> Dict[str, Any]:
+    """Authenticate a Realtor and return their data."""
+    try:
+        # Authenticate with Supabase
+        auth_result = supabase.auth.sign_in_with_password(
+            {"email": email, "password": password}
+        )
+
+        if not auth_result.user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        uid = auth_result.user.id
+        refresh_token = auth_result.session.refresh_token
+
+        # Get realtor from DB
+        with Session(engine) as session:
+            realtor = session.exec(
+                select(Realtor).where(Realtor.auth_user_id == uid)
+            ).first()
+
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+
+            # Get property manager info if realtor is managed
+            property_manager_info = None
+            if realtor.property_manager_id:
+                property_manager = session.exec(
+                    select(PropertyManager).where(PropertyManager.id == realtor.property_manager_id)
+                ).first()
+                if property_manager:
+                    property_manager_info = {
+                        "id": property_manager.id,
+                        "name": property_manager.name,
+                        "company_name": property_manager.company_name,
+                    }
+
+            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
+
+            return {
+                "message": "Realtor login successful",
+                "auth_link": auth_link,
+                "access_token": auth_result.session.access_token,
+                "refresh_token": refresh_token,
+                "realtor_id": realtor.id,
+                "user_type": "realtor",
+                "user": {
+                    "uid": uid,
+                    "realtor_id": realtor.id,
+                    "name": realtor.name,
+                    "email": realtor.email,
+                    "is_standalone": realtor.is_standalone,
+                    "property_manager": property_manager_info,
+                },
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Realtor authentication error: {e}")
+        raise HTTPException(status_code=400, detail=f"Authentication failed: {e}")
+
+
+def get_user_data_by_auth_id(auth_user_id: str) -> Dict[str, Any]:
+    """Get user data by Supabase auth user ID (for middleware)."""
+    with Session(engine) as session:
+        # Try Property Manager first
+        property_manager = session.exec(
+            select(PropertyManager).where(PropertyManager.auth_user_id == auth_user_id)
+        ).first()
+        
+        if property_manager:
+            return {
+                "user_type": "property_manager",
+                "id": property_manager.id,
+                "name": property_manager.name,
+                "email": property_manager.email,
+                "company_name": property_manager.company_name,
+            }
+        
+        # Try Realtor
+        realtor = session.exec(
+            select(Realtor).where(Realtor.auth_user_id == auth_user_id)
+        ).first()
+        
+        if realtor:
+            return {
+                "user_type": "realtor",
+                "id": realtor.id,
+                "name": realtor.name,
+                "email": realtor.email,
+                "is_standalone": realtor.is_standalone,
+                "property_manager_id": realtor.property_manager_id,
+            }
+        
+        raise HTTPException(status_code=404, detail="User not found")
+
+
+def get_managed_realtors(property_manager_id: int) -> List[Dict[str, Any]]:
+    """Get all realtors managed by a property manager."""
+    with Session(engine) as session:
+        realtors = session.exec(
+            select(Realtor).where(Realtor.property_manager_id == property_manager_id)
+        ).all()
+        
+        return [
+            {
+                "id": realtor.id,
+                "name": realtor.name,
+                "email": realtor.email,
+                "contact": realtor.contact,
+                "is_standalone": realtor.is_standalone,
+                "created_at": realtor.created_at,
+            }
+            for realtor in realtors
+        ]
+
+
+def get_data_access_scope(user_type: str, user_id: int) -> Dict[str, Any]:
+    """Determine what data a user can access based on their role."""
+    with Session(engine) as session:
+        if user_type == "property_manager":
+            # Property managers can access their own data and their realtors' data
+            source_ids = session.exec(
+                select(Source.id).where(
+                    (Source.property_manager_id == user_id) |
+                    (Source.realtor_id.in_(
+                        select(Realtor.id).where(Realtor.property_manager_id == user_id)
+                    ))
+                )
+            ).all()
+            
+            return {
+                "user_type": "property_manager",
+                "user_id": user_id,
+                "source_ids": source_ids,
+                "can_access_managed_realtors": True,
+            }
+        
+        elif user_type == "realtor":
+            # Realtors can only access their own data
+            realtor = session.exec(
+                select(Realtor).where(Realtor.id == user_id)
+            ).first()
+            
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            
+            source_ids = session.exec(
+                select(Source.id).where(Source.realtor_id == user_id)
+            ).all()
+            
+            return {
+                "user_type": "realtor",
+                "user_id": user_id,
+                "source_ids": source_ids,
+                "is_standalone": realtor.is_standalone,
+                "property_manager_id": realtor.property_manager_id,
+                "can_access_managed_realtors": False,
+            }
+        
+        else:
+            raise HTTPException(status_code=400, detail="Invalid user type")

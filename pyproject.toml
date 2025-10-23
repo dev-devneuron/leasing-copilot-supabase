@@ -37,6 +37,10 @@ psycopg2-binary = "*"
 pgvector = "*"
 supabase = "*"
 
+# Authentication & Security
+pyjwt = "*"
+cryptography = "*"
+
 # External APIs
 twilio = "*"
 google-auth = "2.40.3"
