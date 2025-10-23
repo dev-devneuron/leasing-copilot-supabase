@@ -55,7 +55,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 # ----------------------Table MODELS ----------------------
 
 class PropertyManager(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True, alias="property_manager_id")
+    property_manager_id: Optional[int] = Field(default=None, primary_key=True)
     auth_user_id: UUID = Field(index=True)
     name: str
     email: str
@@ -73,7 +73,7 @@ class PropertyManager(SQLModel, table=True):
 
 
 class Realtor(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True, alias="realtor_id")
+    realtor_id: Optional[int] = Field(default=None, primary_key=True)
     auth_user_id: UUID = Field(index=True)
     name: str
     email: str
@@ -83,7 +83,7 @@ class Realtor(SQLModel, table=True):
     credentials: Optional[str] = Field(default=None)  # Store as serialized JSON string
     
     # Property Manager relationship (optional for standalone realtors)
-    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.id")
+    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.property_manager_id")
     is_standalone: bool = Field(default=True)  # True if not under any property manager
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -126,7 +126,7 @@ class Booking(SQLModel, table=True):
     cust_feedback: Optional[str] = None
 
     cust_id: Optional[int] = Field(default=None, foreign_key="customer.id")
-    realtor_id: Optional[int] = Field(default=None, foreign_key="realtor.id")
+    realtor_id: Optional[int] = Field(default=None, foreign_key="realtor.realtor_id")
 
     customer: Optional[Customer] = Relationship(
         back_populates="bookings_as_customer",
@@ -157,15 +157,15 @@ class ApartmentListing(SQLModel, table=True):
 
 
 class Source(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True, alias="source_id")
+    source_id: Optional[int] = Field(default=None, primary_key=True)
     
     # Can belong to either a Property Manager or a Realtor
-    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.id")
-    realtor_id: Optional[int] = Field(default=None, foreign_key="realtor.id")
+    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.property_manager_id")
+    realtor_id: Optional[int] = Field(default=None, foreign_key="realtor.realtor_id")
     
     # Ensure at least one is set
     __table_args__ = (
-        PrimaryKeyConstraint('id'),
+        PrimaryKeyConstraint('source_id'),
         # Add constraint to ensure either property_manager_id or realtor_id is set
     )
 
@@ -275,18 +275,18 @@ def create_property_manager(
         print("Property Manager created")
 
         # Create Source for Property Manager
-        source = Source(property_manager_id=property_manager.id)
+        source = Source(property_manager_id=property_manager.property_manager_id)
         session.add(source)
         session.commit()
         session.refresh(source)
         print("Source created for Property Manager")
 
-        auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?property_manager_id={property_manager.id}"
+        auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?property_manager_id={property_manager.property_manager_id}"
 
         return {
             "message": "Property Manager created successfully",
             "property_manager": {
-                "id": property_manager.id,
+                "id": property_manager.property_manager_id,
                 "name": property_manager.name,
                 "email": property_manager.email,
                 "contact": property_manager.contact,
@@ -321,7 +321,7 @@ def create_realtor(
         # Validate property manager if provided
         if property_manager_id:
             property_manager = session.exec(
-                select(PropertyManager).where(PropertyManager.id == property_manager_id)
+                select(PropertyManager).where(PropertyManager.property_manager_id == property_manager_id)
             ).first()
             if not property_manager:
                 raise HTTPException(
@@ -345,18 +345,18 @@ def create_realtor(
         print("Realtor created")
 
         # Create Source for Realtor
-        source = Source(realtor_id=realtor.id)
+        source = Source(realtor_id=realtor.realtor_id)
         session.add(source)
         session.commit()
         session.refresh(source)
         print("Source created for Realtor")
 
-        auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?realtor_id={realtor.id}"
+        auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?realtor_id={realtor.realtor_id}"
 
         return {
             "message": "Realtor created successfully",
             "realtor": {
-                "id": realtor.id,
+                "id": realtor.realtor_id,
                 "name": realtor.name,
                 "email": realtor.email,
                 "contact": realtor.contact,
@@ -774,7 +774,7 @@ def create_booking_entry(
             visited=False,
             cust_feedback=None,
             cust_id=customer.id,
-            realtor_id=realtor.id,
+            realtor_id=realtor.realtor_id,
         )
 
         session.add(new_booking)
@@ -838,21 +838,21 @@ def authenticate_property_manager(email: str, password: str) -> Dict[str, Any]:
 
             # Get managed realtors
             managed_realtors = session.exec(
-                select(Realtor).where(Realtor.property_manager_id == property_manager.id)
+                select(Realtor).where(Realtor.property_manager_id == property_manager.property_manager_id)
             ).all()
 
-            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?property_manager_id={property_manager.id}"
+            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?property_manager_id={property_manager.property_manager_id}"
 
             return {
                 "message": "Property Manager login successful",
                 "auth_link": auth_link,
                 "access_token": auth_result.session.access_token,
                 "refresh_token": refresh_token,
-                "property_manager_id": property_manager.id,
+                "property_manager_id": property_manager.property_manager_id,
                 "user_type": "property_manager",
                 "user": {
                     "uid": uid,
-                    "property_manager_id": property_manager.id,
+                    "property_manager_id": property_manager.property_manager_id,
                     "name": property_manager.name,
                     "email": property_manager.email,
                     "company_name": property_manager.company_name,
@@ -894,27 +894,27 @@ def authenticate_realtor(email: str, password: str) -> Dict[str, Any]:
             property_manager_info = None
             if realtor.property_manager_id:
                 property_manager = session.exec(
-                    select(PropertyManager).where(PropertyManager.id == realtor.property_manager_id)
+                    select(PropertyManager).where(PropertyManager.property_manager_id == realtor.property_manager_id)
                 ).first()
                 if property_manager:
                     property_manager_info = {
-                        "id": property_manager.id,
+                        "id": property_manager.property_manager_id,
                         "name": property_manager.name,
                         "company_name": property_manager.company_name,
                     }
 
-            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.id}"
+            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.realtor_id}"
 
             return {
                 "message": "Realtor login successful",
                 "auth_link": auth_link,
                 "access_token": auth_result.session.access_token,
                 "refresh_token": refresh_token,
-                "realtor_id": realtor.id,
+                "realtor_id": realtor.realtor_id,
                 "user_type": "realtor",
                 "user": {
                     "uid": uid,
-                    "realtor_id": realtor.id,
+                    "realtor_id": realtor.realtor_id,
                     "name": realtor.name,
                     "email": realtor.email,
                     "is_standalone": realtor.is_standalone,
@@ -940,7 +940,7 @@ def get_user_data_by_auth_id(auth_user_id: str) -> Dict[str, Any]:
         if property_manager:
             return {
                 "user_type": "property_manager",
-                "id": property_manager.id,
+                "id": property_manager.property_manager_id,
                 "name": property_manager.name,
                 "email": property_manager.email,
                 "company_name": property_manager.company_name,
@@ -954,7 +954,7 @@ def get_user_data_by_auth_id(auth_user_id: str) -> Dict[str, Any]:
         if realtor:
             return {
                 "user_type": "realtor",
-                "id": realtor.id,
+                "id": realtor.realtor_id,
                 "name": realtor.name,
                 "email": realtor.email,
                 "is_standalone": realtor.is_standalone,
@@ -973,7 +973,7 @@ def get_managed_realtors(property_manager_id: int) -> List[Dict[str, Any]]:
         
         return [
             {
-                "id": realtor.id,
+                "id": realtor.realtor_id,
                 "name": realtor.name,
                 "email": realtor.email,
                 "contact": realtor.contact,
@@ -990,10 +990,10 @@ def get_data_access_scope(user_type: str, user_id: int) -> Dict[str, Any]:
         if user_type == "property_manager":
             # Property managers can access their own data and their realtors' data
             source_ids = session.exec(
-                select(Source.id).where(
+                select(Source.source_id).where(
                     (Source.property_manager_id == user_id) |
                     (Source.realtor_id.in_(
-                        select(Realtor.id).where(Realtor.property_manager_id == user_id)
+                        select(Realtor.realtor_id).where(Realtor.property_manager_id == user_id)
                     ))
                 )
             ).all()
@@ -1015,7 +1015,7 @@ def get_data_access_scope(user_type: str, user_id: int) -> Dict[str, Any]:
                 raise HTTPException(status_code=404, detail="Realtor not found")
             
             source_ids = session.exec(
-                select(Source.id).where(Source.realtor_id == user_id)
+                select(Source.source_id).where(Source.realtor_id == user_id)
             ).all()
             
             return {
