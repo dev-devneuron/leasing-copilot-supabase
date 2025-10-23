@@ -72,7 +72,10 @@ from config import EMBED_DIM
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_2_URL")
-engine1 = create_engine(DATABASE_URL, pool_pre_ping=True)
+if DATABASE_URL:
+    engine1 = create_engine(DATABASE_URL, pool_pre_ping=True)
+else:
+    engine1 = None
 
 
 def insert_listing_records(realtor_id: int, listings: List[Dict[str, Any]]):

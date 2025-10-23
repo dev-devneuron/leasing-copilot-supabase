@@ -29,7 +29,7 @@ from supabase import create_client, Client
 from fastapi import UploadFile, File, Form, HTTPException, APIRouter
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
-from langchain.text_splitter import CharacterTextSplitter
+from langchain_text_splitters import CharacterTextSplitter
 from config import (
     BUCKET_NAME,
     SUPABASE_URL,
@@ -40,17 +40,20 @@ from config import (
 from uuid import UUID
 import jwt
 import json, csv, io, requests
-from langchain.schema import Document
-from langchain.text_splitter import CharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_text_splitters import CharacterTextSplitter
 
 load_dotenv()
 
 # ---------------------- DATABASE CONFIG ----------------------
 
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+if DATABASE_URL:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+else:
+    engine = None
+    SessionLocal = None
 
 # ----------------------Table MODELS ----------------------
 
@@ -137,7 +140,7 @@ class Booking(SQLModel, table=True):
 
 class RuleChunk(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)  # Auto-increment primary key
-    source_id: int = Field(foreign_key="source.id")
+    source_id: int = Field(foreign_key="source.source_id")
 
     content: str
     embedding: List[float] = Field(sa_column=Column(Vector(768)))
@@ -147,7 +150,7 @@ class RuleChunk(SQLModel, table=True):
 
 class ApartmentListing(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
-    source_id: int = Field(foreign_key="source.id")
+    source_id: int = Field(foreign_key="source.source_id")
 
     text: str
     listing_metadata: Dict[str, Any] = Field(sa_column=Column(JSON))
@@ -221,7 +224,13 @@ supabase = create_client(
     os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 )
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-decoded = jwt.decode(SUPABASE_SERVICE_KEY, options={"verify_signature": False})
+if SUPABASE_SERVICE_KEY and SUPABASE_SERVICE_KEY != "dummy":
+    try:
+        decoded = jwt.decode(SUPABASE_SERVICE_KEY, options={"verify_signature": False})
+    except:
+        decoded = None
+else:
+    decoded = None
 
 
 def listing_to_text(listing: dict) -> str:
