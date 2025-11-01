@@ -1,53 +1,178 @@
 # Frontend & Backend Integration Guide
-## Property Assignment Feature
+## Property Assignment Feature - Complete Implementation
 
-This guide explains how to integrate the property assignment feature so Property Managers can assign properties to Realtors, and those properties appear on the Realtor's dashboard.
+This guide explains how to integrate the property assignment feature so Property Managers can assign properties to Realtors, view assignments, and Realtors can see their assigned properties.
 
 ---
 
 ## 📋 Overview
 
-**Flow:**
-1. Property Manager views all available properties (from their source)
+**Complete Flow:**
+1. Property Manager views all available properties (unassigned)
 2. PM selects properties and assigns them to a Realtor
 3. Backend updates `source_id` of those properties to the Realtor's source
-4. Realtor's dashboard automatically shows assigned properties (via `/apartments` endpoint)
+4. PM can view all assignments: which properties are assigned to which realtors
+5. Realtor's dashboard automatically shows assigned properties (via `/apartments` endpoint)
 
 **Key Points:**
-- ✅ Backend is **already complete** - no changes needed
-- ✅ Data isolation is **already working** - Realtors only see their properties
-- ✅ You just need to **connect the frontend UI**
+- ✅ Backend is **complete** - all endpoints working
+- ✅ Data isolation is **automatic** - Realtors only see their properties
+- ✅ Assignment viewing is **available** - PM can see all assignments
 
 ---
 
-## 🔌 Backend Endpoints (Already Working)
+## 🔌 Backend Endpoints (All Working)
 
 ### 1. Get Properties for PM (Available to Assign)
 ```http
 GET /apartments
 Authorization: Bearer <pm_jwt_token>
 ```
-**Response:** Array of all properties PM can assign
+**Response:** Array of all properties (PM sees all, including assigned ones)
 ```json
 [
   {
     "id": 1,
-    "address": "123 Main St",
-    "price": 1500,
-    "bedrooms": 2,
-    "bathrooms": 1,
+    "source_id": 123,
+    "listing_id": "MLS000113",
+    "address": "478 Larry Mission Suite 370, Seattle, WA",
+    "price": 2912,
+    "bedrooms": 4,
+    "bathrooms": 2.9,
+    "square_feet": 686,
+    "lot_size_sqft": 2892,
+    "year_built": 1951,
+    "property_type": "Apartment",
+    "listing_status": "Available",
+    "days_on_market": 19,
+    "listing_date": "2025-01-11",
+    "agent": {
+      "name": "Linda Foster",
+      "phone": "001-539-542-2431x562",
+      "email": "jennifer92@yahoo.com"
+    },
+    "features": ["Pool", "Gym", "Washer/Dryer", "Dishwasher", "Pet Friendly"],
     "description": "...",
     "image_url": "...",
-    "source_id": 123,
     "owner_type": "property_manager",
     "owner_id": 1,
-    "owner_name": "John Smith"
+    "owner_name": "John Smith",
+    "is_assigned": false,
+    "assigned_to_realtor_id": null,
+    "assigned_to_realtor_name": null,
+    "full_metadata": {...}
   },
-  ...
+  {
+    "id": 2,
+    "address": "456 Oak Ave",
+    "price": 2000,
+    "bedrooms": 3,
+    "bathrooms": 2,
+    "owner_type": "realtor",
+    "owner_id": 1,
+    "owner_name": "Sarah Johnson",
+    "is_assigned": true,
+    "assigned_to_realtor_id": 1,
+    "assigned_to_realtor_name": "Sarah Johnson"
+  }
 ]
 ```
 
-### 2. Get Managed Realtors
+### 2. Get Property Assignments (PM View - Shows Who Has What)
+```http
+GET /property-manager/assignments
+Authorization: Bearer <pm_jwt_token>
+```
+**Response:** Organized view of all assignments
+```json
+{
+  "unassigned_properties": [
+    {
+      "id": 1,
+      "source_id": 123,
+      "listing_id": "MLS000113",
+      "address": "478 Larry Mission Suite 370, Seattle, WA",
+      "price": 2912,
+      "bedrooms": 4,
+      "bathrooms": 2.9,
+      "square_feet": 686,
+      "lot_size_sqft": 2892,
+      "year_built": 1951,
+      "property_type": "Apartment",
+      "listing_status": "Available",
+      "days_on_market": 19,
+      "listing_date": "2025-01-11",
+      "agent": {
+        "name": "Linda Foster",
+        "phone": "001-539-542-2431x562",
+        "email": "jennifer92@yahoo.com"
+      },
+      "features": ["Pool", "Gym", "Washer/Dryer", "Dishwasher", "Pet Friendly"],
+      "description": "...",
+      "image_url": "..."
+    }
+  ],
+  "assigned_properties": {
+    "1": {
+      "realtor_id": 1,
+      "realtor_name": "Sarah Johnson",
+      "realtor_email": "sarah.johnson@testcompany.com",
+      "count": 5,
+      "properties": [
+        {
+          "id": 2,
+          "source_id": 456,
+          "listing_id": "MLS000114",
+          "address": "456 Oak Ave, Seattle, WA",
+          "price": 2000,
+          "bedrooms": 3,
+          "bathrooms": 2,
+          "square_feet": 1200,
+          "lot_size_sqft": 5000,
+          "year_built": 2020,
+          "property_type": "Apartment",
+          "listing_status": "Available",
+          "days_on_market": 5,
+          "listing_date": "2025-01-15",
+          "agent": {
+            "name": "John Doe",
+            "phone": "555-0123",
+            "email": "john@example.com"
+          },
+          "features": ["Gym", "Parking", "Elevator"],
+          "description": "...",
+          "image_url": "..."
+        },
+        ...
+      ]
+    },
+    "2": {
+      "realtor_id": 2,
+      "realtor_name": "Mike Wilson",
+      "realtor_email": "mike.wilson@testcompany.com",
+      "count": 3,
+      "properties": [...]
+    }
+  },
+  "summary": {
+    "total_properties": 9,
+    "unassigned_count": 1,
+    "assigned_count": 8,
+    "realtor_counts": {
+      "1": {
+        "realtor_name": "Sarah Johnson",
+        "count": 5
+      },
+      "2": {
+        "realtor_name": "Mike Wilson",
+        "count": 3
+      }
+    }
+  }
+}
+```
+
+### 3. Get Managed Realtors
 ```http
 GET /property-manager/realtors
 Authorization: Bearer <pm_jwt_token>
@@ -72,7 +197,7 @@ Authorization: Bearer <pm_jwt_token>
 }
 ```
 
-### 3. Assign Properties to Realtor
+### 4. Assign Properties to Realtor
 ```http
 POST /property-manager/assign-properties
 Authorization: Bearer <pm_jwt_token>
@@ -95,7 +220,7 @@ Content-Type: application/json
 }
 ```
 
-### 4. Get Properties for Realtor (Dashboard)
+### 5. Get Properties for Realtor (Dashboard)
 ```http
 GET /apartments
 Authorization: Bearer <realtor_jwt_token>
@@ -104,17 +229,36 @@ Authorization: Bearer <realtor_jwt_token>
 ```json
 [
   {
-    "id": 1,
-    "address": "123 Main St",
-    "price": 1500,
-    "bedrooms": 2,
-    "bathrooms": 1,
+    "id": 2,
     "source_id": 456,
+    "listing_id": "MLS000114",
+    "address": "456 Oak Ave, Seattle, WA",
+    "price": 2000,
+    "bedrooms": 3,
+    "bathrooms": 2,
+    "square_feet": 1200,
+    "lot_size_sqft": 5000,
+    "year_built": 2020,
+    "property_type": "Apartment",
+    "listing_status": "Available",
+    "days_on_market": 5,
+    "listing_date": "2025-01-15",
+    "agent": {
+      "name": "John Doe",
+      "phone": "555-0123",
+      "email": "john@example.com"
+    },
+    "features": ["Gym", "Parking", "Elevator"],
+    "description": "...",
+    "image_url": "...",
     "owner_type": "realtor",
     "owner_id": 1,
-    "owner_name": "Sarah Johnson"
-  },
-  ...
+    "owner_name": "Sarah Johnson",
+    "is_assigned": true,
+    "assigned_to_realtor_id": 1,
+    "assigned_to_realtor_name": "Sarah Johnson",
+    "full_metadata": {...}
+  }
 ]
 ```
 
@@ -122,9 +266,7 @@ Authorization: Bearer <realtor_jwt_token>
 
 ## 🎨 Frontend Implementation
 
-### Step 1: Property Manager Assignment Page
-
-Create a component for PMs to assign properties:
+### Component 1: Property Assignment Page (PM Assigns Properties)
 
 ```jsx
 // PropertyAssignmentPage.jsx
@@ -139,7 +281,6 @@ const PropertyAssignmentPage = () => {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
 
-  // Get auth token from your auth context/store
   const token = localStorage.getItem('access_token'); // or from your auth context
 
   useEffect(() => {
@@ -153,12 +294,12 @@ const PropertyAssignmentPage = () => {
         headers: { Authorization: `Bearer ${token}` }
       });
       
-      // Filter to only show PM's own properties (not already assigned to realtors)
-      const pmProperties = response.data.filter(
-        prop => prop.owner_type === 'property_manager'
+      // Filter to only show PM's unassigned properties
+      const unassignedProperties = response.data.filter(
+        prop => !prop.is_assigned || prop.owner_type === 'property_manager'
       );
       
-      setProperties(pmProperties);
+      setProperties(unassignedProperties);
     } catch (error) {
       console.error('Failed to fetch properties:', error);
       setMessage('Failed to load properties');
@@ -216,7 +357,7 @@ const PropertyAssignmentPage = () => {
 
       setMessage(`✅ ${response.data.message}`);
       
-      // Refresh properties list (assigned ones will no longer show)
+      // Refresh properties list (assigned ones will disappear)
       fetchProperties();
       setSelectedProperties([]);
       setSelectedRealtor(null);
@@ -274,9 +415,36 @@ const PropertyAssignmentPage = () => {
               />
               <div className="property-info">
                 <h3>{property.address}</h3>
-                <p>Price: ${property.price}</p>
-                <p>Bedrooms: {property.bedrooms} | Bathrooms: {property.bathrooms}</p>
-                <p className="property-id">ID: {property.id}</p>
+                <p className="price">${property.price?.toLocaleString()}</p>
+                <div className="property-specs">
+                  <span>🛏️ {property.bedrooms} bed</span>
+                  <span>🚿 {property.bathrooms} bath</span>
+                  {property.square_feet && <span>📐 {property.square_feet} sqft</span>}
+                </div>
+                {property.property_type && (
+                  <p className="property-type">Type: {property.property_type}</p>
+                )}
+                {property.listing_status && (
+                  <span className={`status-badge ${property.listing_status.toLowerCase()}`}>
+                    {property.listing_status}
+                  </span>
+                )}
+                {property.features && property.features.length > 0 && (
+                  <div className="features">
+                    <strong>Features:</strong>
+                    <div className="features-list">
+                      {property.features.map((feature, idx) => (
+                        <span key={idx} className="feature-tag">{feature}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {property.agent && (
+                  <div className="agent-info">
+                    <strong>Agent:</strong> {property.agent.name}
+                  </div>
+                )}
+                <p className="property-id">Listing ID: {property.listing_id || property.id}</p>
               </div>
             </div>
           ))}
@@ -315,9 +483,248 @@ export default PropertyAssignmentPage;
 
 ---
 
-### Step 2: Realtor Dashboard (Already Works!)
+### Component 2: Property Assignments View (PM Views All Assignments)
 
-The Realtor dashboard should use the same `/apartments` endpoint:
+```jsx
+// PropertyAssignmentsView.jsx
+import { useState, useEffect } from 'react';
+import axios from 'axios';
+
+const PropertyAssignmentsView = () => {
+  const [assignments, setAssignments] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const token = localStorage.getItem('access_token');
+
+  useEffect(() => {
+    fetchAssignments();
+  }, []);
+
+  const fetchAssignments = async () => {
+    try {
+      setLoading(true);
+      const response = await axios.get('/property-manager/assignments', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setAssignments(response.data);
+      setError(null);
+    } catch (err) {
+      console.error('Failed to fetch assignments:', err);
+      setError('Failed to load assignments');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) return <div className="loading">Loading assignments...</div>;
+  if (error) return <div className="error">{error}</div>;
+  if (!assignments) return <div>No data available</div>;
+
+  const { unassigned_properties, assigned_properties, summary } = assignments;
+
+  return (
+    <div className="property-assignments-view">
+      <div className="header">
+        <h1>Property Assignments Overview</h1>
+        <button onClick={fetchAssignments} className="refresh-btn">
+          🔄 Refresh
+        </button>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="summary-cards">
+        <div className="summary-card">
+          <h3>Total Properties</h3>
+          <p className="number">{summary.total_properties}</p>
+        </div>
+        <div className="summary-card unassigned">
+          <h3>Unassigned</h3>
+          <p className="number">{summary.unassigned_count}</p>
+        </div>
+        <div className="summary-card assigned">
+          <h3>Assigned</h3>
+          <p className="number">{summary.assigned_count}</p>
+        </div>
+      </div>
+
+      {/* Unassigned Properties Section */}
+      <section className="unassigned-section">
+        <h2>
+          Unassigned Properties 
+          <span className="badge">{unassigned_properties.length}</span>
+        </h2>
+        {unassigned_properties.length > 0 ? (
+          <div className="properties-grid">
+            {unassigned_properties.map(property => (
+              <div key={property.id} className="property-card unassigned-card">
+                <div className="property-header">
+                  <h3>{property.address || 'N/A'}</h3>
+                  <span className="status-badge unassigned-badge">Unassigned</span>
+                </div>
+                <div className="property-details">
+                  <p className="price-large"><strong>${property.price?.toLocaleString() || 'N/A'}</strong></p>
+                  <div className="specs-row">
+                    <span>🛏️ {property.bedrooms || 'N/A'} bed</span>
+                    <span>🚿 {property.bathrooms || 'N/A'} bath</span>
+                    {property.square_feet && <span>📐 {property.square_feet} sqft</span>}
+                  </div>
+                  {property.property_type && (
+                    <p><strong>Type:</strong> {property.property_type}</p>
+                  )}
+                  {property.year_built && (
+                    <p><strong>Year Built:</strong> {property.year_built}</p>
+                  )}
+                  {property.listing_status && (
+                    <p><strong>Status:</strong> 
+                      <span className={`status ${property.listing_status.toLowerCase()}`}>
+                        {property.listing_status}
+                      </span>
+                    </p>
+                  )}
+                  {property.days_on_market !== undefined && (
+                    <p><strong>Days on Market:</strong> {property.days_on_market}</p>
+                  )}
+                  {property.features && property.features.length > 0 && (
+                    <div className="features-section">
+                      <strong>Features:</strong>
+                      <div className="features-tags">
+                        {property.features.map((feature, idx) => (
+                          <span key={idx} className="feature-badge">{feature}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {property.agent && (
+                    <div className="agent-section">
+                      <strong>Agent:</strong>
+                      <p>{property.agent.name}</p>
+                      {property.agent.email && <p>{property.agent.email}</p>}
+                      {property.agent.phone && <p>{property.agent.phone}</p>}
+                    </div>
+                  )}
+                  {property.description && (
+                    <p className="description">{property.description}</p>
+                  )}
+                </div>
+                <p className="property-id">Property ID: {property.id}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">All properties have been assigned! 🎉</p>
+        )}
+      </section>
+
+      {/* Assigned Properties by Realtor */}
+      <section className="assigned-section">
+        <h2>Assigned Properties by Realtor</h2>
+        {Object.keys(assigned_properties).length > 0 ? (
+          Object.values(assigned_properties).map(realtorGroup => (
+            <div key={realtorGroup.realtor_id} className="realtor-group">
+              <div className="realtor-header">
+                <div className="realtor-info">
+                  <h3>{realtorGroup.realtor_name}</h3>
+                  <p className="realtor-email">{realtorGroup.realtor_email}</p>
+                </div>
+                <div className="realtor-count">
+                  <span className="count-badge">{realtorGroup.count}</span>
+                  <span>properties</span>
+                </div>
+              </div>
+              
+              <div className="properties-grid">
+                {realtorGroup.properties.map(property => (
+                  <div key={property.id} className="property-card assigned-card">
+                    <div className="property-header">
+                      <h4>{property.address || 'N/A'}</h4>
+                      <span className="status-badge assigned-badge">
+                        Assigned to {realtorGroup.realtor_name}
+                      </span>
+                    </div>
+                    <div className="property-details">
+                      <p className="price-large"><strong>${property.price?.toLocaleString() || 'N/A'}</strong></p>
+                      <div className="specs-row">
+                        <span>🛏️ {property.bedrooms || 'N/A'} bed</span>
+                        <span>🚿 {property.bathrooms || 'N/A'} bath</span>
+                        {property.square_feet && <span>📐 {property.square_feet} sqft</span>}
+                      </div>
+                      {property.property_type && (
+                        <p><strong>Type:</strong> {property.property_type}</p>
+                      )}
+                      {property.year_built && (
+                        <p><strong>Year Built:</strong> {property.year_built}</p>
+                      )}
+                      {property.listing_status && (
+                        <p><strong>Status:</strong> 
+                          <span className={`status ${property.listing_status.toLowerCase()}`}>
+                            {property.listing_status}
+                          </span>
+                        </p>
+                      )}
+                      {property.days_on_market !== undefined && (
+                        <p><strong>Days on Market:</strong> {property.days_on_market}</p>
+                      )}
+                      {property.features && property.features.length > 0 && (
+                        <div className="features-section">
+                          <strong>Features:</strong>
+                          <div className="features-tags">
+                            {property.features.map((feature, idx) => (
+                              <span key={idx} className="feature-badge">{feature}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {property.agent && (
+                        <div className="agent-section">
+                          <strong>Agent:</strong>
+                          <p>{property.agent.name}</p>
+                          {property.agent.email && <p>{property.agent.email}</p>}
+                          {property.agent.phone && <p>{property.agent.phone}</p>}
+                        </div>
+                      )}
+                      {property.listing_id && (
+                        <p className="listing-id">MLS: {property.listing_id}</p>
+                      )}
+                      {property.description && (
+                        <p className="description">{property.description}</p>
+                      )}
+                    </div>
+                    <p className="property-id">Property ID: {property.id}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+        ) : (
+          <p className="empty-state">No properties assigned yet.</p>
+        )}
+      </section>
+
+      {/* Realtor Summary */}
+      {Object.keys(summary.realtor_counts).length > 0 && (
+        <section className="realtor-summary">
+          <h2>Realtor Summary</h2>
+          <div className="realtor-summary-grid">
+            {Object.entries(summary.realtor_counts).map(([realtorId, data]) => (
+              <div key={realtorId} className="realtor-summary-card">
+                <h4>{data.realtor_name}</h4>
+                <p className="count">{data.count} properties</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+};
+
+export default PropertyAssignmentsView;
+```
+
+---
+
+### Component 3: Realtor Dashboard (Views Assigned Properties)
 
 ```jsx
 // RealtorDashboard.jsx
@@ -349,24 +756,72 @@ const RealtorDashboard = () => {
     }
   };
 
-  if (loading) return <div>Loading...</div>;
+  if (loading) return <div className="loading">Loading your properties...</div>;
 
   return (
     <div className="realtor-dashboard">
-      <h1>My Properties ({properties.length})</h1>
-      
-      <div className="properties-grid">
-        {properties.map(property => (
-          <div key={property.id} className="property-card">
-            <h3>{property.address}</h3>
-            <p>Price: ${property.price}</p>
-            <p>Bedrooms: {property.bedrooms} | Bathrooms: {property.bathrooms}</p>
-          </div>
-        ))}
+      <div className="dashboard-header">
+        <h1>My Properties</h1>
+        <p className="property-count">{properties.length} properties assigned to you</p>
       </div>
-
-      {properties.length === 0 && (
-        <p>No properties assigned yet. Contact your Property Manager.</p>
+      
+      {properties.length > 0 ? (
+        <div className="properties-grid">
+          {properties.map(property => (
+            <div key={property.id} className="property-card">
+              {property.image_url && (
+                <img 
+                  src={property.image_url} 
+                  alt={property.address}
+                  className="property-image"
+                />
+              )}
+              <div className="property-content">
+                <h3>{property.address || 'N/A'}</h3>
+                {property.listing_id && (
+                  <p className="listing-id">MLS: {property.listing_id}</p>
+                )}
+                <div className="property-details">
+                  <p className="price">${property.price?.toLocaleString() || 'N/A'}</p>
+                  <div className="specs">
+                    <span>🛏️ {property.bedrooms || 'N/A'} bed</span>
+                    <span>🚿 {property.bathrooms || 'N/A'} bath</span>
+                    {property.square_feet && <span>📐 {property.square_feet} sqft</span>}
+                  </div>
+                  {property.property_type && (
+                    <p className="property-type">Type: {property.property_type}</p>
+                  )}
+                  {property.listing_status && (
+                    <span className={`status-badge ${property.listing_status.toLowerCase()}`}>
+                      {property.listing_status}
+                    </span>
+                  )}
+                  {property.features && property.features.length > 0 && (
+                    <div className="features-preview">
+                      {property.features.slice(0, 3).map((feature, idx) => (
+                        <span key={idx} className="feature-chip">{feature}</span>
+                      ))}
+                      {property.features.length > 3 && (
+                        <span className="feature-more">+{property.features.length - 3} more</span>
+                      )}
+                    </div>
+                  )}
+                  {property.agent && (
+                    <p className="agent-name">Agent: {property.agent.name}</p>
+                  )}
+                  {property.description && (
+                    <p className="description">{property.description}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">
+          <p>No properties assigned yet.</p>
+          <p className="help-text">Contact your Property Manager to get properties assigned to you.</p>
+        </div>
       )}
     </div>
   );
@@ -377,51 +832,36 @@ export default RealtorDashboard;
 
 ---
 
-## 🔄 Automatic Updates (Real-time Options)
-
-### Option 1: Polling (Simple)
-```jsx
-// In RealtorDashboard, poll every 30 seconds
-useEffect(() => {
-  const interval = setInterval(() => {
-    fetchProperties();
-  }, 30000); // 30 seconds
-
-  return () => clearInterval(interval);
-}, []);
-```
-
-### Option 2: WebSocket (Advanced)
-If you want real-time updates, implement WebSocket on backend and listen for assignment events.
-
-### Option 3: Refresh on Focus
-```jsx
-useEffect(() => {
-  const handleFocus = () => fetchProperties();
-  window.addEventListener('focus', handleFocus);
-  return () => window.removeEventListener('focus', handleFocus);
-}, []);
-```
-
----
-
-## 📝 CSS Styling (Basic Example)
+## 🎨 Complete CSS Styling
 
 ```css
+/* Property Assignment Page */
 .property-assignment-page {
   padding: 20px;
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
 }
 
 .realtor-selector {
   margin-bottom: 30px;
+  padding: 20px;
+  background: #f5f5f5;
+  border-radius: 8px;
+}
+
+.realtor-selector label {
+  display: block;
+  margin-bottom: 10px;
+  font-weight: bold;
+  font-size: 16px;
 }
 
 .realtor-dropdown {
-  padding: 10px;
+  padding: 12px;
   font-size: 16px;
   min-width: 300px;
+  border: 2px solid #ddd;
+  border-radius: 4px;
 }
 
 .properties-section {
@@ -433,6 +873,21 @@ useEffect(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid #eee;
+}
+
+.select-all-btn {
+  padding: 8px 16px;
+  background: #6c757d;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.select-all-btn:hover {
+  background: #5a6268;
 }
 
 .properties-grid {
@@ -447,30 +902,52 @@ useEffect(() => {
   padding: 15px;
   cursor: pointer;
   transition: all 0.2s;
+  background: white;
 }
 
 .property-card:hover {
   border-color: #007bff;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  transform: translateY(-2px);
 }
 
 .property-card.selected {
   border-color: #007bff;
   background-color: #f0f8ff;
+  box-shadow: 0 4px 12px rgba(0,123,255,0.3);
 }
 
 .property-checkbox {
   margin-right: 10px;
+  transform: scale(1.2);
+}
+
+.property-info h3 {
+  margin: 10px 0 5px 0;
+  color: #333;
+}
+
+.property-id {
+  font-size: 12px;
+  color: #666;
+  margin-top: 10px;
+}
+
+.assign-section {
+  text-align: center;
+  margin-top: 30px;
+  padding: 20px;
 }
 
 .assign-button {
-  padding: 12px 24px;
-  font-size: 16px;
+  padding: 15px 30px;
+  font-size: 18px;
   background-color: #007bff;
   color: white;
   border: none;
   border-radius: 4px;
   cursor: pointer;
+  font-weight: bold;
 }
 
 .assign-button:disabled {
@@ -478,40 +955,534 @@ useEffect(() => {
   cursor: not-allowed;
 }
 
+.assign-button:hover:not(:disabled) {
+  background-color: #0056b3;
+}
+
 .message {
   padding: 15px;
   margin-top: 20px;
   border-radius: 4px;
+  font-size: 16px;
 }
 
 .message.success {
   background-color: #d4edda;
   color: #155724;
+  border: 1px solid #c3e6cb;
 }
 
 .message.error {
   background-color: #f8d7da;
   color: #721c24;
+  border: 1px solid #f5c6cb;
 }
+
+/* Property Assignments View */
+.property-assignments-view {
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+}
+
+.refresh-btn {
+  padding: 10px 20px;
+  background: #6c757d;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-bottom: 40px;
+}
+
+.summary-card {
+  padding: 20px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  text-align: center;
+}
+
+.summary-card h3 {
+  margin: 0 0 10px 0;
+  color: #666;
+  font-size: 14px;
+  text-transform: uppercase;
+}
+
+.summary-card .number {
+  font-size: 36px;
+  font-weight: bold;
+  margin: 0;
+  color: #333;
+}
+
+.summary-card.unassigned .number {
+  color: #ffc107;
+}
+
+.summary-card.assigned .number {
+  color: #28a745;
+}
+
+section {
+  margin-bottom: 40px;
+}
+
+section h2 {
+  margin-bottom: 20px;
+  color: #333;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.badge {
+  background: #007bff;
+  color: white;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+}
+
+.unassigned-section,
+.assigned-section {
+  background: #f9f9f9;
+  padding: 30px;
+  border-radius: 8px;
+  margin-bottom: 30px;
+}
+
+.realtor-group {
+  margin-bottom: 30px;
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.realtor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 2px solid #eee;
+}
+
+.realtor-info h3 {
+  margin: 0 0 5px 0;
+  color: #333;
+}
+
+.realtor-email {
+  color: #666;
+  font-size: 14px;
+  margin: 0;
+}
+
+.realtor-count {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.count-badge {
+  background: #007bff;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.status-badge {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.unassigned-badge {
+  background: #ffc107;
+  color: #333;
+}
+
+.assigned-badge {
+  background: #28a745;
+  color: white;
+}
+
+.property-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.property-header h3,
+.property-header h4 {
+  margin: 0;
+  flex: 1;
+}
+
+.property-details {
+  margin-top: 10px;
+}
+
+.property-details p {
+  margin: 5px 0;
+  color: #555;
+}
+
+.description {
+  font-size: 14px;
+  color: #666;
+  margin-top: 10px;
+  line-height: 1.4;
+}
+
+/* Enhanced Property Details */
+.price-large {
+  font-size: 28px;
+  font-weight: bold;
+  color: #007bff;
+  margin: 10px 0;
+}
+
+.specs-row {
+  display: flex;
+  gap: 15px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
+.specs-row span {
+  color: #666;
+  font-size: 14px;
+}
+
+.property-type {
+  color: #666;
+  font-size: 14px;
+  margin: 5px 0;
+}
+
+.status {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: bold;
+  margin-left: 8px;
+}
+
+.status.available {
+  background: #28a745;
+  color: white;
+}
+
+.status.pending {
+  background: #ffc107;
+  color: #333;
+}
+
+.status.sold {
+  background: #dc3545;
+  color: white;
+}
+
+.features-section {
+  margin-top: 15px;
+}
+
+.features-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.feature-badge,
+.feature-tag,
+.feature-chip {
+  background: #e9ecef;
+  color: #495057;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.feature-more {
+  color: #007bff;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.features-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.features-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: center;
+}
+
+.agent-info,
+.agent-section {
+  margin-top: 10px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 4px;
+}
+
+.agent-section p {
+  margin: 3px 0;
+  font-size: 14px;
+  color: #555;
+}
+
+.agent-name {
+  font-size: 13px;
+  color: #666;
+  margin-top: 5px;
+}
+
+.listing-id {
+  font-size: 12px;
+  color: #999;
+  margin: 5px 0;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px;
+  color: #666;
+  font-size: 16px;
+}
+
+.help-text {
+  font-size: 14px;
+  color: #999;
+  margin-top: 10px;
+}
+
+.realtor-summary {
+  margin-top: 40px;
+  padding: 20px;
+  background: white;
+  border-radius: 8px;
+}
+
+.realtor-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 15px;
+}
+
+.realtor-summary-card {
+  padding: 15px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.realtor-summary-card h4 {
+  margin: 0 0 5px 0;
+  color: #333;
+}
+
+.realtor-summary-card .count {
+  font-size: 24px;
+  font-weight: bold;
+  color: #007bff;
+  margin: 0;
+}
+
+/* Realtor Dashboard */
+.realtor-dashboard {
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.dashboard-header {
+  margin-bottom: 30px;
+}
+
+.property-count {
+  color: #666;
+  font-size: 16px;
+}
+
+.property-image {
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+  border-radius: 4px 4px 0 0;
+}
+
+.property-content {
+  padding: 15px;
+}
+
+.property-content h3 {
+  margin: 0 0 10px 0;
+  color: #333;
+}
+
+.price {
+  font-size: 24px;
+  font-weight: bold;
+  color: #007bff;
+  margin: 10px 0;
+}
+
+.specs {
+  display: flex;
+  gap: 15px;
+  margin: 10px 0;
+  color: #666;
+}
+
+.loading {
+  text-align: center;
+  padding: 40px;
+  font-size: 18px;
+  color: #666;
+}
+
+.error {
+  text-align: center;
+  padding: 20px;
+  background: #f8d7da;
+  color: #721c24;
+  border-radius: 4px;
+}
+
+.no-properties {
+  text-align: center;
+  padding: 40px;
+  color: #666;
+  font-style: italic;
+}
+```
+
+---
+
+## 🔄 Real-time Updates
+
+### Option 1: Manual Refresh
+```jsx
+// Add refresh button to components
+<button onClick={fetchAssignments}>🔄 Refresh</button>
+```
+
+### Option 2: Auto Refresh (Polling)
+```jsx
+useEffect(() => {
+  const interval = setInterval(() => {
+    fetchAssignments();
+  }, 30000); // Every 30 seconds
+
+  return () => clearInterval(interval);
+}, []);
+```
+
+### Option 3: Refresh on Window Focus
+```jsx
+useEffect(() => {
+  const handleFocus = () => {
+    fetchAssignments();
+    fetchProperties(); // If you have multiple fetches
+  };
+  
+  window.addEventListener('focus', handleFocus);
+  return () => window.removeEventListener('focus', handleFocus);
+}, []);
+```
+
+---
+
+## 📱 Complete Navigation Structure
+
+```jsx
+// PropertyManagerDashboard.jsx
+import { useState } from 'react';
+import PropertyAssignmentPage from './PropertyAssignmentPage';
+import PropertyAssignmentsView from './PropertyAssignmentsView';
+
+const PropertyManagerDashboard = () => {
+  const [activeTab, setActiveTab] = useState('assignments'); // or 'assign'
+
+  return (
+    <div className="pm-dashboard">
+      <nav className="dashboard-nav">
+        <button 
+          className={activeTab === 'assignments' ? 'active' : ''}
+          onClick={() => setActiveTab('assignments')}
+        >
+          View Assignments
+        </button>
+        <button 
+          className={activeTab === 'assign' ? 'active' : ''}
+          onClick={() => setActiveTab('assign')}
+        >
+          Assign Properties
+        </button>
+      </nav>
+
+      {activeTab === 'assignments' && <PropertyAssignmentsView />}
+      {activeTab === 'assign' && <PropertyAssignmentPage />}
+    </div>
+  );
+};
+
+export default PropertyManagerDashboard;
 ```
 
 ---
 
 ## ✅ Testing Checklist
 
-1. **Property Manager Flow:**
-   - [ ] PM can see all available properties
+1. **Property Manager Assignment:**
+   - [ ] PM can see unassigned properties
    - [ ] PM can select multiple properties
    - [ ] PM can choose a realtor from dropdown
    - [ ] Assignment succeeds and shows success message
-   - [ ] Assigned properties disappear from PM's available list
+   - [ ] Assigned properties disappear from available list
 
-2. **Realtor Flow:**
+2. **Property Manager View Assignments:**
+   - [ ] PM can see all unassigned properties
+   - [ ] PM can see all assigned properties grouped by realtor
+   - [ ] Summary shows correct counts
+   - [ ] Refresh button updates the view
+
+3. **Realtor Dashboard:**
    - [ ] Realtor logs in
    - [ ] Realtor dashboard shows ONLY assigned properties
    - [ ] After PM assigns properties, they appear on Realtor dashboard (after refresh)
 
-3. **Data Isolation:**
+4. **Data Isolation:**
    - [ ] Realtor 1 only sees properties assigned to them
    - [ ] Realtor 2 only sees properties assigned to them
    - [ ] PM can see all properties (own + all realtors')
@@ -520,24 +1491,22 @@ useEffect(() => {
 
 ## 🚀 Quick Start
 
-1. **Add PropertyAssignmentPage component** to your PM dashboard
-2. **Ensure RealtorDashboard uses `/apartments` endpoint**
-3. **Test the flow:**
+1. **Copy the 3 components above** to your frontend
+2. **Add the CSS** to your stylesheet
+3. **Set up navigation** to switch between "Assign Properties" and "View Assignments"
+4. **Test the flow:**
    - Login as PM
-   - Assign 5 properties to Realtor 1
-   - Login as Realtor 1
-   - Verify those 5 properties appear on dashboard
-
-**That's it!** The backend handles everything automatically. The `/apartments` endpoint already filters based on user type and source ownership.
+   - Go to "Assign Properties" → Assign 5 properties to Realtor 1
+   - Go to "View Assignments" → See the 5 properties under Realtor 1
+   - Login as Realtor 1 → See those 5 properties on dashboard
 
 ---
 
 ## 📌 Key Points
 
-- ✅ **No backend changes needed** - everything is already implemented
-- ✅ **Data isolation works automatically** - `/apartments` endpoint filters correctly
-- ✅ **Assignment is instant** - properties move from PM source to Realtor source immediately
-- ✅ **Simple frontend** - just UI components calling existing endpoints
+- ✅ **Two views for PM:** "Assign Properties" (to assign) and "View Assignments" (to see who has what)
+- ✅ **Automatic filtering:** Realtors only see their properties automatically
+- ✅ **Clear UI:** Badges and colors show assignment status
+- ✅ **Real-time ready:** Easy to add polling or WebSocket updates
 
-The hardest part is already done! You just need to build the UI. 🎉
-
+Everything is ready! Just copy the components and CSS, and you'll have a complete property assignment system! 🎉
