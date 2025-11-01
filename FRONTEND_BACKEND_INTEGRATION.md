@@ -262,6 +262,103 @@ Authorization: Bearer <realtor_jwt_token>
 ]
 ```
 
+### 6. Unassign Properties from Realtor
+```http
+POST /property-manager/unassign-properties
+Authorization: Bearer <pm_jwt_token>
+Content-Type: application/json
+
+{
+  "property_ids": [1, 2, 3, 4, 5]
+}
+```
+**Response:**
+```json
+{
+  "message": "Successfully unassigned 5 properties from realtors",
+  "property_count": 5,
+  "unassigned_property_ids": [1, 2, 3, 4, 5]
+}
+```
+
+### 7. Update Property Status
+```http
+PATCH /properties/{property_id}/status
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "listing_status": "Sold"  // Options: "Available", "For Sale", "For Rent", "Sold", "Rented"
+}
+```
+**Response:**
+```json
+{
+  "message": "Property status updated to Sold",
+  "property_id": 1,
+  "new_status": "Sold",
+  "updated_metadata": {...}
+}
+```
+
+### 8. Update or Remove Property Agent
+```http
+PATCH /properties/{property_id}/agent
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "agent": {
+    "name": "Jane Smith",
+    "phone": "555-9876",
+    "email": "jane@example.com"
+  }
+}
+```
+**To Remove Agent:**
+```json
+{
+  "agent": null
+}
+```
+**Response:**
+```json
+{
+  "message": "Property agent updated successfully",
+  "property_id": 1,
+  "agent": {
+    "name": "Jane Smith",
+    "phone": "555-9876",
+    "email": "jane@example.com"
+  },
+  "updated_metadata": {...}
+}
+```
+
+### 9. Update Property Details (General)
+```http
+PATCH /properties/{property_id}
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "listing_status": "Sold",
+  "agent": null,
+  "price": 2500,
+  "days_on_market": 25,
+  "features": ["Pool", "Gym", "Parking"]
+}
+```
+**Response:**
+```json
+{
+  "message": "Property updated successfully",
+  "property_id": 1,
+  "updated_fields": ["listing_status", "agent", "price", "days_on_market", "features"],
+  "updated_metadata": {...}
+}
+```
+
 ---
 
 ## 🎨 Frontend Implementation
@@ -517,6 +614,64 @@ const PropertyAssignmentsView = () => {
     }
   };
 
+  const handleUnassignProperty = async (propertyId) => {
+    if (!window.confirm('Are you sure you want to unassign this property?')) {
+      return;
+    }
+
+    try {
+      const response = await axios.post(
+        '/property-manager/unassign-properties',
+        { property_ids: [propertyId] },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      
+      alert(`✅ ${response.data.message}`);
+      fetchAssignments(); // Refresh the view
+    } catch (error) {
+      console.error('Failed to unassign property:', error);
+      alert(`❌ Failed: ${error.response?.data?.detail || error.message}`);
+    }
+  };
+
+  const handleStatusChange = async (propertyId, newStatus) => {
+    try {
+      const response = await axios.patch(
+        `/properties/${propertyId}/status`,
+        { listing_status: newStatus },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      
+      // Optionally show success message
+      console.log(`✅ ${response.data.message}`);
+      fetchAssignments(); // Refresh to show updated status
+    } catch (error) {
+      console.error('Failed to update status:', error);
+      alert(`❌ Failed: ${error.response?.data?.detail || error.message}`);
+      fetchAssignments(); // Refresh to revert change
+    }
+  };
+
+  const handleRemoveAgent = async (propertyId) => {
+    if (!window.confirm('Are you sure you want to remove the agent from this property?')) {
+      return;
+    }
+
+    try {
+      const response = await axios.patch(
+        `/properties/${propertyId}/agent`,
+        { agent: null },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      
+      alert(`✅ ${response.data.message}`);
+      fetchAssignments(); // Refresh the view
+    } catch (error) {
+      console.error('Failed to remove agent:', error);
+      alert(`❌ Failed: ${error.response?.data?.detail || error.message}`);
+    }
+  };
+
   if (loading) return <div className="loading">Loading assignments...</div>;
   if (error) return <div className="error">{error}</div>;
   if (!assignments) return <div>No data available</div>;
@@ -597,7 +752,16 @@ const PropertyAssignmentsView = () => {
                   )}
                   {property.agent && (
                     <div className="agent-section">
-                      <strong>Agent:</strong>
+                      <div className="agent-header">
+                        <strong>Agent:</strong>
+                        <button 
+                          onClick={() => handleRemoveAgent(property.id)}
+                          className="remove-agent-btn"
+                          title="Remove agent"
+                        >
+                          ✕
+                        </button>
+                      </div>
                       <p>{property.agent.name}</p>
                       {property.agent.email && <p>{property.agent.email}</p>}
                       {property.agent.phone && <p>{property.agent.phone}</p>}
@@ -689,6 +853,26 @@ const PropertyAssignmentsView = () => {
                       {property.description && (
                         <p className="description">{property.description}</p>
                       )}
+                    </div>
+                    <div className="property-actions">
+                      <button 
+                        onClick={() => handleUnassignProperty(property.id)}
+                        className="unassign-btn"
+                        title="Unassign from realtor"
+                      >
+                        Unassign
+                      </button>
+                      <select
+                        value={property.listing_status || 'Available'}
+                        onChange={(e) => handleStatusChange(property.id, e.target.value)}
+                        className="status-select"
+                      >
+                        <option value="Available">Available</option>
+                        <option value="For Sale">For Sale</option>
+                        <option value="For Rent">For Rent</option>
+                        <option value="Sold">Sold</option>
+                        <option value="Rented">Rented</option>
+                      </select>
                     </div>
                     <p className="property-id">Property ID: {property.id}</p>
                   </div>
@@ -1385,6 +1569,69 @@ section h2 {
   color: #666;
   font-style: italic;
 }
+
+/* Property Actions */
+.property-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 1px solid #eee;
+}
+
+.unassign-btn {
+  padding: 6px 12px;
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.unassign-btn:hover {
+  background: #c82333;
+}
+
+.status-select {
+  padding: 6px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  flex: 1;
+}
+
+.status-select:hover {
+  border-color: #007bff;
+}
+
+.agent-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 5px;
+}
+
+.remove-agent-btn {
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.remove-agent-btn:hover {
+  background: #c82333;
+}
 ```
 
 ---
@@ -1508,5 +1755,79 @@ export default PropertyManagerDashboard;
 - ✅ **Automatic filtering:** Realtors only see their properties automatically
 - ✅ **Clear UI:** Badges and colors show assignment status
 - ✅ **Real-time ready:** Easy to add polling or WebSocket updates
+- ✅ **Property Management:** Unassign properties, update status, remove/update agents
+- ✅ **Status Management:** Change property status between Available, For Sale, For Rent, Sold, Rented
+
+## 🗄️ Database Structure
+
+### Property Data Storage
+
+All property data is stored in the `apartmentlisting` table:
+- **`listing_metadata`** (JSONB column): Contains all property information:
+  - `listing_id`: String (e.g., "MLS000113")
+  - `address`: String
+  - `price`: Number
+  - `bedrooms`, `bathrooms`: Numbers
+  - `square_feet`, `lot_size_sqft`: Numbers
+  - `year_built`: Number
+  - `property_type`: String (e.g., "Apartment")
+  - **`listing_status`**: String ("Available", "For Sale", "For Rent", "Sold", "Rented")
+  - `days_on_market`: Number
+  - `listing_date`: String (ISO date)
+  - **`agent`**: Object with `name`, `phone`, `email` (can be `null`)
+  - `features`: Array of strings
+  - `description`: String
+  - `image_url`: String
+
+### To Check in Database
+
+**Query to see all property statuses:**
+```sql
+SELECT 
+  id,
+  source_id,
+  listing_metadata->>'listing_status' as status,
+  listing_metadata->>'address' as address,
+  listing_metadata->>'listing_id' as listing_id,
+  listing_metadata->'agent' as agent
+FROM apartmentlisting
+ORDER BY id;
+```
+
+**Query to see properties by status:**
+```sql
+SELECT 
+  id,
+  listing_metadata->>'listing_status' as status,
+  listing_metadata->>'address' as address
+FROM apartmentlisting
+WHERE listing_metadata->>'listing_status' = 'Sold';
+```
+
+**Query to see properties with agents:**
+```sql
+SELECT 
+  id,
+  listing_metadata->>'address' as address,
+  listing_metadata->'agent'->>'name' as agent_name,
+  listing_metadata->'agent'->>'email' as agent_email
+FROM apartmentlisting
+WHERE listing_metadata->'agent' IS NOT NULL;
+```
+
+**Query to see assignment (which source/property manager/realtor owns property):**
+```sql
+SELECT 
+  al.id,
+  al.source_id,
+  s.property_manager_id,
+  s.realtor_id,
+  CASE 
+    WHEN s.property_manager_id IS NOT NULL THEN 'Property Manager'
+    WHEN s.realtor_id IS NOT NULL THEN 'Realtor'
+  END as owner_type
+FROM apartmentlisting al
+JOIN source s ON al.source_id = s.source_id;
+```
 
 Everything is ready! Just copy the components and CSS, and you'll have a complete property assignment system! 🎉
