@@ -107,7 +107,12 @@ class VapiRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    try:
+        init_db()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"⚠️ Database initialization failed: {e}")
+        print("⚠️ Continuing without database connection...")
 
     yield  # This is where FastAPI app runs
 
@@ -116,21 +121,29 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# set orgin here
+# set origin here
 origins = [
-    "https://react-app-form.onrender.com/",
     "https://react-app-form.onrender.com",
     "https://leaseap.com",
-    "https://leaseap.com/",
     "https://www.leasap.com",
-    "https://www.leasap.com/",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    # Add your frontend URL here if it's different from the above
 ]
+
+# Add CORS middleware with proper configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 
@@ -717,6 +730,20 @@ def run_sync():
     return sync_apartment_listings()
 
 
+@app.options("/login")
+async def options_login(request: Request):
+    """Handle CORS preflight for login endpoint."""
+    origin = request.headers.get("Origin", "*")
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": origin if origin in origins else origins[0] if origins else "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
+
 @app.post("/login")
 async def login_realtor(response: Response, payload: dict = Body(...), request: Request = None):
     """Login endpoint for Realtors (standalone or managed)."""
@@ -732,8 +759,8 @@ async def login_realtor(response: Response, payload: dict = Body(...), request: 
             key="refresh_token",
             value=result["refresh_token"],
             httponly=True,
-            secure=True,  # Use HTTPS in production
-            samesite="strict",
+            secure=False,  # Set to False for HTTP, True for HTTPS in production
+            samesite="lax",  # Changed from "strict" to "lax" for better compatibility
             max_age=60 * 60 * 24 * 30,  # 30 days
         )
         
@@ -750,6 +777,20 @@ async def login_realtor(response: Response, payload: dict = Body(...), request: 
         raise HTTPException(status_code=400, detail=f"Realtor login failed: {e}")
 
 
+@app.options("/property-manager-login")
+async def options_property_manager_login(request: Request):
+    """Handle CORS preflight for property manager login endpoint."""
+    origin = request.headers.get("Origin", "*")
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": origin if origin in origins else origins[0] if origins else "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
+
 @app.post("/property-manager-login")
 async def login_property_manager(response: Response, payload: dict = Body(...), request: Request = None):
     """Login endpoint for Property Managers."""
@@ -765,8 +806,8 @@ async def login_property_manager(response: Response, payload: dict = Body(...), 
             key="refresh_token",
             value=result["refresh_token"],
             httponly=True,
-            secure=True,  # Use HTTPS in production
-            samesite="strict",
+            secure=False,  # Set to False for HTTP, True for HTTPS in production
+            samesite="lax",  # Changed from "strict" to "lax" for better compatibility
             max_age=60 * 60 * 24 * 30,  # 30 days
         )
         
@@ -830,7 +871,7 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
 
 
 @app.get("/managed-realtors")
-async def get_managed_realtors(user_data: dict = Depends(get_current_user_data)):
+async def get_managed_realtors_endpoint(user_data: dict = Depends(get_current_user_data)):
     """Get managed realtors (only for Property Managers)."""
     user_type = user_data["user_type"]
     user_id = user_data["id"]
@@ -841,8 +882,99 @@ async def get_managed_realtors(user_data: dict = Depends(get_current_user_data))
             detail="Only Property Managers can access this endpoint"
         )
     
-    realtors = get_managed_realtors(user_id)
+    from DB.db import get_managed_realtors as fetch_managed_realtors
+    realtors = fetch_managed_realtors(user_id)
     return JSONResponse(content={"managed_realtors": realtors})
+
+
+@app.get("/property-manager/realtors")
+async def get_property_manager_realtors(user_data: dict = Depends(get_current_user_data)):
+    """Get managed realtors for Property Managers (frontend endpoint)."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403, 
+            detail="Only Property Managers can access this endpoint"
+        )
+    
+    from DB.db import get_managed_realtors as fetch_managed_realtors
+    realtors = fetch_managed_realtors(user_id)
+    # Transform to match frontend expectations
+    realtors_data = [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "email": r["email"],
+            "status": "active",  # Default status
+        }
+        for r in realtors
+    ]
+    return JSONResponse(content={"realtors": realtors_data})
+
+
+@app.post("/property-manager/add-realtor")
+async def add_realtor_endpoint(
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Add a new realtor under a Property Manager."""
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403, 
+            detail="Only Property Managers can add realtors"
+        )
+    
+    name = payload.get("name")
+    email = payload.get("email")
+    password = payload.get("password")
+    
+    if not all([name, email, password]):
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required fields: name, email, password"
+        )
+    
+    # Use a default contact if not provided
+    contact = payload.get("contact", "TBD")
+    
+    try:
+        # Step 1: Create Supabase Auth user
+        auth_response = supabase.auth.sign_up({"email": email, "password": password})
+        
+        if not auth_response.user:
+            raise HTTPException(
+                status_code=400, detail="Failed to create Supabase user"
+            )
+        
+        auth_user_id = str(auth_response.user.id)  # Supabase UUID
+        
+        # Step 2: Create realtor in database under this property manager
+        from DB.db import create_realtor
+        result = create_realtor(
+            auth_user_id=auth_user_id,
+            name=name,
+            email=email,
+            contact=contact,
+            property_manager_id=property_manager_id,
+        )
+        
+        return JSONResponse(content={
+            "message": "Realtor added successfully!",
+            "realtor": result.get("realtor", {})
+        }, status_code=200)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"Exception adding realtor: {e}\nTraceback:\n{tb}")
+        raise HTTPException(status_code=500, detail=f"Failed to add realtor: {str(e)}")
 
 
 @app.get("/user-profile")
