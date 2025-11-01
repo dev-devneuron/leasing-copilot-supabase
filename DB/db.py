@@ -679,6 +679,43 @@ def insert_apartments(listings: List[dict], listing_to_text, source_id: int):
         session.commit()
 
 
+def embed_and_store_listings_for_source(
+    listing_file, listing_api_url: str = None, source_id: int = None
+):
+    """Upload listings directly to a Source (for Property Managers or direct assignment)."""
+    listing_text = ""
+    listings = []
+
+    if listing_file:
+        content = listing_file.file.read()
+        if listing_file.filename.endswith(".json"):
+            parsed = json.loads(content)
+            listings = parsed if isinstance(parsed, list) else [parsed]
+        elif listing_file.filename.endswith(".csv"):
+            decoded = content.decode("utf-8")
+            reader = csv.DictReader(io.StringIO(decoded))
+            listings = [row for row in reader]
+        else:
+            raise HTTPException(
+                status_code=400, detail="Unsupported listing file format"
+            )
+
+    elif listing_api_url:
+        response = requests.get(listing_api_url)
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=400, detail="Failed to fetch data from API URL"
+            )
+        listing_data = response.json()
+        listings = listing_data if isinstance(listing_data, list) else [listing_data]
+
+    if listings:
+        insert_apartments(listings, listing_to_text, source_id)
+        return {"message": f"Successfully inserted {len(listings)} listings", "count": len(listings)}
+    
+    raise HTTPException(status_code=400, detail="No listings to process")
+
+
 # ---------------------- INGEST DATA ----------------------
 
 

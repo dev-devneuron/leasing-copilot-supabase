@@ -707,7 +707,7 @@ async def upload_rules(
         if not source:
             raise HTTPException(status_code=404, detail="Source not found for realtor")
 
-    uploaded_files = embed_and_store_rules(files, realtor_id, source.id)
+    uploaded_files = embed_and_store_rules(files, realtor_id, source.source_id)
     return JSONResponse(
         content={"message": "Rules uploaded & embedded", "files": uploaded_files},
         status_code=200,
@@ -1133,6 +1133,401 @@ async def get_properties_by_realtor(user_data: dict = Depends(get_current_user_d
         )
         
         return JSONResponse(content=result)
+
+
+# ---------------------- PROPERTY ASSIGNMENT AND UPLOAD ----------------------
+
+@app.get("/check-properties")
+async def check_properties(user_data: dict = Depends(get_current_user_data)):
+    """Check existing properties for the current user (PM or Realtor)."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        if user_type == "property_manager":
+            # Get PM's own properties
+            pm_sources = session.exec(
+                select(Source).where(Source.property_manager_id == user_id)
+            ).all()
+            pm_source_ids = [s.source_id for s in pm_sources]
+            
+            # Get managed realtors' sources
+            realtors = session.exec(
+                select(Realtor).where(Realtor.property_manager_id == user_id)
+            ).all()
+            realtor_source_ids = []
+            for realtor in realtors:
+                realtor_sources = session.exec(
+                    select(Source).where(Source.realtor_id == realtor.realtor_id)
+                ).all()
+                realtor_source_ids.extend([s.source_id for s in realtor_sources])
+            
+            all_source_ids = pm_source_ids + realtor_source_ids
+        else:  # realtor
+            sources = session.exec(
+                select(Source).where(Source.realtor_id == user_id)
+            ).all()
+            all_source_ids = [s.source_id for s in sources]
+        
+        if not all_source_ids:
+            return JSONResponse(content={
+                "user_type": user_type,
+                "user_id": user_id,
+                "total_properties": 0,
+                "properties": [],
+                "sources": []
+            })
+        
+        properties = session.exec(
+            select(ApartmentListing).where(ApartmentListing.source_id.in_(all_source_ids))
+        ).all()
+        
+        # Get source info
+        sources = session.exec(
+            select(Source).where(Source.source_id.in_(all_source_ids))
+        ).all()
+        
+        source_info = []
+        for s in sources:
+            owner_type = "property_manager" if s.property_manager_id else "realtor"
+            owner_id = s.property_manager_id if s.property_manager_id else s.realtor_id
+            
+            if s.property_manager_id:
+                pm = session.exec(
+                    select(PropertyManager).where(PropertyManager.property_manager_id == s.property_manager_id)
+                ).first()
+                owner_name = pm.name if pm else "Unknown"
+            else:
+                r = session.exec(
+                    select(Realtor).where(Realtor.realtor_id == s.realtor_id)
+                ).first()
+                owner_name = r.name if r else "Unknown"
+            
+            source_info.append({
+                "source_id": s.source_id,
+                "owner_type": owner_type,
+                "owner_id": owner_id,
+                "owner_name": owner_name,
+                "property_count": len([p for p in properties if p.source_id == s.source_id])
+            })
+        
+        return JSONResponse(content={
+            "user_type": user_type,
+            "user_id": user_id,
+            "total_properties": len(properties),
+            "sources": source_info,
+            "properties_by_source": {
+                str(s.source_id): [
+                    {
+                        "id": p.id,
+                        "address": (p.listing_metadata or {}).get("address"),
+                        "price": (p.listing_metadata or {}).get("price"),
+                    }
+                    for p in properties if p.source_id == s.source_id
+                ]
+                for s in sources
+            }
+        })
+
+
+@app.post("/property-manager/upload-listings")
+async def property_manager_upload_listings(
+    listing_file: UploadFile = File(None),
+    listing_api_url: str = Form(None),
+    assign_to_realtor_id: int = Form(None),  # Optional: assign to specific realtor
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Property Manager uploads listings to their own source or assigns to a realtor."""
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can upload listings"
+        )
+    
+    with Session(engine) as session:
+        source_id = None
+        
+        if assign_to_realtor_id:
+            # Verify realtor is managed by this PM
+            realtor = session.exec(
+                select(Realtor).where(
+                    Realtor.realtor_id == assign_to_realtor_id,
+                    Realtor.property_manager_id == property_manager_id
+                )
+            ).first()
+            
+            if not realtor:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Realtor not found or not managed by this Property Manager"
+                )
+            
+            # Get realtor's source
+            source = session.exec(
+                select(Source).where(Source.realtor_id == assign_to_realtor_id)
+            ).first()
+            
+            if not source:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Source not found for realtor"
+                )
+            
+            source_id = source.source_id
+        else:
+            # Upload to PM's own source
+            source = session.exec(
+                select(Source).where(Source.property_manager_id == property_manager_id)
+            ).first()
+            
+            if not source:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Source not found for Property Manager"
+                )
+            
+            source_id = source.source_id
+        
+        # Use the new direct insert function
+        from DB.db import embed_and_store_listings_for_source
+        result = embed_and_store_listings_for_source(
+            listing_file=listing_file,
+            listing_api_url=listing_api_url,
+            source_id=source_id
+        )
+        
+        return JSONResponse(content={
+            "message": "Listings uploaded successfully",
+            "assigned_to": "realtor" if assign_to_realtor_id else "property_manager",
+            "realtor_id": assign_to_realtor_id if assign_to_realtor_id else None,
+            "source_id": source_id,
+            **result
+        })
+
+
+@app.post("/property-manager/assign-properties")
+async def assign_properties_to_realtor(
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Property Manager assigns existing properties to a specific realtor.
+    
+    Body:
+    {
+        "realtor_id": 123,  // Realtor ID (integer)
+        "property_ids": [1, 2, 3, 4, 5]  // List of apartment listing IDs
+    }
+    """
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can assign properties"
+        )
+    
+    realtor_id = payload.get("realtor_id")
+    property_ids = payload.get("property_ids", [])  # List of apartment listing IDs
+    
+    if not realtor_id or not property_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required fields: realtor_id, property_ids"
+        )
+    
+    with Session(engine) as session:
+        # Verify realtor is managed by this PM
+        realtor = session.exec(
+            select(Realtor).where(
+                Realtor.realtor_id == realtor_id,
+                Realtor.property_manager_id == property_manager_id
+            )
+        ).first()
+        
+        if not realtor:
+            raise HTTPException(
+                status_code=404,
+                detail="Realtor not found or not managed by this Property Manager"
+            )
+        
+        # Get realtor's source
+        realtor_source = session.exec(
+            select(Source).where(Source.realtor_id == realtor_id)
+        ).first()
+        
+        if not realtor_source:
+            raise HTTPException(
+                status_code=404,
+                detail="Source not found for realtor"
+            )
+        
+        # Get PM's sources to verify property ownership
+        pm_sources = session.exec(
+            select(Source).where(Source.property_manager_id == property_manager_id)
+        ).all()
+        pm_source_ids = [s.source_id for s in pm_sources]
+        
+        # Get the properties and verify they belong to PM
+        properties = session.exec(
+            select(ApartmentListing).where(
+                ApartmentListing.id.in_(property_ids),
+                ApartmentListing.source_id.in_(pm_source_ids)
+            )
+        ).all()
+        
+        if len(properties) != len(property_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="Some properties not found or don't belong to this Property Manager"
+            )
+        
+        # Move properties to realtor's source
+        for prop in properties:
+            prop.source_id = realtor_source.source_id
+        
+        session.commit()
+        
+        return JSONResponse(content={
+            "message": f"Successfully assigned {len(properties)} properties to realtor",
+            "realtor_id": realtor_id,
+            "realtor_name": realtor.name,
+            "realtor_email": realtor.email,
+            "property_count": len(properties),
+            "assigned_property_ids": [p.id for p in properties]
+        })
+
+
+@app.post("/property-manager/bulk-assign-properties")
+async def bulk_assign_properties_to_realtors(
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Property Manager assigns multiple properties to multiple realtors in one call.
+    
+    Body:
+    {
+        "assignments": [
+            {
+                "realtor_id": 1,
+                "property_ids": [1, 2, 3]
+            },
+            {
+                "realtor_id": 2,
+                "property_ids": [4, 5, 6]
+            }
+        ]
+    }
+    """
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can assign properties"
+        )
+    
+    assignments = payload.get("assignments", [])
+    
+    if not assignments:
+        raise HTTPException(
+            status_code=400,
+            detail="No assignments provided"
+        )
+    
+    results = []
+    
+    with Session(engine) as session:
+        # Get PM's sources to verify property ownership
+        pm_sources = session.exec(
+            select(Source).where(Source.property_manager_id == property_manager_id)
+        ).all()
+        pm_source_ids = [s.source_id for s in pm_sources]
+        
+        for assignment in assignments:
+            realtor_id = assignment.get("realtor_id")
+            property_ids = assignment.get("property_ids", [])
+            
+            if not realtor_id or not property_ids:
+                results.append({
+                    "realtor_id": realtor_id,
+                    "status": "skipped",
+                    "message": "Missing realtor_id or property_ids"
+                })
+                continue
+            
+            # Verify realtor is managed by this PM
+            realtor = session.exec(
+                select(Realtor).where(
+                    Realtor.realtor_id == realtor_id,
+                    Realtor.property_manager_id == property_manager_id
+                )
+            ).first()
+            
+            if not realtor:
+                results.append({
+                    "realtor_id": realtor_id,
+                    "status": "error",
+                    "message": "Realtor not found or not managed by this Property Manager"
+                })
+                continue
+            
+            # Get realtor's source
+            realtor_source = session.exec(
+                select(Source).where(Source.realtor_id == realtor_id)
+            ).first()
+            
+            if not realtor_source:
+                results.append({
+                    "realtor_id": realtor_id,
+                    "status": "error",
+                    "message": "Source not found for realtor"
+                })
+                continue
+            
+            # Get the properties and verify they belong to PM
+            properties = session.exec(
+                select(ApartmentListing).where(
+                    ApartmentListing.id.in_(property_ids),
+                    ApartmentListing.source_id.in_(pm_source_ids)
+                )
+            ).all()
+            
+            if len(properties) != len(property_ids):
+                results.append({
+                    "realtor_id": realtor_id,
+                    "realtor_name": realtor.name,
+                    "status": "partial",
+                    "message": f"Only {len(properties)} of {len(property_ids)} properties found and assigned",
+                    "assigned_count": len(properties),
+                    "requested_count": len(property_ids)
+                })
+            else:
+                # Move properties to realtor's source
+                for prop in properties:
+                    prop.source_id = realtor_source.source_id
+                
+                session.commit()
+                
+                results.append({
+                    "realtor_id": realtor_id,
+                    "realtor_name": realtor.name,
+                    "realtor_email": realtor.email,
+                    "status": "success",
+                    "message": f"Successfully assigned {len(properties)} properties",
+                    "assigned_count": len(properties),
+                    "assigned_property_ids": [p.id for p in properties]
+                })
+        
+        return JSONResponse(content={
+            "message": "Bulk assignment completed",
+            "total_assignments": len(assignments),
+            "results": results
+        })
 
 
 # ---------------------- TEST USER MANAGEMENT ----------------------
