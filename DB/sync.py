@@ -33,11 +33,16 @@ def sync_apartment_listings() -> Dict[str, Any]:
     with Session(engine) as main_session:
         sources = main_session.exec(select(Source)).all()
 
-    print(f"Starting sync for {len(sources)} realtor(s)...")
+    print(f"Starting sync for {len(sources)} source(s)...")
 
     for source in sources:
+        # Only sync sources that belong to realtors (secondary DB structure)
+        if not source.realtor_id:
+            print(f"Skipping source {source.source_id} - belongs to Property Manager (no secondary table)")
+            continue
+            
         realtor_id = source.realtor_id
-        source_id = source.id
+        source_id = source.source_id  # Fixed: use source_id instead of id
         table_name = f"realtor_{realtor_id}_listings"
         DynamicListing = create_dynamic_listing_class(table_name)
 

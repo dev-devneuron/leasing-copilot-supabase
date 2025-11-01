@@ -129,9 +129,11 @@ origins = [
     "http://localhost:3000",
     "http://localhost:5173",
     "http://localhost:5174",
+    "http://localhost:8080",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
+    "http://127.0.0.1:8080",
     # Add your frontend URL here if it's different from the above
 ]
 
@@ -831,7 +833,11 @@ async def login_property_manager(response: Response, payload: dict = Body(...), 
 
 @app.get("/apartments")
 async def get_apartments(user_data: dict = Depends(get_current_user_data)):
-    """Get apartments based on user type and data access scope."""
+    """Get apartments based on user type and data access scope.
+    
+    - Property Managers: See all properties from their own Source + all managed realtors' Sources
+    - Realtors: See only properties from their own Source
+    """
     user_type = user_data["user_type"]
     user_id = user_data["id"]
     
@@ -843,7 +849,7 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
 
     if not source_ids:
         return JSONResponse(
-            content={"message": "No sources found for this user"}, status_code=404
+            content={"message": "No sources found for this user", "apartments": []}, status_code=200
         )
 
     with Session(engine) as session:
@@ -851,11 +857,49 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
         apartments = session.exec(
             select(ApartmentListing).where(ApartmentListing.source_id.in_(source_ids))
         ).all()
+        
+        # Get all relevant sources in one query
+        sources = session.exec(
+            select(Source).where(Source.source_id.in_(source_ids))
+        ).all()
+        
+        # Create a mapping of source_id to source for quick lookup
+        source_map = {s.source_id: s for s in sources}
 
-        # Transform into frontend-friendly shape
+        # Transform into frontend-friendly shape with ownership info
         result = []
         for apt in apartments:
             meta = apt.listing_metadata or {}
+            source = source_map.get(apt.source_id)
+            
+            # Get owner information
+            owner_info = {}
+            if source and source.property_manager_id:
+                pm = session.exec(
+                    select(PropertyManager).where(PropertyManager.property_manager_id == source.property_manager_id)
+                ).first()
+                if pm:
+                    owner_info = {
+                        "owner_type": "property_manager",
+                        "owner_id": pm.property_manager_id,
+                        "owner_name": pm.name,
+                        "owner_email": pm.email,
+                    }
+            
+            if source and source.realtor_id:
+                realtor = session.exec(
+                    select(Realtor).where(Realtor.realtor_id == source.realtor_id)
+                ).first()
+                if realtor:
+                    owner_info = {
+                        "owner_type": "realtor",
+                        "owner_id": realtor.realtor_id,
+                        "owner_name": realtor.name,
+                        "owner_email": realtor.email,
+                        "is_standalone": realtor.is_standalone,
+                        "property_manager_id": realtor.property_manager_id,
+                    }
+            
             result.append(
                 {
                     "id": apt.id,
@@ -864,6 +908,9 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
                     "bedrooms": meta.get("bedrooms"),
                     "bathrooms": meta.get("bathrooms"),
                     "description": meta.get("description"),
+                    "image_url": meta.get("image_url"),
+                    "source_id": apt.source_id,
+                    **owner_info,  # Add owner information
                 }
             )
 
@@ -981,6 +1028,111 @@ async def add_realtor_endpoint(
 async def get_user_profile(user_data: dict = Depends(get_current_user_data)):
     """Get current user's profile information."""
     return JSONResponse(content={"user": user_data})
+
+
+@app.get("/property-manager/properties-by-realtor")
+async def get_properties_by_realtor(user_data: dict = Depends(get_current_user_data)):
+    """Get properties grouped by realtor (Property Managers only).
+    
+    Returns properties organized by which realtor they belong to,
+    plus properties directly owned by the Property Manager.
+    """
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403, 
+            detail="Only Property Managers can access this endpoint"
+        )
+    
+    with Session(engine) as session:
+        # Get all managed realtors
+        realtors = session.exec(
+            select(Realtor).where(Realtor.property_manager_id == property_manager_id)
+        ).all()
+        
+        result = {
+            "property_manager_properties": [],
+            "realtor_properties": {},
+            "summary": {
+                "total_properties": 0,
+                "property_manager_count": 0,
+                "realtor_counts": {}
+            }
+        }
+        
+        # Get Property Manager's own properties
+        pm_sources = session.exec(
+            select(Source).where(Source.property_manager_id == property_manager_id)
+        ).all()
+        
+        pm_source_ids = [s.source_id for s in pm_sources]
+        if pm_source_ids:
+            pm_apartments = session.exec(
+                select(ApartmentListing).where(ApartmentListing.source_id.in_(pm_source_ids))
+            ).all()
+            
+            for apt in pm_apartments:
+                meta = apt.listing_metadata or {}
+                result["property_manager_properties"].append({
+                    "id": apt.id,
+                    "address": meta.get("address"),
+                    "price": meta.get("price"),
+                    "bedrooms": meta.get("bedrooms"),
+                    "bathrooms": meta.get("bathrooms"),
+                    "description": meta.get("description"),
+                    "image_url": meta.get("image_url"),
+                    "source_id": apt.source_id,
+                })
+        
+        result["summary"]["property_manager_count"] = len(result["property_manager_properties"])
+        
+        # Get properties for each realtor
+        for realtor in realtors:
+            realtor_sources = session.exec(
+                select(Source).where(Source.realtor_id == realtor.realtor_id)
+            ).all()
+            
+            realtor_source_ids = [s.source_id for s in realtor_sources]
+            if realtor_source_ids:
+                realtor_apartments = session.exec(
+                    select(ApartmentListing).where(ApartmentListing.source_id.in_(realtor_source_ids))
+                ).all()
+                
+                realtor_props = []
+                for apt in realtor_apartments:
+                    meta = apt.listing_metadata or {}
+                    realtor_props.append({
+                        "id": apt.id,
+                        "address": meta.get("address"),
+                        "price": meta.get("price"),
+                        "bedrooms": meta.get("bedrooms"),
+                        "bathrooms": meta.get("bathrooms"),
+                        "description": meta.get("description"),
+                        "image_url": meta.get("image_url"),
+                        "source_id": apt.source_id,
+                    })
+                
+                result["realtor_properties"][str(realtor.realtor_id)] = {
+                    "realtor_id": realtor.realtor_id,
+                    "realtor_name": realtor.name,
+                    "realtor_email": realtor.email,
+                    "properties": realtor_props,
+                    "count": len(realtor_props),
+                }
+                
+                result["summary"]["realtor_counts"][str(realtor.realtor_id)] = {
+                    "realtor_name": realtor.name,
+                    "count": len(realtor_props),
+                }
+        
+        result["summary"]["total_properties"] = (
+            result["summary"]["property_manager_count"] + 
+            sum(rp["count"] for rp in result["realtor_properties"].values())
+        )
+        
+        return JSONResponse(content=result)
 
 
 # ---------------------- TEST USER MANAGEMENT ----------------------
