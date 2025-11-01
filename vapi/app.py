@@ -900,19 +900,39 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
                         "property_manager_id": realtor.property_manager_id,
                     }
             
-            result.append(
-                {
-                    "id": apt.id,
-                    "address": meta.get("address"),
-                    "price": meta.get("price"),
-                    "bedrooms": meta.get("bedrooms"),
-                    "bathrooms": meta.get("bathrooms"),
-                    "description": meta.get("description"),
-                    "image_url": meta.get("image_url"),
-                    "source_id": apt.source_id,
-                    **owner_info,  # Add owner information
-                }
-            )
+            # Include all metadata fields + essential info
+            property_result = {
+                "id": apt.id,
+                "source_id": apt.source_id,
+                # Core property information
+                "listing_id": meta.get("listing_id"),
+                "address": meta.get("address"),
+                "price": meta.get("price"),
+                "bedrooms": meta.get("bedrooms"),
+                "bathrooms": meta.get("bathrooms"),
+                "square_feet": meta.get("square_feet"),
+                "lot_size_sqft": meta.get("lot_size_sqft"),
+                "year_built": meta.get("year_built"),
+                "property_type": meta.get("property_type"),
+                "listing_status": meta.get("listing_status"),
+                "days_on_market": meta.get("days_on_market"),
+                "listing_date": meta.get("listing_date"),
+                # Agent information
+                "agent": meta.get("agent"),
+                # Features array
+                "features": meta.get("features", []),
+                # Legacy fields (for backward compatibility)
+                "description": meta.get("description"),
+                "image_url": meta.get("image_url"),
+                # Owner/assignment information
+                **owner_info,
+                "is_assigned": True if owner_info.get("owner_type") == "realtor" else False,
+                "assigned_to_realtor_id": owner_info.get("owner_id") if owner_info.get("owner_type") == "realtor" else None,
+                "assigned_to_realtor_name": owner_info.get("owner_name") if owner_info.get("owner_type") == "realtor" else None,
+                # Full metadata (if needed for advanced use cases)
+                "full_metadata": meta
+            }
+            result.append(property_result)
 
         return JSONResponse(content=result)
 
@@ -1077,13 +1097,23 @@ async def get_properties_by_realtor(user_data: dict = Depends(get_current_user_d
                 meta = apt.listing_metadata or {}
                 result["property_manager_properties"].append({
                     "id": apt.id,
+                    "source_id": apt.source_id,
+                    "listing_id": meta.get("listing_id"),
                     "address": meta.get("address"),
                     "price": meta.get("price"),
                     "bedrooms": meta.get("bedrooms"),
                     "bathrooms": meta.get("bathrooms"),
+                    "square_feet": meta.get("square_feet"),
+                    "lot_size_sqft": meta.get("lot_size_sqft"),
+                    "year_built": meta.get("year_built"),
+                    "property_type": meta.get("property_type"),
+                    "listing_status": meta.get("listing_status"),
+                    "days_on_market": meta.get("days_on_market"),
+                    "listing_date": meta.get("listing_date"),
+                    "agent": meta.get("agent"),
+                    "features": meta.get("features", []),
                     "description": meta.get("description"),
                     "image_url": meta.get("image_url"),
-                    "source_id": apt.source_id,
                 })
         
         result["summary"]["property_manager_count"] = len(result["property_manager_properties"])
@@ -1105,13 +1135,23 @@ async def get_properties_by_realtor(user_data: dict = Depends(get_current_user_d
                     meta = apt.listing_metadata or {}
                     realtor_props.append({
                         "id": apt.id,
+                        "source_id": apt.source_id,
+                        "listing_id": meta.get("listing_id"),
                         "address": meta.get("address"),
                         "price": meta.get("price"),
                         "bedrooms": meta.get("bedrooms"),
                         "bathrooms": meta.get("bathrooms"),
+                        "square_feet": meta.get("square_feet"),
+                        "lot_size_sqft": meta.get("lot_size_sqft"),
+                        "year_built": meta.get("year_built"),
+                        "property_type": meta.get("property_type"),
+                        "listing_status": meta.get("listing_status"),
+                        "days_on_market": meta.get("days_on_market"),
+                        "listing_date": meta.get("listing_date"),
+                        "agent": meta.get("agent"),
+                        "features": meta.get("features", []),
                         "description": meta.get("description"),
                         "image_url": meta.get("image_url"),
-                        "source_id": apt.source_id,
                     })
                 
                 result["realtor_properties"][str(realtor.realtor_id)] = {
@@ -1133,6 +1173,141 @@ async def get_properties_by_realtor(user_data: dict = Depends(get_current_user_d
         )
         
         return JSONResponse(content=result)
+
+
+@app.get("/property-manager/assignments")
+async def get_property_assignments(user_data: dict = Depends(get_current_user_data)):
+    """Get property assignments view for Property Managers.
+    
+    Shows all properties with clear assignment information:
+    - Properties owned by PM (unassigned)
+    - Properties assigned to each realtor
+    """
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can access this endpoint"
+        )
+    
+    with Session(engine) as session:
+        # Get all managed realtors
+        realtors = session.exec(
+            select(Realtor).where(Realtor.property_manager_id == property_manager_id)
+        ).all()
+        
+        # Get PM's sources
+        pm_sources = session.exec(
+            select(Source).where(Source.property_manager_id == property_manager_id)
+        ).all()
+        pm_source_ids = [s.source_id for s in pm_sources]
+        
+        # Get all properties (PM's + all realtors')
+        all_source_ids = pm_source_ids.copy()
+        realtor_sources_map = {}  # realtor_id -> [source_ids]
+        
+        for realtor in realtors:
+            realtor_sources = session.exec(
+                select(Source).where(Source.realtor_id == realtor.realtor_id)
+            ).all()
+            realtor_source_ids = [s.source_id for s in realtor_sources]
+            realtor_sources_map[realtor.realtor_id] = realtor_source_ids
+            all_source_ids.extend(realtor_source_ids)
+        
+        if not all_source_ids:
+            return JSONResponse(content={
+                "unassigned_properties": [],
+                "assigned_properties": {},
+                "summary": {
+                    "total_properties": 0,
+                    "unassigned_count": 0,
+                    "assigned_count": 0,
+                    "realtor_counts": {}
+                }
+            })
+        
+        # Get all properties
+        all_properties = session.exec(
+            select(ApartmentListing).where(ApartmentListing.source_id.in_(all_source_ids))
+        ).all()
+        
+        # Categorize properties
+        unassigned_properties = []
+        assigned_properties = {}  # realtor_id -> [properties]
+        
+        for prop in all_properties:
+            meta = prop.listing_metadata or {}
+            
+            property_data = {
+                "id": prop.id,
+                "source_id": prop.source_id,
+                # Core property information
+                "listing_id": meta.get("listing_id"),
+                "address": meta.get("address"),
+                "price": meta.get("price"),
+                "bedrooms": meta.get("bedrooms"),
+                "bathrooms": meta.get("bathrooms"),
+                "square_feet": meta.get("square_feet"),
+                "lot_size_sqft": meta.get("lot_size_sqft"),
+                "year_built": meta.get("year_built"),
+                "property_type": meta.get("property_type"),
+                "listing_status": meta.get("listing_status"),
+                "days_on_market": meta.get("days_on_market"),
+                "listing_date": meta.get("listing_date"),
+                # Agent information
+                "agent": meta.get("agent"),
+                # Features array
+                "features": meta.get("features", []),
+                # Legacy fields
+                "description": meta.get("description"),
+                "image_url": meta.get("image_url"),
+            }
+            
+            # Check if property belongs to PM (unassigned)
+            if prop.source_id in pm_source_ids:
+                unassigned_properties.append(property_data)
+            else:
+                # Find which realtor this belongs to
+                for realtor_id, source_ids in realtor_sources_map.items():
+                    if prop.source_id in source_ids:
+                        if realtor_id not in assigned_properties:
+                            assigned_properties[realtor_id] = []
+                        assigned_properties[realtor_id].append(property_data)
+                        break
+        
+        # Format assigned properties with realtor info
+        assigned_properties_formatted = {}
+        for realtor in realtors:
+            if realtor.realtor_id in assigned_properties:
+                assigned_properties_formatted[realtor.realtor_id] = {
+                    "realtor_id": realtor.realtor_id,
+                    "realtor_name": realtor.name,
+                    "realtor_email": realtor.email,
+                    "properties": assigned_properties[realtor.realtor_id],
+                    "count": len(assigned_properties[realtor.realtor_id])
+                }
+        
+        # Summary
+        summary = {
+            "total_properties": len(all_properties),
+            "unassigned_count": len(unassigned_properties),
+            "assigned_count": sum(len(props) for props in assigned_properties.values()),
+            "realtor_counts": {
+                str(realtor.realtor_id): {
+                    "realtor_name": realtor.name,
+                    "count": len(assigned_properties.get(realtor.realtor_id, []))
+                }
+                for realtor in realtors
+            }
+        }
+        
+        return JSONResponse(content={
+            "unassigned_properties": unassigned_properties,
+            "assigned_properties": assigned_properties_formatted,
+            "summary": summary
+        })
 
 
 # ---------------------- PROPERTY ASSIGNMENT AND UPLOAD ----------------------
