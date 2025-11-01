@@ -359,9 +359,168 @@ Content-Type: application/json
 }
 ```
 
+### 10. Delete Realtor/Agent
+```http
+DELETE /property-manager/realtors/{realtor_id}
+Authorization: Bearer <pm_jwt_token>
+```
+**What happens when a realtor is deleted:**
+1. ✅ All properties assigned to them become **unassigned** (moved back to PM)
+2. ✅ All bookings are **unassigned** (realtor_id set to NULL)
+3. ✅ All sources belonging to the realtor are **deleted**
+4. ✅ All rule chunks for those sources are **deleted**
+5. ✅ The realtor record is **deleted** from the database
+
+**Response:**
+```json
+{
+  "message": "Realtor 'Sarah Johnson' deleted successfully",
+  "realtor_id": 1,
+  "realtor_name": "Sarah Johnson",
+  "realtor_email": "sarah.johnson@testcompany.com",
+  "summary": {
+    "properties_reassigned": 5,
+    "properties_reassigned_ids": [101, 102, 103, 104, 105],
+    "bookings_unassigned": 3,
+    "bookings_unassigned_ids": [201, 202, 203],
+    "rule_chunks_deleted": 12,
+    "sources_deleted": 1
+  },
+  "note": "The user account in Supabase Auth still exists. They cannot access the system but their auth account remains."
+}
+```
+
+**⚠️ Important Notes:**
+- This action **cannot be undone**
+- The realtor's Supabase Auth account is **NOT deleted** (they can still login but won't have access)
+- All properties are automatically reassigned to the Property Manager
+- All bookings become unassigned (no realtor linked)
+
 ---
 
 ## 🎨 Frontend Implementation
+
+### Component 0: Realtor Management (PM Manages Realtors)
+
+```jsx
+// RealtorManagementPage.jsx
+import { useState, useEffect } from 'react';
+import axios from 'axios';
+
+const RealtorManagementPage = () => {
+  const [realtors, setRealtors] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  const token = localStorage.getItem('access_token');
+
+  useEffect(() => {
+    fetchRealtors();
+  }, []);
+
+  const fetchRealtors = async () => {
+    try {
+      setLoading(true);
+      const response = await axios.get('/property-manager/realtors', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setRealtors(response.data.realtors || []);
+    } catch (error) {
+      console.error('Failed to fetch realtors:', error);
+      setMessage('Failed to load realtors');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteRealtor = async (realtorId, realtorName) => {
+    const confirmMessage = `Are you sure you want to delete ${realtorName}?\n\n` +
+      `This will:\n` +
+      `- Move all their properties back to you (unassigned)\n` +
+      `- Unassign all their bookings\n` +
+      `- Delete their sources and rule chunks\n` +
+      `- Remove them from the system\n\n` +
+      `⚠️ This action CANNOT be undone!`;
+
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const response = await axios.delete(
+        `/property-manager/realtors/${realtorId}`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
+
+      setMessage(`✅ ${response.data.message}\n` +
+        `Properties reassigned: ${response.data.summary.properties_reassigned}\n` +
+        `Bookings unassigned: ${response.data.summary.bookings_unassigned}`);
+      
+      // Refresh the realtors list
+      fetchRealtors();
+    } catch (error) {
+      console.error('Failed to delete realtor:', error);
+      setMessage(`❌ Failed: ${error.response?.data?.detail || error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading && realtors.length === 0) {
+    return <div className="loading">Loading realtors...</div>;
+  }
+
+  return (
+    <div className="realtor-management-page">
+      <h1>Manage Realtors</h1>
+
+      {message && (
+        <div className={`message ${message.startsWith('✅') ? 'success' : 'error'}`}>
+          {message.split('\n').map((line, idx) => (
+            <div key={idx}>{line}</div>
+          ))}
+        </div>
+      )}
+
+      {realtors.length > 0 ? (
+        <div className="realtors-grid">
+          {realtors.map(realtor => (
+            <div key={realtor.id} className="realtor-card">
+              <div className="realtor-header">
+                <h3>{realtor.name}</h3>
+                <button
+                  onClick={() => handleDeleteRealtor(realtor.id, realtor.name)}
+                  className="delete-realtor-btn"
+                  title="Delete realtor"
+                >
+                  🗑️ Delete
+                </button>
+              </div>
+              <div className="realtor-details">
+                <p><strong>Email:</strong> {realtor.email}</p>
+                <p><strong>Contact:</strong> {realtor.contact}</p>
+                <p><strong>Properties Assigned:</strong> {realtor.property_count || 0}</p>
+                {realtor.is_standalone && (
+                  <span className="badge standalone">Standalone</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">
+          <p>No realtors found.</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default RealtorManagementPage;
+```
 
 ### Component 1: Property Assignment Page (PM Assigns Properties)
 
@@ -1632,6 +1791,112 @@ section h2 {
 .remove-agent-btn:hover {
   background: #c82333;
 }
+
+/* Realtor Management Page */
+.realtor-management-page {
+  padding: 40px 20px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.realtor-management-page h1 {
+  font-size: 3rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #ffffff 0%, #f0f0f0 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 40px;
+  text-align: center;
+  text-shadow: 0 4px 20px rgba(255, 255, 255, 0.3);
+}
+
+.realtors-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 30px;
+  margin-top: 30px;
+}
+
+.realtor-card {
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(20px);
+  border-radius: 24px;
+  padding: 30px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+}
+
+.realtor-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 48px rgba(102, 126, 234, 0.3);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.realtor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+}
+
+.realtor-header h3 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
+.delete-realtor-btn {
+  padding: 10px 20px;
+  background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 20px rgba(250, 112, 154, 0.4);
+}
+
+.delete-realtor-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(250, 112, 154, 0.5);
+}
+
+.realtor-details {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.realtor-details p {
+  margin: 10px 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.realtor-details strong {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.badge.standalone {
+  display: inline-block;
+  padding: 6px 14px;
+  background: linear-gradient(135deg, rgba(79, 172, 254, 0.3) 0%, rgba(0, 242, 254, 0.3) 100%);
+  color: #ffffff;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 10px;
+  border: 2px solid rgba(79, 172, 254, 0.5);
+}
 ```
 
 ---
@@ -1828,6 +2093,37 @@ SELECT
   END as owner_type
 FROM apartmentlisting al
 JOIN source s ON al.source_id = s.source_id;
+```
+
+**Query to check realtors and their property counts before deletion:**
+```sql
+SELECT 
+  r.realtor_id,
+  r.name,
+  r.email,
+  r.property_manager_id,
+  COUNT(al.id) as property_count,
+  COUNT(b.id) as booking_count
+FROM realtor r
+LEFT JOIN source s ON s.realtor_id = r.realtor_id
+LEFT JOIN apartmentlisting al ON al.source_id = s.source_id
+LEFT JOIN booking b ON b.realtor_id = r.realtor_id
+WHERE r.property_manager_id = 1  -- Replace with your PM ID
+GROUP BY r.realtor_id, r.name, r.email, r.property_manager_id;
+```
+
+**Query to verify properties were reassigned after deletion:**
+```sql
+SELECT 
+  al.id,
+  al.source_id,
+  s.property_manager_id,
+  s.realtor_id,
+  listing_metadata->>'address' as address
+FROM apartmentlisting al
+JOIN source s ON al.source_id = s.source_id
+WHERE s.property_manager_id = 1  -- Replace with your PM ID
+ORDER BY al.id;
 ```
 
 Everything is ready! Just copy the components and CSS, and you'll have a complete property assignment system! 🎉

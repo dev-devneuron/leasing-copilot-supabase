@@ -2110,6 +2110,128 @@ async def update_property_details(
         })
 
 
+@app.delete("/property-manager/realtors/{realtor_id}")
+async def delete_realtor(
+    realtor_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Property Manager deletes a realtor/agent.
+    
+    When a realtor is deleted:
+    1. All properties assigned to them become unassigned (moved back to PM)
+    2. All bookings are unassigned (realtor_id set to NULL)
+    3. All sources belonging to the realtor are deleted (after properties are moved)
+    4. All rule chunks for those sources are deleted
+    5. The realtor record is deleted from the database
+    
+    Note: This does NOT delete the user from Supabase Auth (they can still login but won't have access to the system).
+    """
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can delete realtors"
+        )
+    
+    with Session(engine) as session:
+        # Verify realtor is managed by this PM
+        realtor = session.exec(
+            select(Realtor).where(
+                Realtor.realtor_id == realtor_id,
+                Realtor.property_manager_id == property_manager_id
+            )
+        ).first()
+        
+        if not realtor:
+            raise HTTPException(
+                status_code=404,
+                detail="Realtor not found or not managed by this Property Manager"
+            )
+        
+        realtor_name = realtor.name
+        realtor_email = realtor.email
+        
+        # Step 1: Get all sources belonging to this realtor
+        realtor_sources = session.exec(
+            select(Source).where(Source.realtor_id == realtor_id)
+        ).all()
+        realtor_source_ids = [s.source_id for s in realtor_sources]
+        
+        # Step 2: Get PM's sources (to move properties back)
+        pm_sources = session.exec(
+            select(Source).where(Source.property_manager_id == property_manager_id)
+        ).all()
+        
+        if not pm_sources:
+            raise HTTPException(
+                status_code=404,
+                detail="Property Manager source not found. Cannot reassign properties."
+            )
+        
+        pm_source_id = pm_sources[0].source_id  # Use first PM source
+        
+        # Step 3: Get all properties assigned to this realtor and move them to PM
+        properties_to_reassign = []
+        if realtor_source_ids:
+            properties = session.exec(
+                select(ApartmentListing).where(ApartmentListing.source_id.in_(realtor_source_ids))
+            ).all()
+            
+            for prop in properties:
+                prop.source_id = pm_source_id
+                properties_to_reassign.append(prop.id)
+        
+        # Step 4: Unassign bookings (set realtor_id to NULL)
+        bookings = session.exec(
+            select(Booking).where(Booking.realtor_id == realtor_id)
+        ).all()
+        
+        bookings_unassigned = []
+        for booking in bookings:
+            booking.realtor_id = None
+            bookings_unassigned.append(booking.id)
+        
+        # Step 5: Delete rule chunks for realtor's sources
+        rule_chunks_deleted = 0
+        if realtor_source_ids:
+            rule_chunks = session.exec(
+                select(RuleChunk).where(RuleChunk.source_id.in_(realtor_source_ids))
+            ).all()
+            
+            for chunk in rule_chunks:
+                session.delete(chunk)
+                rule_chunks_deleted += 1
+        
+        # Step 6: Delete sources belonging to the realtor
+        sources_deleted = len(realtor_sources)
+        for source in realtor_sources:
+            session.delete(source)
+        
+        # Step 7: Delete the realtor record
+        session.delete(realtor)
+        
+        # Commit all changes
+        session.commit()
+        
+        return JSONResponse(content={
+            "message": f"Realtor '{realtor_name}' deleted successfully",
+            "realtor_id": realtor_id,
+            "realtor_name": realtor_name,
+            "realtor_email": realtor_email,
+            "summary": {
+                "properties_reassigned": len(properties_to_reassign),
+                "properties_reassigned_ids": properties_to_reassign,
+                "bookings_unassigned": len(bookings_unassigned),
+                "bookings_unassigned_ids": bookings_unassigned,
+                "rule_chunks_deleted": rule_chunks_deleted,
+                "sources_deleted": sources_deleted
+            },
+            "note": "The user account in Supabase Auth still exists. They cannot access the system but their auth account remains."
+        })
+
+
 # ---------------------- TEST USER MANAGEMENT ----------------------
 
 @app.post("/create-test-team")
