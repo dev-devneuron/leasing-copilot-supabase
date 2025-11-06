@@ -1999,116 +1999,177 @@ async def update_property_details(
 ):
     """Update various property details (status, agent, or other metadata fields).
     
+    Supports partial updates - only send fields you want to change.
+    
     Body examples:
     {
         "listing_status": "Sold",
         "agent": null,  // or agent object to update/remove
         "days_on_market": 25,
         "price": 2500,
+        "address": "123 Main St",
         // ... any other metadata fields
     }
     """
-    user_type = user_data["user_type"]
-    user_id = user_data["id"]
-    
-    with Session(engine) as session:
-        # Get property
-        property_obj = session.exec(
-            select(ApartmentListing).where(ApartmentListing.id == property_id)
-        ).first()
+    try:
+        user_type = user_data["user_type"]
+        user_id = user_data["id"]
         
-        if not property_obj:
+        # Validate payload is not empty
+        if not payload:
             raise HTTPException(
-                status_code=404,
-                detail="Property not found"
+                status_code=400,
+                detail="Request body cannot be empty"
             )
         
-        # Check access permissions
-        source = session.exec(
-            select(Source).where(Source.source_id == property_obj.source_id)
-        ).first()
-        
-        if not source:
-            raise HTTPException(
-                status_code=404,
-                detail="Source not found for property"
-            )
-        
-        # Verify user has access to this property
-        has_access = False
-        if user_type == "property_manager":
-            if source.property_manager_id == user_id:
-                has_access = True
-            else:
-                # Check if it belongs to a realtor under this PM
-                if source.realtor_id:
-                    realtor = session.exec(
-                        select(Realtor).where(Realtor.realtor_id == source.realtor_id)
-                    ).first()
-                    if realtor and realtor.property_manager_id == user_id:
-                        has_access = True
-        else:  # realtor
-            if source.realtor_id == user_id:
-                has_access = True
-        
-        if not has_access:
-            raise HTTPException(
-                status_code=403,
-                detail="You don't have access to update this property"
-            )
-        
-        # Update metadata
-        meta = property_obj.listing_metadata or {}
-        
-        # Handle listing_status update with validation
-        if "listing_status" in payload:
-            new_status = payload["listing_status"]
-            valid_statuses = ["Available", "For Sale", "For Rent", "Sold", "Rented"]
-            if new_status not in valid_statuses:
+        with Session(engine) as session:
+            # Get property
+            property_obj = session.exec(
+                select(ApartmentListing).where(ApartmentListing.id == property_id)
+            ).first()
+            
+            if not property_obj:
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+                    status_code=404,
+                    detail=f"Property with ID {property_id} not found"
                 )
-            meta["listing_status"] = new_status
-        
-        # Handle agent update/removal
-        if "agent" in payload:
-            agent_data = payload["agent"]
-            if agent_data is None:
-                meta.pop("agent", None)
-            else:
-                if not isinstance(agent_data, dict):
+            
+            # Check access permissions
+            source = session.exec(
+                select(Source).where(Source.source_id == property_obj.source_id)
+            ).first()
+            
+            if not source:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Source not found for property"
+                )
+            
+            # Verify user has access to this property
+            has_access = False
+            if user_type == "property_manager":
+                if source.property_manager_id == user_id:
+                    has_access = True
+                else:
+                    # Check if it belongs to a realtor under this PM
+                    if source.realtor_id:
+                        realtor = session.exec(
+                            select(Realtor).where(Realtor.realtor_id == source.realtor_id)
+                        ).first()
+                        if realtor and realtor.property_manager_id == user_id:
+                            has_access = True
+            else:  # realtor
+                if source.realtor_id == user_id:
+                    has_access = True
+            
+            if not has_access:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You don't have access to update this property"
+                )
+            
+            # Get existing metadata (create new dict if None)
+            meta = dict(property_obj.listing_metadata) if property_obj.listing_metadata else {}
+            
+            # Track updated fields
+            updated_fields = []
+            
+            # Handle listing_status update with validation
+            if "listing_status" in payload:
+                new_status = payload["listing_status"]
+                valid_statuses = ["Available", "For Sale", "For Rent", "Sold", "Rented"]
+                if new_status not in valid_statuses:
                     raise HTTPException(
                         status_code=400,
-                        detail="Agent must be an object with name, phone, and email fields"
+                        detail=f"Invalid status '{new_status}'. Must be one of: {', '.join(valid_statuses)}"
                     )
-                meta["agent"] = {
-                    "name": agent_data.get("name", ""),
-                    "phone": agent_data.get("phone", ""),
-                    "email": agent_data.get("email", "")
+                meta["listing_status"] = new_status
+                updated_fields.append("listing_status")
+            
+            # Handle agent update/removal
+            if "agent" in payload:
+                agent_data = payload["agent"]
+                if agent_data is None:
+                    meta.pop("agent", None)
+                    updated_fields.append("agent")
+                else:
+                    if not isinstance(agent_data, dict):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Agent must be an object with name, phone, and email fields"
+                        )
+                    meta["agent"] = {
+                        "name": agent_data.get("name", ""),
+                        "phone": agent_data.get("phone", ""),
+                        "email": agent_data.get("email", "")
+                    }
+                    updated_fields.append("agent")
+            
+            # Update other metadata fields (price, days_on_market, etc.)
+            updatable_fields = [
+                "price", "bedrooms", "bathrooms", "square_feet", "lot_size_sqft",
+                "year_built", "property_type", "days_on_market", "listing_date",
+                "features", "description", "image_url", "address", "listing_id"
+            ]
+            
+            for field in updatable_fields:
+                if field in payload:
+                    value = payload[field]
+                    # Only update if value is not None (allow empty strings and 0)
+                    if value is not None:
+                        meta[field] = value
+                        if field not in updated_fields:
+                            updated_fields.append(field)
+            
+            # Update the property object
+            property_obj.listing_metadata = meta
+            
+            # Add to session and commit
+            session.add(property_obj)
+            session.commit()
+            session.refresh(property_obj)
+            
+            # Get updated metadata for response
+            updated_meta = property_obj.listing_metadata or {}
+            
+            # Return response with updated property data
+            return JSONResponse(content={
+                "message": "Property updated successfully",
+                "property_id": property_id,
+                "updated_fields": updated_fields,
+                "property": {
+                    "id": property_obj.id,
+                    "address": updated_meta.get("address"),
+                    "price": updated_meta.get("price"),
+                    "bedrooms": updated_meta.get("bedrooms"),
+                    "bathrooms": updated_meta.get("bathrooms"),
+                    "square_feet": updated_meta.get("square_feet"),
+                    "lot_size_sqft": updated_meta.get("lot_size_sqft"),
+                    "year_built": updated_meta.get("year_built"),
+                    "property_type": updated_meta.get("property_type"),
+                    "listing_status": updated_meta.get("listing_status"),
+                    "days_on_market": updated_meta.get("days_on_market"),
+                    "listing_date": updated_meta.get("listing_date"),
+                    "listing_id": updated_meta.get("listing_id"),
+                    "features": updated_meta.get("features", []),
+                    "description": updated_meta.get("description"),
+                    "image_url": updated_meta.get("image_url"),
+                    "agent": updated_meta.get("agent")
                 }
-        
-        # Update other metadata fields (price, days_on_market, etc.)
-        updatable_fields = [
-            "price", "bedrooms", "bathrooms", "square_feet", "lot_size_sqft",
-            "year_built", "property_type", "days_on_market", "listing_date",
-            "features", "description", "image_url", "address"
-        ]
-        
-        for field in updatable_fields:
-            if field in payload:
-                meta[field] = payload[field]
-        
-        property_obj.listing_metadata = meta
-        session.commit()
-        session.refresh(property_obj)
-        
-        return JSONResponse(content={
-            "message": "Property updated successfully",
-            "property_id": property_id,
-            "updated_fields": list(payload.keys()),
-            "updated_metadata": meta
-        })
+            }, status_code=200)
+            
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        # Log unexpected errors
+        import traceback
+        print(f"Error updating property {property_id}: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error while updating property: {str(e)}"
+        )
 
 
 @app.delete("/properties/{property_id}")

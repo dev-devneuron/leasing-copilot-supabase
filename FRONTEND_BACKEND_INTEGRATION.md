@@ -202,17 +202,42 @@ Content-Type: application/json
   "message": "Property updated successfully",
   "property_id": 1,
   "updated_fields": ["price", "bedrooms", "listing_status", "agent"],
-  "updated_metadata": {
+  "property": {
+    "id": 1,
     "address": "123 New Street, Seattle, WA",
     "price": 2500,
     "bedrooms": 3,
+    "bathrooms": 2.5,
+    "square_feet": 1200,
+    "lot_size_sqft": 5000,
+    "year_built": 2020,
+    "property_type": "Apartment",
     "listing_status": "Available",
+    "days_on_market": 25,
+    "listing_date": "2024-01-15",
+    "listing_id": "MLS000123",
+    "features": ["Pool", "Gym", "Parking"],
+    "description": "Beautiful property description...",
+    "image_url": "https://example.com/image.jpg",
     "agent": {
       "name": "Jane Smith",
       "phone": "555-9876",
       "email": "jane@example.com"
     }
   }
+}
+```
+
+**Error Responses:**
+- `400` - Bad Request (validation errors, empty body, invalid status)
+- `403` - Forbidden (no access to property)
+- `404` - Not Found (property doesn't exist)
+- `500` - Internal Server Error
+
+All errors return:
+```json
+{
+  "detail": "Error message here"
 }
 ```
 
@@ -231,7 +256,23 @@ const response = await fetch(`/properties/${propertyId}`, {
     days_on_market: 30
   })
 });
+
+if (response.ok) {
+  const data = await response.json();
+  console.log('Updated property:', data.property);
+} else {
+  const error = await response.json();
+  console.error('Error:', error.detail);
+}
 ```
+
+**Important Notes:**
+- ✅ Supports partial updates - only send fields you want to change
+- ✅ All fields are optional
+- ✅ Empty strings and 0 values are accepted
+- ✅ `null` values are ignored (except for `agent: null` which removes the agent)
+- ✅ Response includes the full updated property object
+- ✅ Property ID must be an integer
 
 ### 2. Update Property Status Only
 ```http
