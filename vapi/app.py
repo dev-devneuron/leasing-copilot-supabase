@@ -974,6 +974,7 @@ async def get_property_manager_realtors(user_data: dict = Depends(get_current_us
             "id": r["id"],
             "name": r["name"],
             "email": r["email"],
+            "contact": r.get("contact", "N/A"),
             "status": "active",  # Default status
         }
         for r in realtors
@@ -2110,6 +2111,78 @@ async def update_property_details(
         })
 
 
+@app.delete("/properties/{property_id}")
+async def delete_property(
+    property_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Delete a property. Only Property Managers can delete properties (their own or from their realtors)."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can delete properties"
+        )
+    
+    with Session(engine) as session:
+        # Get property
+        property_obj = session.exec(
+            select(ApartmentListing).where(ApartmentListing.id == property_id)
+        ).first()
+        
+        if not property_obj:
+            raise HTTPException(
+                status_code=404,
+                detail="Property not found"
+            )
+        
+        # Check access permissions - PM can delete their own properties or properties from their realtors
+        source = session.exec(
+            select(Source).where(Source.source_id == property_obj.source_id)
+        ).first()
+        
+        if not source:
+            raise HTTPException(
+                status_code=404,
+                detail="Source not found for property"
+            )
+        
+        # Verify PM has access to this property
+        has_access = False
+        if source.property_manager_id == user_id:
+            has_access = True
+        else:
+            # Check if it belongs to a realtor under this PM
+            if source.realtor_id:
+                realtor = session.exec(
+                    select(Realtor).where(Realtor.realtor_id == source.realtor_id)
+                ).first()
+                if realtor and realtor.property_manager_id == user_id:
+                    has_access = True
+        
+        if not has_access:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have access to delete this property"
+            )
+        
+        # Get property details for response
+        meta = property_obj.listing_metadata or {}
+        property_address = meta.get("address", f"Property #{property_id}")
+        
+        # Delete the property
+        session.delete(property_obj)
+        session.commit()
+        
+        return JSONResponse(content={
+            "message": f"Property '{property_address}' deleted successfully",
+            "property_id": property_id,
+            "deleted_address": property_address
+        })
+
+
 @app.delete("/property-manager/realtors/{realtor_id}")
 async def delete_realtor(
     realtor_id: int,
@@ -2229,6 +2302,132 @@ async def delete_realtor(
                 "sources_deleted": sources_deleted
             },
             "note": "The user account in Supabase Auth still exists. They cannot access the system but their auth account remains."
+        })
+
+
+@app.patch("/property-manager/realtors/{realtor_id}")
+async def update_realtor(
+    realtor_id: int,
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Property Manager updates a realtor's details (name, contact, email, password)."""
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can update realtors"
+        )
+    
+    with Session(engine) as session:
+        # Verify realtor is managed by this PM
+        realtor = session.exec(
+            select(Realtor).where(
+                Realtor.realtor_id == realtor_id,
+                Realtor.property_manager_id == property_manager_id
+            )
+        ).first()
+        
+        if not realtor:
+            raise HTTPException(
+                status_code=404,
+                detail="Realtor not found or not managed by this Property Manager"
+            )
+        
+        # Track what was updated
+        updated_fields = []
+        auth_user_id = str(realtor.auth_user_id)
+        
+        # Update name if provided
+        if "name" in payload and payload["name"]:
+            realtor.name = payload["name"]
+            updated_fields.append("name")
+        
+        # Update contact if provided
+        if "contact" in payload and payload["contact"]:
+            realtor.contact = payload["contact"]
+            updated_fields.append("contact")
+        
+        # Update email if provided (requires Supabase update)
+        if "email" in payload and payload["email"]:
+            new_email = payload["email"]
+            if new_email != realtor.email:
+                try:
+                    # Update email in Supabase Auth using Admin API
+                    from config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+                    update_data = {"email": new_email}
+                    response = httpx.put(
+                        f"{SUPABASE_URL}/auth/v1/admin/users/{auth_user_id}",
+                        headers={
+                            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                            "Content-Type": "application/json"
+                        },
+                        json=update_data,
+                        timeout=10.0
+                    )
+                    if response.status_code not in [200, 201]:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Failed to update email in authentication: {response.text}"
+                        )
+                    realtor.email = new_email
+                    updated_fields.append("email")
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to update email in authentication: {str(e)}"
+                    )
+        
+        # Update password if provided (requires Supabase update)
+        if "password" in payload and payload["password"]:
+            new_password = payload["password"]
+            try:
+                # Update password in Supabase Auth using Admin API
+                from config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+                update_data = {"password": new_password}
+                response = httpx.put(
+                    f"{SUPABASE_URL}/auth/v1/admin/users/{auth_user_id}",
+                    headers={
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                        "Content-Type": "application/json"
+                    },
+                    json=update_data,
+                    timeout=10.0
+                )
+                if response.status_code not in [200, 201]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to update password in authentication: {response.text}"
+                    )
+                updated_fields.append("password")
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to update password in authentication: {str(e)}"
+                )
+        
+        # Update timestamp
+        realtor.updated_at = datetime.utcnow()
+        
+        # Commit database changes
+        session.add(realtor)
+        session.commit()
+        session.refresh(realtor)
+        
+        return JSONResponse(content={
+            "message": f"Realtor updated successfully",
+            "realtor_id": realtor_id,
+            "updated_fields": updated_fields,
+            "realtor": {
+                "id": realtor.realtor_id,
+                "name": realtor.name,
+                "email": realtor.email,
+                "contact": realtor.contact
+            }
         })
 
 
