@@ -41,6 +41,7 @@ from config import (
     SCOPES,
 )
 from sqlalchemy import update
+from sqlalchemy.orm import flag_modified
 from fastapi.middleware.cors import CORSMiddleware
 from DB.sync import sync_apartment_listings
 from utils.auth_module import get_current_realtor_id, get_current_user_data
@@ -1869,7 +1870,7 @@ async def update_property_status(
             )
         
         # Update metadata
-        meta = property_obj.listing_metadata or {}
+        meta = dict(property_obj.listing_metadata) if property_obj.listing_metadata else {}
         meta["listing_status"] = listing_status
         
         # If status is Sold or Rented, update days_on_market to current if available
@@ -1877,7 +1878,8 @@ async def update_property_status(
             # Keep existing days_on_market, or you could calculate final days
             pass
         
-        property_obj.listing_metadata = meta
+        property_obj.listing_metadata = dict(meta)
+        flag_modified(property_obj, "listing_metadata")
         session.commit()
         session.refresh(property_obj)
         
@@ -1958,7 +1960,7 @@ async def update_property_agent(
             )
         
         # Update metadata
-        meta = property_obj.listing_metadata or {}
+        meta = dict(property_obj.listing_metadata) if property_obj.listing_metadata else {}
         
         if agent_data is None:
             # Remove agent
@@ -1978,7 +1980,8 @@ async def update_property_agent(
                 "email": agent_data.get("email", "")
             }
         
-        property_obj.listing_metadata = meta
+        property_obj.listing_metadata = dict(meta)
+        flag_modified(property_obj, "listing_metadata")
         session.commit()
         session.refresh(property_obj)
         
@@ -2121,8 +2124,12 @@ async def update_property_details(
                         if field not in updated_fields:
                             updated_fields.append(field)
             
-            # Update the property object
-            property_obj.listing_metadata = meta
+            # Update the property object with new metadata dict
+            # Create a new dict to ensure SQLAlchemy detects the change
+            property_obj.listing_metadata = dict(meta)
+            
+            # Mark the JSONB field as modified so SQLAlchemy detects the change
+            flag_modified(property_obj, "listing_metadata")
             
             # Add to session and commit
             session.add(property_obj)

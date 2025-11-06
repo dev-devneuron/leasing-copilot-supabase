@@ -1,7 +1,7 @@
 # Frontend & Backend Integration Guide
-## Newly Implemented Features - API Documentation
+## Newly Implemented Features - Complete API Documentation
 
-This guide documents the newly implemented backend endpoints for user profile, realtor management, and property management features.
+This guide documents all newly implemented backend endpoints for user profile, realtor management, and property management features.
 
 ---
 
@@ -160,7 +160,7 @@ Authorization: Bearer <pm_jwt_token>
 
 ## 🏠 Property Manager - Property Management
 
-### 1. Update Property Details (Comprehensive)
+### 1. Update Property Details (Comprehensive - FIXED)
 ```http
 PATCH /properties/{property_id}
 Authorization: Bearer <pm_jwt_token>
@@ -177,7 +177,8 @@ Content-Type: application/json
   "property_type": "Apartment",
   "listing_status": "Available",
   "days_on_market": 25,
-  "listing_date": "2025-01-15",
+  "listing_date": "2024-01-15",
+  "listing_id": "MLS000123",
   "features": ["Pool", "Gym", "Parking", "Elevator"],
   "description": "Beautiful apartment in downtown Seattle",
   "image_url": "https://example.com/image.jpg",
@@ -190,11 +191,13 @@ Content-Type: application/json
 ```
 
 **Notes:**
+- ✅ **FIXED:** Now properly persists all updates to database
 - All fields are optional - only include fields you want to update
 - Property Managers can edit properties they own OR properties assigned to their realtors
 - `listing_status` must be one of: `"Available"`, `"For Sale"`, `"For Rent"`, `"Sold"`, `"Rented"`
 - To remove agent, send `"agent": null`
 - You can update any combination of fields in a single request
+- Supports partial updates - only send fields you want to change
 
 **Response:**
 ```json
@@ -253,13 +256,15 @@ const response = await fetch(`/properties/${propertyId}`, {
   body: JSON.stringify({
     price: 2500,
     listing_status: 'Sold',
-    days_on_market: 30
+    days_on_market: 30,
+    address: '123 Main St'
   })
 });
 
 if (response.ok) {
   const data = await response.json();
   console.log('Updated property:', data.property);
+  // Use data.property to update your UI
 } else {
   const error = await response.json();
   console.error('Error:', error.detail);
@@ -267,12 +272,14 @@ if (response.ok) {
 ```
 
 **Important Notes:**
+- ✅ **FIXED:** Uses `flag_modified()` to ensure SQLAlchemy detects JSONB changes
 - ✅ Supports partial updates - only send fields you want to change
 - ✅ All fields are optional
 - ✅ Empty strings and 0 values are accepted
 - ✅ `null` values are ignored (except for `agent: null` which removes the agent)
 - ✅ Response includes the full updated property object
 - ✅ Property ID must be an integer
+- ✅ All updates are now properly persisted to the database
 
 ### 2. Update Property Status Only
 ```http
@@ -353,14 +360,17 @@ Authorization: Bearer <pm_jwt_token>
 
 **Example:**
 ```javascript
-const response = await fetch(`/properties/${propertyId}`, {
-  method: 'DELETE',
-  headers: { 'Authorization': `Bearer ${token}` }
-});
-
-if (response.ok) {
-  const data = await response.json();
-  console.log(data.message); // "Property '...' deleted successfully"
+if (confirm('Are you sure you want to delete this property?')) {
+  const response = await fetch(`/properties/${propertyId}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    console.log(data.message);
+    // Refresh property list
+  }
 }
 ```
 
@@ -370,23 +380,40 @@ if (response.ok) {
 
 The following fields can be updated via `PATCH /properties/{property_id}`:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `address` | string | Property address |
-| `price` | number | Property price |
-| `bedrooms` | number | Number of bedrooms |
-| `bathrooms` | number | Number of bathrooms |
-| `square_feet` | number | Square footage |
-| `lot_size_sqft` | number | Lot size in square feet |
-| `year_built` | number | Year the property was built |
-| `property_type` | string | Type of property (e.g., "Apartment", "House") |
-| `listing_status` | string | Status: "Available", "For Sale", "For Rent", "Sold", "Rented" |
-| `days_on_market` | number | Days the property has been on market |
-| `listing_date` | string | ISO date string (e.g., "2025-01-15") |
-| `features` | array | Array of feature strings (e.g., ["Pool", "Gym"]) |
-| `description` | string | Property description |
-| `image_url` | string | URL to property image |
-| `agent` | object/null | Agent object with `name`, `phone`, `email` or `null` to remove |
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `address` | string | Property address | `"123 Main St, Seattle, WA"` |
+| `price` | number | Property price | `250000` |
+| `bedrooms` | number | Number of bedrooms | `3` |
+| `bathrooms` | number | Number of bathrooms | `2.5` |
+| `square_feet` | number | Square footage | `1200` |
+| `lot_size_sqft` | number | Lot size in square feet | `5000` |
+| `year_built` | number | Year the property was built | `2020` |
+| `property_type` | string | Type of property | `"Apartment"` or `"House"` |
+| `listing_status` | string | Status (see valid values below) | `"Available"` |
+| `days_on_market` | number | Days the property has been on market | `25` |
+| `listing_date` | string | ISO date string | `"2024-01-15"` |
+| `listing_id` | string | MLS or listing ID | `"MLS000123"` |
+| `features` | array | Array of feature strings | `["Pool", "Gym", "Parking"]` |
+| `description` | string | Property description | `"Beautiful property..."` |
+| `image_url` | string | URL to property image | `"https://example.com/image.jpg"` |
+| `agent` | object/null | Agent object or null to remove | See agent format below |
+
+**Valid `listing_status` values:**
+- `"Available"`
+- `"For Sale"`
+- `"For Rent"`
+- `"Sold"`
+- `"Rented"`
+
+**Agent object format:**
+```json
+{
+  "name": "Jane Smith",
+  "phone": "555-9876",
+  "email": "jane@example.com"
+}
+```
 
 ---
 
@@ -426,9 +453,11 @@ try {
 
   const data = await response.json();
   console.log('Success:', data.message);
+  // Update UI with data.property
 } catch (error) {
   console.error('Error:', error.message);
   // Show error to user
+  alert(`Failed to update property: ${error.message}`);
 }
 ```
 
@@ -447,11 +476,15 @@ try {
    - [ ] PM can delete realtor (properties are reassigned)
 
 3. **Property Management:**
-   - [ ] PM can update all property fields
+   - [ ] PM can update property price (cost)
+   - [ ] PM can update property address
+   - [ ] PM can update property bedrooms, bathrooms
+   - [ ] PM can update property features array
    - [ ] PM can update property status
    - [ ] PM can add/remove/update property agent
    - [ ] PM can delete properties (own and from realtors)
-   - [ ] PM cannot delete properties they don't have access to
+   - [ ] Updates persist correctly in database
+   - [ ] PM cannot update properties they don't have access to
 
 ---
 
@@ -464,6 +497,44 @@ const response = await fetch('/user-profile', {
   headers: { 'Authorization': `Bearer ${token}` }
 });
 const { user } = await response.json();
+console.log('Logged in as:', user.name);
+```
+
+### Update Property Price
+```javascript
+const response = await fetch(`/properties/${propertyId}`, {
+  method: 'PATCH',
+  headers: {
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    price: 250000  // Update only the price
+  })
+});
+
+if (response.ok) {
+  const data = await response.json();
+  console.log('New price:', data.property.price);
+}
+```
+
+### Update Multiple Property Fields
+```javascript
+const response = await fetch(`/properties/${propertyId}`, {
+  method: 'PATCH',
+  headers: {
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    price: 250000,
+    bedrooms: 3,
+    bathrooms: 2.5,
+    address: '123 New Address St',
+    features: ['Pool', 'Gym', 'Parking']
+  })
+});
 ```
 
 ### Update Realtor
@@ -481,22 +552,6 @@ const response = await fetch(`/property-manager/realtors/${realtorId}`, {
 });
 ```
 
-### Update Property
-```javascript
-const response = await fetch(`/properties/${propertyId}`, {
-  method: 'PATCH',
-  headers: {
-    'Authorization': `Bearer ${token}`,
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({
-    price: 2500,
-    listing_status: 'Sold',
-    bedrooms: 3
-  })
-});
-```
-
 ### Delete Property
 ```javascript
 if (confirm('Are you sure you want to delete this property?')) {
@@ -507,6 +562,7 @@ if (confirm('Are you sure you want to delete this property?')) {
   
   if (response.ok) {
     // Refresh property list
+    window.location.reload();
   }
 }
 ```
@@ -521,3 +577,18 @@ if (confirm('Are you sure you want to delete this property?')) {
 - ✅ **Property Deletion:** PM can delete properties (own and from realtors)
 - ✅ **Flexible Updates:** Update any combination of fields in a single request
 - ✅ **Access Control:** PM can only edit/delete properties they own or from their realtors
+- ✅ **FIXED:** Property updates now properly persist to database using `flag_modified()`
+- ✅ **Partial Updates:** Only send fields you want to change
+- ✅ **Complete Response:** Response includes full updated property object for immediate UI update
+
+---
+
+## 🔧 Technical Details
+
+### Property Update Fix
+The property update endpoint was fixed to properly persist changes to the JSONB `listing_metadata` column by:
+1. Using `flag_modified()` from SQLAlchemy to mark the JSONB field as changed
+2. Creating a new dict object to ensure SQLAlchemy detects the change
+3. Proper session management with `session.add()` before commit
+
+This ensures all property field updates (price, address, features, etc.) are correctly saved to the database.
