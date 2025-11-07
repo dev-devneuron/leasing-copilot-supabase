@@ -234,14 +234,58 @@ else:
 
 
 def listing_to_text(listing: dict) -> str:
+    """
+    Convert listing dictionary to text format for embedding.
+    Handles normalized listing data from the AI parser.
+    """
     try:
-        return (
-            f"Address: {listing.get('address', 'N/A')}. "
-            f"Price: {listing.get('price', 'N/A')}. "
-            f"Bedrooms: {listing.get('bedrooms', 'N/A')}. "
-            f"Bathrooms: {listing.get('bathrooms', 'N/A')}. "
-            f"Description: {listing.get('description', '')}"
-        )
+        # Build text representation with available fields
+        parts = []
+        
+        address = listing.get('address', 'N/A')
+        if address and address != 'N/A':
+            parts.append(f"Address: {address}")
+        
+        price = listing.get('price')
+        if price is not None:
+            parts.append(f"Price: {price}")
+        
+        bedrooms = listing.get('bedrooms')
+        if bedrooms is not None:
+            parts.append(f"Bedrooms: {bedrooms}")
+        
+        bathrooms = listing.get('bathrooms')
+        if bathrooms is not None:
+            parts.append(f"Bathrooms: {bathrooms}")
+        
+        # Add property type if available
+        property_type = listing.get('property_type')
+        if property_type:
+            parts.append(f"Property Type: {property_type}")
+        
+        # Add square feet if available
+        square_feet = listing.get('square_feet')
+        if square_feet:
+            parts.append(f"Square Feet: {square_feet}")
+        
+        # Add features if available
+        features = listing.get('features', [])
+        if features and isinstance(features, list) and len(features) > 0:
+            features_str = ', '.join(str(f) for f in features)
+            parts.append(f"Features: {features_str}")
+        
+        # Add description if available
+        description = listing.get('description', '')
+        if description:
+            parts.append(f"Description: {description}")
+        
+        # Join all parts
+        text = ". ".join(parts)
+        if not text:
+            text = "Property listing information"
+        
+        return text
+        
     except Exception as e:
         print("listing_to_text error:", e)
         return "Invalid listing format."
@@ -456,64 +500,90 @@ def embed_and_store_rules(files: list[UploadFile], realtor_id: int, source_id: i
 def embed_and_store_listings(
     listing_file, listing_api_url: str = None, realtor_id: int = None
 ):
-    listing_text = ""
+    """
+    Upload and store listings using AI-powered parser.
+    Supports JSON, CSV, and TXT files with intelligent data normalization.
+    """
+    from .listing_parser import parse_listing_file
+    
+    listings = []
 
     if listing_file:
         content = listing_file.file.read()
-        print("reading done")
-        if listing_file.filename.endswith(".json"):
-            parsed = json.loads(content)
-            listing_text = json.dumps(parsed, indent=2)
-            print("it was json")
-        elif listing_file.filename.endswith(".csv"):
-            decoded = content.decode("utf-8")
-            reader = csv.DictReader(io.StringIO(decoded))
-            rows = [row for row in reader]
-            listing_text = json.dumps(rows, indent=2)
-        else:
+        print(f"Reading file: {listing_file.filename}")
+        
+        # Use AI-powered parser to handle various formats
+        try:
+            listings = parse_listing_file(content, listing_file.filename, use_ai=True)
+            print(f"Parsed {len(listings)} listings from {listing_file.filename}")
+        except Exception as e:
+            print(f"Parser error: {e}")
             raise HTTPException(
-                status_code=400, detail="Unsupported listing file format"
+                status_code=400, 
+                detail=f"Failed to parse file {listing_file.filename}: {str(e)}"
             )
 
-        # Upload listing file
+        # Upload listing file to Supabase storage
         listing_path = f"realtors/{realtor_id}/listings/{listing_file.filename}"
-        response = supabase.storage.from_(BUCKET_NAME).upload(
-            listing_path,
-            content,
-            file_options={"content-type": listing_file.content_type},
-        )
-        print("file uploaded to supabase")
-        if isinstance(response, dict) and "error" in response:
-            raise HTTPException(status_code=500, detail=response["error"]["message"])
+        try:
+            response = supabase.storage.from_(BUCKET_NAME).upload(
+                listing_path,
+                content,
+                file_options={"content-type": listing_file.content_type},
+            )
+            print("File uploaded to Supabase storage")
+            if isinstance(response, dict) and "error" in response:
+                print(f"Supabase upload warning: {response['error']}")
+        except Exception as e:
+            print(f"Warning: Could not upload to Supabase: {e}")
 
     elif listing_api_url:
-        response = requests.get(listing_api_url)
-        if response.status_code != 200:
+        try:
+            response = requests.get(listing_api_url, timeout=30)
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=400, detail="Failed to fetch data from API URL"
+                )
+            listing_data = response.json()
+            
+            # Parse API response using parser
+            from .listing_parser import get_parser
+            parser = get_parser(use_ai=True)
+            if isinstance(listing_data, list):
+                listings = [parser._normalize_listing(item) for item in listing_data]
+            elif isinstance(listing_data, dict):
+                listings = [parser._normalize_listing(listing_data)]
+            else:
+                raise ValueError("Invalid API response format")
+        except Exception as e:
             raise HTTPException(
-                status_code=400, detail="Failed to fetch data from API URL"
+                status_code=400, 
+                detail=f"Failed to parse API response: {str(e)}"
             )
-        listing_data = response.json()
-        listing_text = json.dumps(listing_data, indent=2)
 
-    if listing_text:
-        listings = json.loads(listing_text)
-        if isinstance(listings, dict):
-            listings = [listings]
+    if not listings:
+        raise HTTPException(
+            status_code=400, 
+            detail="No valid listings found in the provided data"
+        )
 
-        formatted_texts = [listing_to_text(l) for l in listings]
-        embeddings = embed_documents(formatted_texts)
-        print("embedding done")
+    # Generate text representations and embeddings
+    formatted_texts = [listing_to_text(l) for l in listings]
+    embeddings = embed_documents(formatted_texts)
+    print(f"Generated embeddings for {len(listings)} listings")
 
-        listing_records = [
-            {
-                "text": formatted_texts[i],
-                "metadata": listings[i],
-                "embedding": embeddings[i],
-            }
-            for i in range(len(listings))
-        ]
-        print("calling insert function")
-        insert_listing_records(realtor_id, listing_records)
+    listing_records = [
+        {
+            "text": formatted_texts[i],
+            "metadata": listings[i],
+            "embedding": embeddings[i],
+        }
+        for i in range(len(listings))
+    ]
+    
+    print("Inserting listing records into database")
+    insert_listing_records(realtor_id, listing_records)
+    print(f"Successfully stored {len(listings)} listings")
 
     return True
 
@@ -682,38 +752,68 @@ def insert_apartments(listings: List[dict], listing_to_text, source_id: int):
 def embed_and_store_listings_for_source(
     listing_file, listing_api_url: str = None, source_id: int = None
 ):
-    """Upload listings directly to a Source (for Property Managers or direct assignment)."""
-    listing_text = ""
+    """
+    Upload listings directly to a Source (for Property Managers or direct assignment).
+    Uses AI-powered parser to handle various file formats and data inconsistencies.
+    """
+    from .listing_parser import parse_listing_file, get_parser
+    
     listings = []
 
     if listing_file:
         content = listing_file.file.read()
-        if listing_file.filename.endswith(".json"):
-            parsed = json.loads(content)
-            listings = parsed if isinstance(parsed, list) else [parsed]
-        elif listing_file.filename.endswith(".csv"):
-            decoded = content.decode("utf-8")
-            reader = csv.DictReader(io.StringIO(decoded))
-            listings = [row for row in reader]
-        else:
+        print(f"Reading file: {listing_file.filename}")
+        
+        # Use AI-powered parser to handle various formats
+        try:
+            listings = parse_listing_file(content, listing_file.filename, use_ai=True)
+            print(f"Parsed {len(listings)} listings from {listing_file.filename}")
+        except Exception as e:
+            print(f"Parser error: {e}")
             raise HTTPException(
-                status_code=400, detail="Unsupported listing file format"
+                status_code=400, 
+                detail=f"Failed to parse file {listing_file.filename}: {str(e)}"
             )
 
     elif listing_api_url:
-        response = requests.get(listing_api_url)
-        if response.status_code != 200:
+        try:
+            response = requests.get(listing_api_url, timeout=30)
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=400, detail="Failed to fetch data from API URL"
+                )
+            listing_data = response.json()
+            
+            # Parse API response using parser
+            parser = get_parser(use_ai=True)
+            if isinstance(listing_data, list):
+                listings = [parser._normalize_listing(item) for item in listing_data]
+            elif isinstance(listing_data, dict):
+                listings = [parser._normalize_listing(listing_data)]
+            else:
+                raise ValueError("Invalid API response format")
+            print(f"Parsed {len(listings)} listings from API")
+        except Exception as e:
             raise HTTPException(
-                status_code=400, detail="Failed to fetch data from API URL"
+                status_code=400, 
+                detail=f"Failed to parse API response: {str(e)}"
             )
-        listing_data = response.json()
-        listings = listing_data if isinstance(listing_data, list) else [listing_data]
 
-    if listings:
-        insert_apartments(listings, listing_to_text, source_id)
-        return {"message": f"Successfully inserted {len(listings)} listings", "count": len(listings)}
+    if not listings:
+        raise HTTPException(
+            status_code=400, 
+            detail="No valid listings found in the provided data"
+        )
+
+    # Store listings in database
+    insert_apartments(listings, listing_to_text, source_id)
+    print(f"Successfully inserted {len(listings)} listings into source {source_id}")
     
-    raise HTTPException(status_code=400, detail="No listings to process")
+    return {
+        "message": f"Successfully inserted {len(listings)} listings", 
+        "count": len(listings),
+        "source_id": source_id
+    }
 
 
 # ---------------------- INGEST DATA ----------------------

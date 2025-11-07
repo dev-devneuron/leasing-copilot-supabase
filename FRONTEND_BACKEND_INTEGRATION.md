@@ -1,7 +1,7 @@
 # Frontend & Backend Integration Guide
-## Newly Implemented Features - Complete API Documentation
+## Complete API Documentation
 
-This guide documents all newly implemented backend endpoints for user profile, realtor management, and property management features.
+This guide documents all backend endpoints for user profile, realtor management, property management, and **AI-powered listing uploads**.
 
 ---
 
@@ -105,23 +105,6 @@ Content-Type: application/json
     "contact": "555-9999"
   }
 }
-```
-
-**Example:**
-```javascript
-const response = await fetch(`/property-manager/realtors/${realtorId}`, {
-  method: 'PATCH',
-  headers: {
-    'Authorization': `Bearer ${token}`,
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({
-    name: 'New Name',
-    contact: '555-1234',
-    email: 'new@example.com',
-    password: 'newPassword123'  // Optional
-  })
-});
 ```
 
 ### 3. Delete Realtor
@@ -231,56 +214,6 @@ Content-Type: application/json
 }
 ```
 
-**Error Responses:**
-- `400` - Bad Request (validation errors, empty body, invalid status)
-- `403` - Forbidden (no access to property)
-- `404` - Not Found (property doesn't exist)
-- `500` - Internal Server Error
-
-All errors return:
-```json
-{
-  "detail": "Error message here"
-}
-```
-
-**Example:**
-```javascript
-// Update multiple fields at once
-const response = await fetch(`/properties/${propertyId}`, {
-  method: 'PATCH',
-  headers: {
-    'Authorization': `Bearer ${token}`,
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({
-    price: 2500,
-    listing_status: 'Sold',
-    days_on_market: 30,
-    address: '123 Main St'
-  })
-});
-
-if (response.ok) {
-  const data = await response.json();
-  console.log('Updated property:', data.property);
-  // Use data.property to update your UI
-} else {
-  const error = await response.json();
-  console.error('Error:', error.detail);
-}
-```
-
-**Important Notes:**
-- ✅ **FIXED:** Uses `flag_modified()` to ensure SQLAlchemy detects JSONB changes
-- ✅ Supports partial updates - only send fields you want to change
-- ✅ All fields are optional
-- ✅ Empty strings and 0 values are accepted
-- ✅ `null` values are ignored (except for `agent: null` which removes the agent)
-- ✅ Response includes the full updated property object
-- ✅ Property ID must be an integer
-- ✅ All updates are now properly persisted to the database
-
 ### 2. Update Property Status Only
 ```http
 PATCH /properties/{property_id}/status
@@ -358,19 +291,466 @@ Authorization: Bearer <pm_jwt_token>
 }
 ```
 
+---
+
+## 📤 AI-Powered Listing Upload Feature
+
+### Overview
+
+The listing upload system uses **AI-powered parsing** to handle property/apartment data in various formats (JSON, CSV, TXT) with intelligent normalization. The system automatically:
+
+- ✅ Handles malformed or inconsistent data formats
+- ✅ Normalizes field names (e.g., "bedrooms" vs "beds" vs "bedroom_count")
+- ✅ Extracts data from nested structures
+- ✅ Validates and cleans data before storage
+- ✅ Uses Google Gemini AI for parsing unstructured text files
+- ✅ Stores data in consistent format matching existing database schema
+
+### Data Ownership & Assignment Flow
+
+**Important:** All uploaded listings are stored against the Property Manager (PM) by default. The PM can then assign listings to their realtors as needed.
+
+**Flow:**
+1. **PM Uploads Listings** → Listings are stored in PM's source (owned by PM)
+2. **PM Assigns to Realtors** → PM can assign specific listings to their managed realtors
+3. **PM Can Unassign** → PM can unassign listings from realtors back to themselves
+4. **Standalone Realtors** → Realtors without a PM (`is_standalone=True`) are essentially PMs themselves - they upload directly to their own source and manage their own listings
+
+**Key Points:**
+- ✅ Uploads default to PM's source (unless `assign_to_realtor_id` is specified during upload)
+- ✅ PM maintains ownership and control over all uploaded listings
+- ✅ PM can assign/unassign listings to/from realtors at any time
+- ✅ Standalone realtors work independently with their own source
+
+### How the Upload Button Works
+
+#### 1. Navigation (Dashboard)
+
+The "Upload" button in the PM dashboard is a navigation link:
+- Located in the header section
+- Uses React Router's `Link` component to navigate to `/uploadpage`
+- No upload logic here; it just routes to the upload page
+
+#### 2. Upload Page Functionality
+
+The upload page supports two types of file uploads:
+
+**A. Upload Rules**
+- File Selection: Multiple files can be selected
+- State Management: Selected files stored in `ruleFiles` state
+- Upload Process:
+  - Creates a FormData object
+  - Appends all selected files with key "files"
+  - Sends POST request to `/UploadRules` endpoint
+  - Includes JWT token in Authorization header
+- After Upload: Shows success message, displays uploaded file names, clears selection
+
+**B. Upload Listings** ⭐ **NEW: AI-Powered Parser**
+- File Selection: Multiple files can be selected
+- State Management: Selected files stored in `listingFiles` state
+- Upload Process:
+  - Creates a FormData object
+  - Appends all selected files with key "listing_file"
+  - Sends POST request to `/UploadListings` or `/property-manager/upload-listings` endpoint
+  - Includes JWT token in Authorization header
+- **AI Processing:** Files are automatically parsed using AI to handle:
+  - Various file formats (JSON, CSV, TXT)
+  - Inconsistent column names
+  - Malformed data
+  - Missing fields
+  - Nested data structures
+- After Upload: Shows success message, displays uploaded file names, clears selection
+
+### Upload Endpoints
+
+#### 1. Realtor Upload Listings
+```http
+POST /UploadListings
+Authorization: Bearer <realtor_jwt_token>
+Content-Type: multipart/form-data
+
+Form Data:
+- listing_file: File (optional) - JSON, CSV, or TXT file
+- listing_api_url: string (optional) - URL to fetch listings from API
+```
+
+**Notes:**
+- Either `listing_file` OR `listing_api_url` must be provided
+- Supports multiple file formats with AI-powered parsing
+- Files are automatically normalized to match database schema
+- Files are stored in Supabase storage at `realtors/{realtor_id}/listings/{filename}`
+
+**Response:**
+```json
+{
+  "message": "Listings uploaded & embedded"
+}
+```
+
 **Example:**
 ```javascript
-if (confirm('Are you sure you want to delete this property?')) {
-  const response = await fetch(`/properties/${propertyId}`, {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${token}` }
-  });
-  
-  if (response.ok) {
-    const data = await response.json();
-    console.log(data.message);
-    // Refresh property list
+const formData = new FormData();
+formData.append('listing_file', fileInput.files[0]);
+
+const response = await fetch('/UploadListings', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`
+  },
+  body: formData
+});
+
+if (response.ok) {
+  const data = await response.json();
+  console.log(data.message);
+  // Show success message to user
+}
+```
+
+#### 2. Property Manager Upload Listings
+```http
+POST /property-manager/upload-listings
+Authorization: Bearer <pm_jwt_token>
+Content-Type: multipart/form-data
+
+Form Data:
+- listing_file: File (optional) - JSON, CSV, or TXT file
+- listing_api_url: string (optional) - URL to fetch listings from API
+- assign_to_realtor_id: integer (optional) - Directly assign listings to specific realtor during upload
+```
+
+**Notes:**
+- Either `listing_file` OR `listing_api_url` must be provided
+- **Default Behavior:** If `assign_to_realtor_id` is NOT provided, listings are stored in PM's own source (PM owns them)
+- **Direct Assignment:** If `assign_to_realtor_id` is provided, listings go directly to that realtor's source (but PM can still reassign later)
+- Uses same AI-powered parsing as realtor upload
+- **Recommended:** Upload to PM's source first, then assign to realtors using the assignment endpoints (see below)
+
+**Response:**
+```json
+{
+  "message": "Listings uploaded successfully",
+  "assigned_to": "property_manager" | "realtor",
+  "realtor_id": 1,  // Only if assigned to realtor
+  "source_id": 83,
+  "count": 15
+}
+```
+
+**Example:**
+```javascript
+const formData = new FormData();
+formData.append('listing_file', fileInput.files[0]);
+// Optional: Assign to specific realtor
+formData.append('assign_to_realtor_id', realtorId);
+
+const response = await fetch('/property-manager/upload-listings', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`
+  },
+  body: formData
+});
+
+if (response.ok) {
+  const data = await response.json();
+  console.log(`Uploaded ${data.count} listings`);
+  console.log(`Assigned to: ${data.assigned_to}`);
+}
+```
+
+### Supported File Formats
+
+#### JSON Format
+```json
+[
+  {
+    "address": "123 Main St, Seattle, WA",
+    "price": 2500,
+    "bedrooms": 3,
+    "bathrooms": 2.5,
+    "square_feet": 1200,
+    "property_type": "Apartment",
+    "features": ["Pool", "Gym"]
   }
+]
+```
+
+**Flexible Field Names Supported:**
+- Address: `address`, `addr`, `location`, `street`, `street_address`
+- Price: `price`, `cost`, `rent`, `rental_price`, `monthly_rent`, `list_price`
+- Bedrooms: `bedrooms`, `beds`, `bed`, `bedroom_count`, `num_bedrooms`
+- Bathrooms: `bathrooms`, `baths`, `bath`, `bathroom_count`, `num_bathrooms`
+- Square Feet: `square_feet`, `sqft`, `sq_ft`, `square_footage`, `area`, `size`
+- And many more variations...
+
+#### CSV Format
+```csv
+address,price,bedrooms,bathrooms,square_feet,property_type
+"123 Main St, Seattle, WA",2500,3,2.5,1200,Apartment
+"456 Oak Ave, Portland, OR",1800,2,1,900,Apartment
+```
+
+**Features:**
+- Auto-detects delimiter (comma, semicolon, tab, pipe)
+- Handles quoted values
+- Maps column names to standard fields
+- Supports various column name variations
+
+#### TXT Format (Unstructured)
+```
+Property 1:
+Address: 123 Main Street, Seattle, WA
+Price: $2,500/month
+Bedrooms: 3
+Bathrooms: 2.5
+Square Feet: 1200
+Features: Pool, Gym, Parking
+
+Property 2:
+Address: 456 Oak Avenue, Portland, OR
+Price: $1,800
+Bedrooms: 2
+Bathrooms: 1
+```
+
+**Features:**
+- Uses AI (Google Gemini) to extract structured data from unstructured text
+- Handles various text formats and layouts
+- Extracts multiple properties from single file
+- Handles missing or incomplete information
+
+### Data Normalization
+
+The AI parser automatically normalizes all data to match the expected database schema:
+
+**Required Fields:**
+- `address` (string) - Full property address
+- `price` (number) - Property price (automatically extracts from strings like "$2,500" or "2500 USD")
+
+**Optional Fields (with defaults):**
+- `listing_id` (string) - MLS or listing ID
+- `bedrooms` (number) - Default: 0
+- `bathrooms` (number) - Can be decimal (e.g., 2.5), Default: 0
+- `square_feet` (number) - Square footage
+- `lot_size_sqft` (number) - Lot size in square feet
+- `year_built` (number) - Year built
+- `property_type` (string) - Default: "Apartment"
+- `listing_status` (string) - One of: "Available", "For Sale", "For Rent", "Sold", "Rented". Default: "Available"
+- `days_on_market` (number) - Days on market
+- `listing_date` (string) - ISO format (YYYY-MM-DD)
+- `description` (string) - Property description
+- `image_url` (string) - URL to property image
+- `features` (array) - Array of feature strings, e.g., ["Pool", "Gym", "Parking"]
+- `agent` (object) - Agent information:
+  ```json
+  {
+    "name": "Jane Smith",
+    "phone": "555-9876",
+    "email": "jane@example.com"
+  }
+  ```
+
+### Data Storage Format
+
+Uploaded listings are stored in the `apartment_listing` table with the following structure:
+
+```json
+{
+  "id": 684,
+  "source_id": 83,
+  "text": "Address: 1474 Peter Curve, Berkeley, CA. Price: 1726. Bedrooms: 3. Bathrooms: 2.7. Description: ",
+  "listing_metadata": {
+    "listing_id": "MLS000258",
+    "address": "1474 Peter Curve, Berkeley, CA",
+    "price": 3000,
+    "bedrooms": 3,
+    "bathrooms": 2.7,
+    "square_feet": 1477,
+    "lot_size_sqft": 1696,
+    "year_built": 1959,
+    "property_type": "Apartment",
+    "listing_status": "Available",
+    "days_on_market": 68,
+    "agent": {
+      "name": "Cheryl Martin",
+      "phone": "335-447-7890",
+      "email": "kelly87@hotmail.com"
+    },
+    "features": ["Fireplace", "Pet Friendly", "Hardwood Floors", "Central Air", "Pool", "Gym"],
+    "listing_date": "2025-01-08"
+  },
+  "embedding": [0.06252559, -0.017695166, ...]  // 768-dimensional vector
+}
+```
+
+### Error Handling
+
+**Common Errors:**
+
+1. **Invalid File Format:**
+```json
+{
+  "detail": "Failed to parse file listings.csv: CSV parsing error: ..."
+}
+```
+
+2. **No Listings Found:**
+```json
+{
+  "detail": "No valid listings found in the provided data"
+}
+```
+
+3. **Missing Required Fields:**
+The parser will attempt to construct missing required fields (e.g., address from components) or use defaults.
+
+4. **AI Parsing Failure:**
+If AI parsing fails, the system falls back to regex-based parsing.
+
+**Example Error Handling:**
+```javascript
+try {
+  const formData = new FormData();
+  formData.append('listing_file', fileInput.files[0]);
+
+  const response = await fetch('/UploadListings', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    },
+    body: formData
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Upload failed');
+  }
+
+  const data = await response.json();
+  console.log('Success:', data.message);
+  // Show success message to user
+} catch (error) {
+  console.error('Upload error:', error.message);
+  // Show error to user
+  alert(`Failed to upload listings: ${error.message}`);
+}
+```
+
+### Property Assignment Endpoints
+
+After uploading listings to PM's source, the PM can assign them to realtors:
+
+#### 1. Assign Properties to Realtor
+```http
+POST /property-manager/assign-properties
+Authorization: Bearer <pm_jwt_token>
+Content-Type: application/json
+
+{
+  "realtor_id": 123,
+  "property_ids": [1, 2, 3, 4, 5]
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Successfully assigned 5 properties to realtor",
+  "realtor_id": 123,
+  "realtor_name": "Sarah Johnson",
+  "realtor_email": "sarah@example.com",
+  "property_count": 5,
+  "assigned_property_ids": [1, 2, 3, 4, 5]
+}
+```
+
+#### 2. Bulk Assign Properties to Multiple Realtors
+```http
+POST /property-manager/bulk-assign-properties
+Authorization: Bearer <pm_jwt_token>
+Content-Type: application/json
+
+{
+  "assignments": [
+    {
+      "realtor_id": 123,
+      "property_ids": [1, 2, 3]
+    },
+    {
+      "realtor_id": 124,
+      "property_ids": [4, 5, 6]
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Bulk assignment completed",
+  "total_assignments": 2,
+  "results": [
+    {
+      "realtor_id": 123,
+      "realtor_name": "Sarah Johnson",
+      "status": "success",
+      "assigned_count": 3,
+      "assigned_property_ids": [1, 2, 3]
+    },
+    {
+      "realtor_id": 124,
+      "realtor_name": "John Doe",
+      "status": "success",
+      "assigned_count": 3,
+      "assigned_property_ids": [4, 5, 6]
+    }
+  ]
+}
+```
+
+#### 3. Unassign Properties from Realtor
+```http
+POST /property-manager/unassign-properties
+Authorization: Bearer <pm_jwt_token>
+Content-Type: application/json
+
+{
+  "property_ids": [1, 2, 3, 4, 5]
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Successfully unassigned 5 properties from realtors",
+  "property_count": 5,
+  "unassigned_property_ids": [1, 2, 3, 4, 5]
+}
+```
+
+**Notes:**
+- PM can only assign/unassign properties that belong to their sources
+- Properties are moved between sources by changing `source_id`
+- Unassigned properties return to PM's source
+- PM maintains full control over all listings
+
+### Upload Rules Endpoint
+
+```http
+POST /UploadRules
+Authorization: Bearer <realtor_jwt_token>
+Content-Type: multipart/form-data
+
+Form Data:
+- files: File[] (required) - Multiple rule/policy documents
+```
+
+**Response:**
+```json
+{
+  "message": "Rules uploaded & embedded",
+  "files": ["rules1.pdf", "rules2.txt"]
 }
 ```
 
@@ -434,33 +814,6 @@ Error responses follow this format:
 }
 ```
 
-**Example Error Handling:**
-```javascript
-try {
-  const response = await fetch(`/properties/${propertyId}`, {
-    method: 'PATCH',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(updateData)
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || 'Update failed');
-  }
-
-  const data = await response.json();
-  console.log('Success:', data.message);
-  // Update UI with data.property
-} catch (error) {
-  console.error('Error:', error.message);
-  // Show error to user
-  alert(`Failed to update property: ${error.message}`);
-}
-```
-
 ---
 
 ## ✅ Testing Checklist
@@ -486,6 +839,22 @@ try {
    - [ ] Updates persist correctly in database
    - [ ] PM cannot update properties they don't have access to
 
+4. **Listing Uploads:**
+   - [ ] Can upload JSON files with various field name variations
+   - [ ] Can upload CSV files with different delimiters
+   - [ ] Can upload TXT files with unstructured data
+   - [ ] AI parser handles malformed data correctly
+   - [ ] Data is normalized to match database schema
+   - [ ] Multiple listings in single file are processed correctly
+   - [ ] Missing fields are handled with defaults
+   - [ ] Files are stored in Supabase storage
+   - [ ] Listings are embedded and searchable after upload
+   - [ ] **Uploads default to PM's source (PM owns them)**
+   - [ ] **PM can assign listings to realtors after upload**
+   - [ ] **PM can unassign listings from realtors back to themselves**
+   - [ ] **Standalone realtors upload directly to their own source**
+   - [ ] Error messages are clear and helpful
+
 ---
 
 ## 🚀 Quick Start Examples
@@ -498,6 +867,108 @@ const response = await fetch('/user-profile', {
 });
 const { user } = await response.json();
 console.log('Logged in as:', user.name);
+```
+
+### Upload Listings (JSON)
+```javascript
+const formData = new FormData();
+formData.append('listing_file', fileInput.files[0]);
+
+const response = await fetch('/UploadListings', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`
+  },
+  body: formData
+});
+
+if (response.ok) {
+  const data = await response.json();
+  console.log('Success:', data.message);
+  // Show success notification
+} else {
+  const error = await response.json();
+  console.error('Error:', error.detail);
+}
+```
+
+### Upload Listings (CSV)
+```javascript
+// Same as JSON upload - parser automatically detects format
+const formData = new FormData();
+formData.append('listing_file', csvFile);
+
+const response = await fetch('/property-manager/upload-listings', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`
+  },
+  body: formData
+});
+```
+
+### Upload Listings (Recommended: Upload to PM First)
+```javascript
+// Step 1: Upload to PM's source (PM owns the listings)
+const formData = new FormData();
+formData.append('listing_file', fileInput.files[0]);
+// Don't include assign_to_realtor_id - uploads go to PM's source
+
+const response = await fetch('/property-manager/upload-listings', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`
+  },
+  body: formData
+});
+
+if (response.ok) {
+  const data = await response.json();
+  console.log(`Uploaded ${data.count} listings to PM's source`);
+  // Listings are now owned by PM and can be assigned to realtors
+}
+```
+
+### Assign Listings to Realtor (After Upload)
+```javascript
+// Step 2: Assign specific listings to a realtor
+const response = await fetch('/property-manager/assign-properties', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    realtor_id: 123,
+    property_ids: [1, 2, 3, 4, 5]  // IDs of listings to assign
+  })
+});
+
+if (response.ok) {
+  const data = await response.json();
+  console.log(`Assigned ${data.property_count} properties to ${data.realtor_name}`);
+}
+```
+
+### Direct Upload to Realtor (Alternative)
+```javascript
+// Alternative: Upload directly to realtor during upload (not recommended)
+const formData = new FormData();
+formData.append('listing_file', fileInput.files[0]);
+formData.append('assign_to_realtor_id', realtorId);
+
+const response = await fetch('/property-manager/upload-listings', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`
+  },
+  body: formData
+});
+
+if (response.ok) {
+  const data = await response.json();
+  console.log(`Uploaded ${data.count} listings directly to realtor`);
+}
 ```
 
 ### Update Property Price
@@ -580,6 +1051,12 @@ if (confirm('Are you sure you want to delete this property?')) {
 - ✅ **FIXED:** Property updates now properly persist to database using `flag_modified()`
 - ✅ **Partial Updates:** Only send fields you want to change
 - ✅ **Complete Response:** Response includes full updated property object for immediate UI update
+- ✅ **AI-Powered Uploads:** Intelligent parsing handles various formats and malformed data
+- ✅ **Data Normalization:** All uploaded data is automatically normalized to match database schema
+- ✅ **Multiple Formats:** Supports JSON, CSV, and TXT files with flexible field names
+- ✅ **PM Ownership:** All PM uploads are stored in PM's source by default
+- ✅ **Flexible Assignment:** PM can assign/unassign listings to/from realtors at any time
+- ✅ **Standalone Realtors:** Realtors without PM work independently with their own source
 
 ---
 
@@ -592,3 +1069,47 @@ The property update endpoint was fixed to properly persist changes to the JSONB 
 3. Proper session management with `session.add()` before commit
 
 This ensures all property field updates (price, address, features, etc.) are correctly saved to the database.
+
+### AI-Powered Listing Parser
+
+The listing parser (`DB/listing_parser.py`) provides:
+
+1. **Format Support:**
+   - JSON (with flexible field names)
+   - CSV (auto-detects delimiter)
+   - TXT (uses AI for unstructured text)
+
+2. **Data Normalization:**
+   - Maps various field name variations to standard schema
+   - Handles nested data structures
+   - Extracts agent information from various formats
+   - Normalizes features from strings, arrays, or comma-separated values
+   - Validates and cleans all data before storage
+
+3. **AI Integration:**
+   - Uses Google Gemini AI (`models/gemini-2.0-flash`) for parsing unstructured text
+   - Falls back to regex-based parsing if AI is unavailable
+   - Handles malformed JSON with automatic fixes
+   - Extracts multiple properties from single text file
+
+4. **Error Handling:**
+   - Graceful degradation if AI is unavailable
+   - Clear error messages for parsing failures
+   - Automatic field construction when possible
+   - Default values for missing optional fields
+
+5. **Data Storage:**
+   - All listings are stored with consistent schema
+   - Text representations generated for embedding
+   - Vector embeddings created for semantic search
+   - Files stored in Supabase storage for reference
+
+---
+
+## 📝 Notes
+
+- The AI parser requires `GEMINI_API_KEY` environment variable to be set
+- If AI is unavailable, the parser falls back to regex-based parsing
+- All uploaded files are stored in Supabase storage for audit purposes
+- Listings are immediately searchable after upload via semantic search
+- The parser handles edge cases like missing fields, wrong data types, and malformed structures
