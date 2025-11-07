@@ -41,14 +41,11 @@ from config import (
     SCOPES,
 )
 from sqlalchemy import update
-from sqlalchemy.orm import flag_modified
+from sqlalchemy.orm.attributes import flag_modified
 from fastapi.middleware.cors import CORSMiddleware
 from DB.sync import sync_apartment_listings
 from utils.auth_module import get_current_realtor_id, get_current_user_data
 from fastapi import Body
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from sqlmodel import select, Session
 import jwt
 from twilio.rest import Client
 
