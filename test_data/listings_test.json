@@ -1,0 +1,57 @@
+[
+  {
+    "address": "123 Main Street, Seattle, WA 98101",
+    "price": 2500,
+    "bedrooms": 3,
+    "bathrooms": 2.5,
+    "square_feet": 1200,
+    "property_type": "Apartment",
+    "listing_status": "Available",
+    "features": ["Swimming Pool", "Fitness Center", "Parking", "Pet Friendly"],
+    "description": "Beautiful modern apartment in downtown Seattle with stunning city views.",
+    "year_built": 2020,
+    "listing_date": "2024-01-15",
+    "agent": {
+      "name": "John Smith",
+      "phone": "555-0101",
+      "email": "john.smith@realty.com"
+    }
+  },
+  {
+    "address": "456 Oak Avenue, Portland, OR 97201",
+    "price": 1800,
+    "bedrooms": 2,
+    "bathrooms": 1,
+    "square_feet": 900,
+    "property_type": "Condo",
+    "listing_status": "For Rent",
+    "features": ["Balcony", "Dishwasher", "Laundry"],
+    "description": "Cozy condo in the heart of Portland with easy access to public transport.",
+    "year_built": 2018,
+    "listing_date": "2024-02-01"
+  },
+  {
+    "addr": "789 Pine Road, San Francisco, CA 94102",
+    "rent": 3500,
+    "beds": 1,
+    "baths": 1,
+    "sqft": 750,
+    "type": "Studio",
+    "status": "Available",
+    "amenities": "Gym, Rooftop, Concierge",
+    "desc": "Luxury studio apartment in prime SF location."
+  },
+  {
+    "street_address": "321 Elm Street",
+    "city": "Boston",
+    "state": "MA",
+    "zip": "02101",
+    "monthly_rent": 2200,
+    "bedroom_count": 2,
+    "bathroom_count": 2,
+    "square_footage": 1100,
+    "property_category": "Apartment",
+    "available": true
+  }
+]
+

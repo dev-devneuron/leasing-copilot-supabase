@@ -1,0 +1,5 @@
+location,rent,beds,baths,sqft,type,status
+"555 Maple Drive, Austin, TX",1900,2,1.5,950,Apartment,Available
+"777 Cedar Lane, Miami, FL",2800,3,2,1300,Condo,For Rent
+"999 Birch Court, Denver, CO",2100,2,2,1050,Townhouse,Available
+
