@@ -3,7 +3,8 @@ AI-Powered Listing Data Parser
 
 This module provides robust parsing capabilities for property/apartment listing data
 in various formats (JSON, CSV, TXT) with intelligent normalization and error handling.
-Uses Google Gemini AI to handle malformed or inconsistent data formats.
+Uses Vertex AI (Gemini models) to handle malformed or inconsistent data formats.
+Falls back to Gemini API if Vertex AI is not configured.
 """
 
 import json
@@ -12,17 +13,12 @@ import io
 import re
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime, date
-import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 from config import LLM_MODEL_NAME
+from .vertex_ai_client import get_vertex_ai_client
 
 load_dotenv()
-
-# Configure Gemini AI
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 
 class ListingParser:
@@ -46,13 +42,16 @@ class ListingParser:
         Args:
             use_ai: Whether to use AI for parsing malformed data (default: True)
         """
-        self.use_ai = use_ai and GEMINI_API_KEY is not None
-        self.model = None
+        self.use_ai = use_ai
+        self.vertex_client = None
         if self.use_ai:
             try:
-                self.model = genai.GenerativeModel(LLM_MODEL_NAME)
+                self.vertex_client = get_vertex_ai_client()
+                if not self.vertex_client.is_available():
+                    print("Warning: AI models not available. Parser will use fallback methods.")
+                    self.use_ai = False
             except Exception as e:
-                print(f"Warning: Could not initialize AI model: {e}")
+                print(f"Warning: Could not initialize AI client: {e}")
                 self.use_ai = False
     
     def parse_file(self, file_content: bytes, filename: str) -> List[Dict[str, Any]]:
@@ -445,10 +444,10 @@ class ListingParser:
     
     def _ai_parse_text(self, text: str) -> List[Dict[str, Any]]:
         """Use AI to parse unstructured text into listing data."""
-        if not self.use_ai:
+        if not self.use_ai or not self.vertex_client:
             return self._regex_parse_text(text)
         
-        prompt = f"""You are a real estate data parser. Extract property listing information from the following text and return it as a JSON array of objects.
+        prompt = f"""You are an expert real estate data parser. Extract property listing information from the following text and return it as a JSON array of objects.
 
 Each listing object should have these fields:
 - address (required): Full property address
@@ -475,8 +474,16 @@ Return ONLY valid JSON array, no other text. If multiple properties are describe
 """
         
         try:
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
+            response_text = self.vertex_client.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.1,  # Lower temperature for more consistent parsing
+                    "top_p": 0.95,
+                    "top_k": 40,
+                    "max_output_tokens": 8192,
+                }
+            )
+            response_text = response_text.strip()
             
             # Extract JSON from response (handle markdown code blocks)
             if '```json' in response_text:
@@ -491,6 +498,10 @@ Return ONLY valid JSON array, no other text. If multiple properties are describe
                 return [self._normalize_listing(data)]
             else:
                 return []
+        except json.JSONDecodeError as e:
+            print(f"AI parsing JSON decode error: {e}")
+            print(f"Response was: {response_text[:500]}...")
+            return self._regex_parse_text(text)
         except Exception as e:
             print(f"AI parsing error: {e}")
             return self._regex_parse_text(text)

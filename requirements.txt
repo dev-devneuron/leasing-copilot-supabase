@@ -24,3 +24,5 @@ pgvector
 sqlalchemy
 supabase
 google-generativeai
+google-cloud-aiplatform>=1.38.0
+vertexai>=1.38.0

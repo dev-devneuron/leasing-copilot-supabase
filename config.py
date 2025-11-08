@@ -67,6 +67,16 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-large-en-v1.5")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "models/gemini-2.0-flash")
 
+# Vertex AI Configuration
+USE_VERTEX_AI = os.getenv("USE_VERTEX_AI", "true").lower() == "true"
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
+VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-2.0-flash-exp")  # or gemini-1.5-pro, gemini-1.5-flash
+VERTEX_AI_EMBEDDING_MODEL = os.getenv("VERTEX_AI_EMBEDDING_MODEL", "textembedding-gecko@003")
+
+# Fallback to Gemini API if Vertex AI not configured
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Fallback option
+
 # Other constants (add as needed)
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 800))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))

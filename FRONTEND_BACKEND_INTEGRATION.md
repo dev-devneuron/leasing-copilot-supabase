@@ -303,7 +303,8 @@ The listing upload system uses **AI-powered parsing** to handle property/apartme
 - ✅ Normalizes field names (e.g., "bedrooms" vs "beds" vs "bedroom_count")
 - ✅ Extracts data from nested structures
 - ✅ Validates and cleans data before storage
-- ✅ Uses Google Gemini AI for parsing unstructured text files
+- ✅ Uses Vertex AI (Gemini models) for robust parsing of unstructured text files
+- ✅ Falls back to Gemini API if Vertex AI is not configured
 - ✅ Stores data in consistent format matching existing database schema
 
 ### Data Ownership & Assignment Flow
@@ -1087,7 +1088,8 @@ The listing parser (`DB/listing_parser.py`) provides:
    - Validates and cleans all data before storage
 
 3. **AI Integration:**
-   - Uses Google Gemini AI (`models/gemini-2.0-flash`) for parsing unstructured text
+   - Uses Vertex AI (Gemini models like `gemini-2.0-flash-exp`) for robust parsing
+   - Automatically falls back to Gemini API if Vertex AI not configured
    - Falls back to regex-based parsing if AI is unavailable
    - Handles malformed JSON with automatic fixes
    - Extracts multiple properties from single text file
@@ -1108,8 +1110,10 @@ The listing parser (`DB/listing_parser.py`) provides:
 
 ## 📝 Notes
 
-- The AI parser requires `GEMINI_API_KEY` environment variable to be set
+- **Vertex AI (Recommended)**: Set `GCP_PROJECT_ID`, `GCP_LOCATION`, and `USE_VERTEX_AI=true` for best performance
+- **Fallback**: If Vertex AI not configured, set `GEMINI_API_KEY` for Gemini API fallback
 - If AI is unavailable, the parser falls back to regex-based parsing
 - All uploaded files are stored in Supabase storage for audit purposes
 - Listings are immediately searchable after upload via semantic search
 - The parser handles edge cases like missing fields, wrong data types, and malformed structures
+- See `VERTEX_AI_SETUP.md` for detailed Vertex AI configuration guide

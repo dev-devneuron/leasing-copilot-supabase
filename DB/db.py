@@ -179,21 +179,71 @@ class Source(SQLModel, table=True):
 
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:
+    """
+    Embedder that uses Vertex AI (preferred) or Gemini API (fallback).
+    Provides robust embeddings for RAG and similarity search.
+    """
     def __init__(self, model_name="models/embedding-001"):
-        embd_key = os.getenv("GEMINI_API_KEY")
-        print("embd_key",embd_key)
-        print("we here")
-        genai.configure(api_key=embd_key)
+        from .vertex_ai_client import get_vertex_ai_client
+        from config import USE_VERTEX_AI
+        
+        self.vertex_client = None
         self.model_name = model_name
+        self.use_vertex_ai = USE_VERTEX_AI
+        
+        if self.use_vertex_ai:
+            try:
+                self.vertex_client = get_vertex_ai_client()
+                if self.vertex_client.is_available():
+                    print("✅ Using Vertex AI for embeddings")
+                else:
+                    print("⚠️  Vertex AI not available, falling back to Gemini API")
+                    self.use_vertex_ai = False
+            except Exception as e:
+                print(f"⚠️  Vertex AI initialization failed: {e}, using Gemini API")
+                self.use_vertex_ai = False
+        
+        if not self.use_vertex_ai:
+            # Fallback to Gemini API
+            embd_key = os.getenv("GEMINI_API_KEY")
+            if embd_key:
+                genai.configure(api_key=embd_key)
+                print("✅ Using Gemini API for embeddings")
+            else:
+                print("⚠️  No embedding API key found")
 
     def embed_text(self, text: str) -> list:
-        res = genai.embed_content(
-            model=self.model_name, content=text, task_type="retrieval_document"
-        )
-        return res["embedding"]
+        """Generate embedding for a single text."""
+        if self.use_vertex_ai and self.vertex_client:
+            try:
+                return self.vertex_client.embed_text(text, task_type="retrieval_document")
+            except Exception as e:
+                print(f"Vertex AI embedding error: {e}, falling back to Gemini API")
+                return self._gemini_embed(text)
+        else:
+            return self._gemini_embed(text)
+    
+    def _gemini_embed(self, text: str) -> list:
+        """Fallback to Gemini API embedding."""
+        try:
+            res = genai.embed_content(
+                model=self.model_name, content=text, task_type="retrieval_document"
+            )
+            return res["embedding"]
+        except Exception as e:
+            print(f"Gemini API embedding error: {e}")
+            raise
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed_text(t) for t in texts]
+        """Generate embeddings for multiple documents."""
+        if self.use_vertex_ai and self.vertex_client:
+            try:
+                return self.vertex_client.embed_documents(texts, task_type="retrieval_document")
+            except Exception as e:
+                print(f"Vertex AI batch embedding error: {e}, falling back to individual calls")
+                return [self.embed_text(t) for t in texts]
+        else:
+            return [self.embed_text(t) for t in texts]
 
 
 # embedder = HuggingFaceEmbeddings(model_name="BAAI/bge-base-en")
