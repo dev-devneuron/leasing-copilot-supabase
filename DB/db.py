@@ -918,18 +918,44 @@ def search_rules(query: str, source_id: int, k: int = 3) -> List[str]:
         return [r[0] for r in rows]
 
 
-def search_apartments(query: str, k: int = 5) -> List[Dict]:
+def search_apartments(query: str, source_ids: Optional[List[int]] = None, k: int = 5) -> List[Dict]:
+    """
+    Search apartments using vector similarity.
+    
+    Args:
+        query: Search query text
+        source_ids: Optional list of source_ids to filter by (for data isolation)
+        k: Number of results to return
+    
+    Returns:
+        List of listing metadata dictionaries
+    """
     qvec = embed_text(query)
     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
-    sql = text(
-        f"""
-        SELECT listing_metadata FROM apartmentlisting
-        ORDER BY embedding <=> '{qvec_str}'::vector
-        LIMIT :k
-    """
-    )
+    
+    # Build SQL with optional source_id filtering
+    if source_ids and len(source_ids) > 0:
+        sql = text(
+            f"""
+            SELECT listing_metadata FROM apartmentlisting
+            WHERE source_id = ANY(:source_ids)
+            ORDER BY embedding <=> '{qvec_str}'::vector
+            LIMIT :k
+        """
+        )
+        params = {"source_ids": source_ids, "k": k}
+    else:
+        sql = text(
+            f"""
+            SELECT listing_metadata FROM apartmentlisting
+            ORDER BY embedding <=> '{qvec_str}'::vector
+            LIMIT :k
+        """
+        )
+        params = {"k": k}
+    
     with SessionLocal() as session:
-        rows = session.execute(sql, {"k": k}).all()
+        rows = session.execute(sql, params).all()
         return [r[0] for r in rows]
 
 

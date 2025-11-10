@@ -1,5 +1,6 @@
 # vapi/rag.py
 import json
+from typing import Optional, List
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import CharacterTextSplitter
 
@@ -38,9 +39,9 @@ class RAGEngine:
         results = search_rules(question, source_id=source_id, k=k)
         return "Here are the most relevant parts:\n\n" + "\n".join(results)
 
-    def search_apartments(self, query: str, k: int = 5):
-        """Finds top-k apartment listings matching the query."""
-        return search_apartments(query, k=k)
+    def search_apartments(self, query: str, source_ids: Optional[List[int]] = None, k: int = 5):
+        """Finds top-k apartment listings matching the query, optionally filtered by source_ids."""
+        return search_apartments(query, source_ids=source_ids, k=k)
 
     # --------- HELPERS ---------
     @staticmethod

@@ -183,7 +183,22 @@ def create_customer(request: VapiRequest):
 
 # ------------------ Query Docs ------------------ #
 @app.post("/query_docs/")
-def query_docs(request: VapiRequest):
+async def query_docs(request: VapiRequest, http_request: Request):
+    """
+    Query documents/rules with data isolation.
+    Filters by user's accessible source_ids.
+    """
+    from DB.vapi_helpers import identify_user_from_vapi_request
+    
+    source_ids = None
+    try:
+        body = await http_request.json()
+        user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
+        if user_info:
+            source_ids = user_info["source_ids"]
+            print(f"🔒 Filtering rules for {user_info['user_type']} ID: {user_info['user_id']}")
+    except Exception as e:
+        print(f"⚠️  Error identifying user: {e}")
 
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "queryDocs":
@@ -197,14 +212,24 @@ def query_docs(request: VapiRequest):
 
     print("Address:", address)
     with Session(engine) as session:
-        # Step 1: Get count of listings for the given address (case-insensitive)
-        count_sql = text(
-            """
-        SELECT COUNT(*) 
-        FROM apartmentlisting
-        WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
-    """
-        ).params(addr=address)
+        # Filter by user's accessible source_ids if available
+        if source_ids and len(source_ids) > 0:
+            count_sql = text(
+                """
+            SELECT COUNT(*) 
+            FROM apartmentlisting
+            WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
+              AND source_id = ANY(:source_ids)
+        """
+            ).params(addr=address, source_ids=source_ids)
+        else:
+            count_sql = text(
+                """
+            SELECT COUNT(*) 
+            FROM apartmentlisting
+            WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
+        """
+            ).params(addr=address)
 
         total_matches = session.exec(count_sql).scalar()
 
@@ -212,28 +237,39 @@ def query_docs(request: VapiRequest):
             raise HTTPException(
                 status_code=404, detail="No listings found for given address"
             )
-        # Step 2: Choose a random offset
+        
         import random
-
         random_offset = random.randint(0, total_matches - 1)
 
-        # Step 3: Fetch one random source_id using OFFSET
-        source_sql = text(
-            """
-    SELECT source_id
-    FROM apartmentlisting
-    WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
-    OFFSET :offset LIMIT 1
-"""
-        ).params(addr=address, offset=random_offset)
+        # Fetch source_id filtered by user's accessible sources
+        if source_ids and len(source_ids) > 0:
+            source_sql = text(
+                """
+        SELECT source_id
+        FROM apartmentlisting
+        WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
+          AND source_id = ANY(:source_ids)
+        OFFSET :offset LIMIT 1
+    """
+            ).params(addr=address, source_ids=source_ids, offset=random_offset)
+        else:
+            source_sql = text(
+                """
+        SELECT source_id
+        FROM apartmentlisting
+        WHERE LOWER(listing_metadata->>'address') = LOWER(:addr)
+        OFFSET :offset LIMIT 1
+    """
+            ).params(addr=address, offset=random_offset)
 
         row = session.exec(source_sql).first()
         if row:
             source_id = row[0]
+            # Verify source_id is accessible to user
+            if source_ids and source_id not in source_ids:
+                raise HTTPException(status_code=403, detail="Access denied to this listing")
         else:
             source_id = None
-
-        # Step 4: Process tool call
 
         response = rag.query(question, source_id=source_id)
         return {"results": [{"toolCallId": tool_call.id, "result": response}]}
@@ -242,7 +278,22 @@ def query_docs(request: VapiRequest):
 
 
 @app.post("/confirm_address/")
-def confirm_apartment(request: VapiRequest):
+async def confirm_apartment(request: VapiRequest, http_request: Request):
+    """
+    Confirm apartment address with data isolation.
+    """
+    from DB.vapi_helpers import identify_user_from_vapi_request
+    
+    source_ids = None
+    try:
+        body = await http_request.json()
+        user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
+        if user_info:
+            source_ids = user_info["source_ids"]
+            print(f"🔒 Filtering listings for {user_info['user_type']} ID: {user_info['user_id']}")
+    except Exception as e:
+        print(f"⚠️  Error identifying user: {e}")
+    
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "confirmAddress":
             args = tool_call.function.arguments
@@ -253,14 +304,32 @@ def confirm_apartment(request: VapiRequest):
                 raise HTTPException(status_code=400, detail="Missing query text")
 
             print("Query:", query)
-            listings = rag.search_apartments(query)
+            listings = rag.search_apartments(query, source_ids=source_ids)
             return {"results": [{"toolCallId": tool_call.id, "result": listings}]}
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
 # ------------------ Search Apartments ------------------ #
 @app.post("/search_apartments/")
-def search_apartments(request: VapiRequest):
+async def search_apartments(request: VapiRequest, http_request: Request):
+    """
+    Search apartments with data isolation based on user's phone number.
+    """
+    from DB.vapi_helpers import identify_user_from_vapi_request
+    
+    # Try to identify user from VAPI request
+    source_ids = None
+    try:
+        body = await http_request.json()
+        user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
+        if user_info:
+            source_ids = user_info["source_ids"]
+            print(f"🔒 Filtering listings for {user_info['user_type']} ID: {user_info['user_id']}, source_ids: {source_ids}")
+        else:
+            print("⚠️  Could not identify user from VAPI request - searching all listings (SECURITY RISK)")
+    except Exception as e:
+        print(f"⚠️  Error identifying user: {e} - searching all listings (SECURITY RISK)")
+    
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "searchApartments":
             args = tool_call.function.arguments
@@ -270,7 +339,8 @@ def search_apartments(request: VapiRequest):
             if not query:
                 raise HTTPException(status_code=400, detail="Missing query text")
 
-            listings = rag.search_apartments(query)
+            # Search with source_ids filter for data isolation
+            listings = rag.search_apartments(query, source_ids=source_ids)
             return {"results": [{"toolCallId": tool_call.id, "result": listings}]}
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
