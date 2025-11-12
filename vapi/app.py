@@ -71,8 +71,23 @@ TWILIO_AUTH_TOKEN1 = os.getenv("TWILIO_AUTH_TOKEN")
 VAPI_API_KEY2 = os.getenv("VAPI_API_KEY2")
 VAPI_ASSISTANT_ID2 = os.getenv("VAPI_ASSISTANT_ID2")
 
-twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN2)
-twillio_client1 = Client(TWILIO_ACCOUNT_SID1, TWILIO_AUTH_TOKEN1)
+# Initialize Twilio clients (will be None if credentials not set)
+twillio_client = None
+twillio_client1 = None
+
+if TWILIO_ACCOUNT_SID2 and TWILIO_AUTH_TOKEN2:
+    try:
+        twillio_client = Client(TWILIO_ACCOUNT_SID2, TWILIO_AUTH_TOKEN2)
+        print("✅ Twilio client 2 initialized")
+    except Exception as e:
+        print(f"⚠️  Failed to initialize Twilio client 2: {e}")
+
+if TWILIO_ACCOUNT_SID1 and TWILIO_AUTH_TOKEN1:
+    try:
+        twillio_client1 = Client(TWILIO_ACCOUNT_SID1, TWILIO_AUTH_TOKEN1)
+        print("✅ Twilio client 1 initialized")
+    except Exception as e:
+        print(f"⚠️  Failed to initialize Twilio client 1: {e}")
 
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
@@ -2691,101 +2706,201 @@ def get_db():
 @app.post("/buy-number")
 def buy_number(
     area_code: str = "412",
-    authorization: str = Header(
-        ...
-    ),  # Extract JWT from frontend Authorization: Bearer <token>
-    db: Session = Depends(get_db),
+    user_data: dict = Depends(get_current_user_data),
 ):
-    """Buy Twilio number, link with Vapi, and save to DB."""
+    """Buy Twilio number, link with Vapi, and save to DB. Supports both Property Managers and Realtors."""
 
-    try:
-        token = authorization.split(" ")[1]
-        decoded = jwt.decode(
-            token, options={"verify_signature": False}
-        )  # in dev, skip sig verify
-        auth_user_id = decoded.get("sub")
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid auth token")
-
-    realtor = db.exec(
-        select(Realtor).where(Realtor.auth_user_id == auth_user_id)
-    ).first()
-    print("Realtor id recv:", realtor.realtor_id)
-    if not realtor:
-        raise HTTPException(status_code=404, detail="Realtor not found")
-
-    #  Buy Twilio number
-    available = twillio_client.available_phone_numbers("US").local.list(
-        area_code=area_code, limit=1
-    )
-    if not available:
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if not user_type or not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user data")
+    
+    # Check if Twilio credentials are configured
+    if not TWILIO_ACCOUNT_SID2 or not TWILIO_AUTH_TOKEN2:
         raise HTTPException(
-            status_code=400, detail=f"No numbers available for area code {area_code}"
+            status_code=500,
+            detail="Twilio credentials not configured. Please set TWILIO_ACCOUNT_SID2 and TWILIO_AUTH_TOKEN2 in environment variables."
+        )
+    
+    # Check if Twilio client is initialized
+    if not twillio_client:
+        raise HTTPException(
+            status_code=500,
+            detail="Twilio client not initialized. Please check your TWILIO_ACCOUNT_SID2 and TWILIO_AUTH_TOKEN2 credentials."
+        )
+    
+    # Check if VAPI credentials are configured
+    if not VAPI_API_KEY2 or not VAPI_ASSISTANT_ID2:
+        raise HTTPException(
+            status_code=500,
+            detail="VAPI credentials not configured. Please set VAPI_API_KEY2 and VAPI_ASSISTANT_ID2 in environment variables."
         )
 
-    number_to_buy = available[0].phone_number
+    try:
+        # Step 1: Check for available phone numbers
+        print(f"🔍 Searching for available numbers in area code {area_code}...")
+        available = twillio_client.available_phone_numbers("US").local.list(
+            area_code=area_code, limit=1
+        )
+        
+        if not available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No phone numbers available for area code {area_code}. Try a different area code."
+            )
 
-    purchased = twillio_client.incoming_phone_numbers.create(
-        phone_number=number_to_buy,
-        sms_url=f"https://api.vapi.ai/sms/twilio/{VAPI_ASSISTANT_ID2}",
-        voice_url="https://api.vapi.ai/twilio/inbound_call",
-    )
+        number_to_buy = available[0].phone_number
+        print(f"📞 Found available number: {number_to_buy}")
 
-    #  Link with Vapi assistant
-    payload = {
-        "provider": "twilio",
-        "number": purchased.phone_number,
-        "twilioAccountSid": TWILIO_ACCOUNT_SID2,
-        "twilioAuthToken": TWILIO_AUTH_TOKEN2,
-        "assistantId": VAPI_ASSISTANT_ID2,
-        "name": f"Realtor {realtor.realtor_id} Bot Number",
-    }
+        # Step 2: Purchase the Twilio number
+        print(f"💰 Purchasing number from Twilio...")
+        try:
+            purchased = twillio_client.incoming_phone_numbers.create(
+                phone_number=number_to_buy,
+                sms_url=f"https://api.vapi.ai/sms/twilio/{VAPI_ASSISTANT_ID2}",
+                voice_url="https://api.vapi.ai/twilio/inbound_call",
+            )
+            print(f"✅ Successfully purchased number: {purchased.phone_number} (SID: {purchased.sid})")
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Twilio purchase failed: {error_msg}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to purchase number from Twilio: {error_msg}"
+            )
 
-    response = requests.post(
-        "https://api.vapi.ai/phone-number",
-        headers={
-            "Authorization": f"Bearer {VAPI_API_KEY2}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-    )
+        # Step 3: Link with VAPI assistant
+        print(f"🔗 Linking number with VAPI assistant...")
+        payload = {
+            "provider": "twilio",
+            "number": purchased.phone_number,
+            "twilioAccountSid": TWILIO_ACCOUNT_SID2,
+            "twilioAuthToken": TWILIO_AUTH_TOKEN2,
+            "assistantId": VAPI_ASSISTANT_ID2,
+            "name": f"{user_type.title()} {user_id} Bot Number",
+        }
 
-    #  Save Twilio number to realtor table
-    with Session(engine) as session:
-        realtor = session.get(Realtor, realtor.realtor_id)  # fetch existing realtor by ID
-        if realtor:
-            # Save the Twilio number in the twilio_contact field
-            realtor.twilio_contact = purchased.phone_number
-            # Save the Twilio SID
-            realtor.twilio_sid = purchased.sid
+        try:
+            response = requests.post(
+                "https://api.vapi.ai/phone-number",
+                headers={
+                    "Authorization": f"Bearer {VAPI_API_KEY2}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30.0
+            )
+            
+            if response.status_code not in [200, 201]:
+                error_detail = response.text
+                print(f"❌ VAPI registration failed: {response.status_code} - {error_detail}")
+                # Try to clean up the purchased number
+                try:
+                    twillio_client.incoming_phone_numbers(purchased.sid).delete()
+                    print(f"🧹 Cleaned up purchased number from Twilio")
+                except:
+                    pass
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to register number with VAPI: {error_detail}"
+                )
+            
+            vapi_response = response.json()
+            print(f"✅ Successfully registered number with VAPI")
+        except requests.exceptions.RequestException as e:
+            error_msg = str(e)
+            print(f"❌ VAPI API request failed: {error_msg}")
+            # Try to clean up the purchased number
+            try:
+                twillio_client.incoming_phone_numbers(purchased.sid).delete()
+                print(f"🧹 Cleaned up purchased number from Twilio")
+            except:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to connect to VAPI API: {error_msg}"
+            )
 
-            session.add(realtor)
+        # Step 4: Save to database
+        print(f"💾 Saving number to database for {user_type} ID: {user_id}...")
+        with Session(engine) as session:
+            if user_type == "realtor":
+                user_record = session.get(Realtor, user_id)
+                if not user_record:
+                    raise HTTPException(status_code=404, detail="Realtor not found")
+            elif user_type == "property_manager":
+                user_record = session.get(PropertyManager, user_id)
+                if not user_record:
+                    raise HTTPException(status_code=404, detail="Property Manager not found")
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid user type: {user_type}")
+
+            # Save the Twilio number
+            user_record.twilio_contact = purchased.phone_number
+            user_record.twilio_sid = purchased.sid
+
+            session.add(user_record)
             session.commit()
-            session.refresh(realtor)
+            session.refresh(user_record)
 
-            return {
-                "twilio_contact": realtor.twilio_contact,
-                "twilio_sid": realtor.twilio_sid,
-                "realtor_id": realtor.realtor_id,
-                "vapi_response": response.json(),
-            }
-        else:
-            return {"error": "Realtor not found"}
+            print(f"✅ Successfully saved number to database")
+
+            return JSONResponse(content={
+                "message": f"Successfully purchased and configured phone number",
+                "twilio_contact": user_record.twilio_contact,
+                "twilio_sid": user_record.twilio_sid,
+                "user_type": user_type,
+                "user_id": user_id,
+                "vapi_response": vapi_response,
+            })
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Unexpected error in buy_number: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error while purchasing number: {error_msg}"
+        )
 
 
 @app.get("/my-number")
-def get_my_number(current_user: int = Depends(get_current_realtor_id)):
+def get_my_number(user_data: dict = Depends(get_current_user_data)):
+    """Get the phone number for the current user (Property Manager or Realtor)."""
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if not user_type or not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user data")
+    
     with Session(engine) as session:
-        statement = select(Realtor).where(Realtor.realtor_id == current_user)
-        realtor = session.exec(statement).first()
-        print("Hey realtor:", realtor)
-
-        if not realtor or not realtor.twilio_contact:
+        if user_type == "realtor":
+            user_record = session.get(Realtor, user_id)
+        elif user_type == "property_manager":
+            user_record = session.get(PropertyManager, user_id)
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid user type: {user_type}")
+        
+        if not user_record:
+            raise HTTPException(status_code=404, detail=f"{user_type.title()} not found")
+        
+        if not user_record.twilio_contact:
             raise HTTPException(
-                status_code=404, detail="You haven't bought the number yet!"
+                status_code=404,
+                detail="You haven't purchased a phone number yet! Use the /buy-number endpoint to purchase one."
             )
-
-        return {"twilio_number": realtor.twilio_contact}
+        
+        return JSONResponse(content={
+            "twilio_number": user_record.twilio_contact,
+            "twilio_sid": user_record.twilio_sid,
+            "user_type": user_type,
+            "user_id": user_id,
+        })
 
 
 @app.get("/recordings")
