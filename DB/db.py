@@ -32,6 +32,7 @@ from sqlmodel import (
 )
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import JSON
 from sqlalchemy.orm import sessionmaker
 from pgvector.sqlalchemy import Vector
 
