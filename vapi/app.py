@@ -3312,25 +3312,48 @@ def unassign_phone_number(
             purchased_number.assigned_at = None
             session.add(purchased_number)
             
-            session.commit()
-            session.refresh(purchased_number)
+            try:
+                session.commit()
+                session.refresh(purchased_number)
+            except Exception as db_error:
+                session.rollback()
+                print(f"❌ Database error during unassign: {db_error}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Database error: Failed to save changes. {str(db_error)}"
+                )
             
             # Return response matching the format of assign-phone-number endpoint
-            return JSONResponse(content={
+            # Ensure all values are JSON-serializable
+            response_data = {
                 "message": f"Phone number {phone_number_str} has been unassigned and is now available",
                 "purchased_phone_number_id": int(purchased_phone_number_id),
-                "phone_number": phone_number_str,
+                "phone_number": str(phone_number_str),
                 "status": "available",
-            })
+            }
             
-    except HTTPException:
-        raise
+            return JSONResponse(
+                content=response_data,
+                status_code=200,
+                media_type="application/json"
+            )
+            
+    except HTTPException as he:
+        # Re-raise HTTPExceptions as-is (FastAPI handles these properly)
+        raise he
     except Exception as e:
+        # Log the full error for debugging
         import traceback
-        traceback.print_exc()
+        error_trace = traceback.format_exc()
+        print(f"❌ Unexpected error in unassign_phone_number: {error_trace}")
+        
+        # Return a properly formatted error response
+        error_message = str(e) if e else "Unknown error occurred"
         raise HTTPException(
             status_code=500,
-            detail=f"Error unassigning phone number: {str(e)}"
+            detail=f"Error unassigning phone number: {error_message}"
         )
 
 

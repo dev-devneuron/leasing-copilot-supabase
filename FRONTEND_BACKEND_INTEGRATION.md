@@ -489,28 +489,72 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
 
 **Common Issues & Debugging:**
 
-1. **If you see `[object Object]`:**
-   - ❌ **WRONG:** `console.log(response)` or `alert(response)`
-   - ✅ **CORRECT:** `const data = await response.json(); console.log(data.message);`
+1. **If you see `[object Object]` - SIMPLE FIX:**
+   
+   The issue is that you're trying to display an error object directly. Here's the simplest fix:
+   
+   ```javascript
+   // ❌ WRONG - This causes [object Object]
+   catch (error) {
+     alert("Error: " + error); // Shows [object Object]
+   }
+   
+   // ✅ CORRECT - Extract the message properly
+   catch (error) {
+     // If it's a network error, the error object has a message
+     if (error.message) {
+       alert("Error: " + error.message);
+     } 
+     // If it's a response error, parse it
+     else if (error.response) {
+       error.response.json().then(data => {
+         alert("Error: " + (data.detail || data.message || "Unknown error"));
+       });
+     }
+     // Fallback
+     else {
+       alert("Error: " + JSON.stringify(error));
+     }
+   }
+   ```
 
-2. **Check the Network Tab:**
-   - Open browser DevTools → Network tab
+2. **Simplified Error Handling (Recommended):**
+   
+   ```javascript
+   async function unassignPhoneNumber(purchasedPhoneNumberId) {
+     const response = await fetch('/unassign-phone-number', {
+       method: 'POST',
+       headers: {
+         'Authorization': `Bearer ${token}`,
+         'Content-Type': 'application/json'
+       },
+       body: JSON.stringify({
+         purchased_phone_number_id: purchasedPhoneNumberId
+       })
+     });
+     
+     const data = await response.json();
+     
+     if (!response.ok) {
+       // Error response - FastAPI returns {detail: "error message"}
+       const errorMsg = data.detail || data.message || 'Unknown error';
+       alert('Error: ' + errorMsg);
+       throw new Error(errorMsg);
+     }
+     
+     // Success
+     alert(data.message);
+     loadPurchasedNumbers();
+     return data;
+   }
+   ```
+
+3. **Check the Network Tab:**
+   - Open browser DevTools (F12) → Network tab
    - Make the request
    - Click on the `/unassign-phone-number` request
-   - Check the "Response" tab - you should see JSON like:
-     ```json
-     {
-       "message": "Phone number +14125551234 has been unassigned...",
-       "purchased_phone_number_id": 1,
-       "phone_number": "+14125551234",
-       "status": "available"
-     }
-     ```
-
-3. **If response is not JSON:**
-   - Check the response headers - should have `Content-Type: application/json`
-   - Check for CORS issues
-   - Verify the endpoint URL is correct
+   - Check the "Response" tab - you should see JSON
+   - If you see an error, it will be in format: `{"detail": "error message"}`
 
 **Notes:**
 - PMs can unassign numbers from themselves or their realtors
