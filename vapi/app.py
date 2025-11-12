@@ -3169,6 +3169,9 @@ def assign_phone_number(
                 pm.twilio_contact = purchased_number.phone_number
                 pm.twilio_sid = purchased_number.twilio_sid
                 session.add(pm)
+                # Mark the object as modified to ensure SQLAlchemy detects the change
+                flag_modified(pm, "twilio_contact")
+                flag_modified(pm, "purchased_phone_number_id")
             
             purchased_number.status = "assigned"
             purchased_number.assigned_to_type = "property_manager"
@@ -3211,6 +3214,10 @@ def assign_phone_number(
             realtor.twilio_contact = purchased_number.phone_number
             realtor.twilio_sid = purchased_number.twilio_sid
             session.add(realtor)
+            # Mark the object as modified to ensure SQLAlchemy detects the change
+            flag_modified(realtor, "twilio_contact")
+            flag_modified(realtor, "purchased_phone_number_id")
+            flag_modified(realtor, "twilio_sid")
             
             purchased_number.status = "assigned"
             purchased_number.assigned_to_type = "realtor"
@@ -3218,8 +3225,42 @@ def assign_phone_number(
             purchased_number.assigned_at = datetime.utcnow()
         
         session.add(purchased_number)
-        session.commit()
-        session.refresh(purchased_number)
+        
+        try:
+            session.commit()
+            # Refresh both objects to ensure they're up to date
+            session.refresh(purchased_number)
+            if assign_to_type == "realtor" and realtor:
+                session.refresh(realtor)
+                # Double-check that the update persisted
+                if realtor.twilio_contact != purchased_number.phone_number:
+                    print(f"⚠️  Warning: Realtor twilio_contact not updated. Expected: {purchased_number.phone_number}, Got: {realtor.twilio_contact}")
+                    # Try to fix it
+                    realtor.twilio_contact = purchased_number.phone_number
+                    flag_modified(realtor, "twilio_contact")
+                    session.add(realtor)
+                    session.commit()
+                    session.refresh(realtor)
+            elif assign_to_type == "property_manager" and pm:
+                session.refresh(pm)
+                # Double-check that the update persisted
+                if pm.twilio_contact != purchased_number.phone_number:
+                    print(f"⚠️  Warning: PM twilio_contact not updated. Expected: {purchased_number.phone_number}, Got: {pm.twilio_contact}")
+                    # Try to fix it
+                    pm.twilio_contact = purchased_number.phone_number
+                    flag_modified(pm, "twilio_contact")
+                    session.add(pm)
+                    session.commit()
+                    session.refresh(pm)
+        except Exception as commit_error:
+            session.rollback()
+            print(f"❌ Database commit error during assign: {commit_error}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error: Failed to save assignment. {str(commit_error)}"
+            )
         
         return JSONResponse(content={
             "message": f"Phone number {purchased_number.phone_number} has been successfully assigned",
@@ -3331,6 +3372,17 @@ def unassign_phone_number(
                     detail=f"Database error: Failed to save changes. {str(db_error)}"
                 )
             
+            # Get the name of who it was assigned to (for response message)
+            previous_assignee_name = None
+            if purchased_number.assigned_to_type == "realtor" and purchased_number.assigned_to_id:
+                # We already have the realtor object from above
+                if realtor:
+                    previous_assignee_name = realtor.name
+            elif purchased_number.assigned_to_type == "property_manager" and purchased_number.assigned_to_id:
+                # We already have the PM object from above
+                if pm:
+                    previous_assignee_name = pm.name
+            
             # Return response matching the format of assign-phone-number endpoint
             # Ensure all values are JSON-serializable
             response_data = {
@@ -3338,6 +3390,7 @@ def unassign_phone_number(
                 "purchased_phone_number_id": int(purchased_phone_number_id),
                 "phone_number": str(phone_number_str),
                 "status": "available",
+                "previous_assignee": previous_assignee_name,  # Who it was assigned to before
             }
             
             return JSONResponse(
@@ -3361,6 +3414,81 @@ def unassign_phone_number(
             status_code=500,
             detail=f"Error unassigning phone number: {error_message}"
         )
+
+
+# ============================================================================
+# SYNC ENDPOINT (Fix Data Inconsistency)
+# ============================================================================
+
+@app.post("/sync-realtor-phone-number")
+def sync_realtor_phone_number(
+    realtor_id: int = Body(...),
+    user_data: dict = Depends(get_current_user_data),
+):
+    """
+    Sync realtor's twilio_contact from their assigned purchased phone number.
+    This fixes cases where the assignment worked but twilio_contact wasn't updated.
+    """
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can sync realtor phone numbers"
+        )
+    
+    with Session(engine) as session:
+        # Get realtor
+        realtor = session.get(Realtor, realtor_id)
+        if not realtor:
+            raise HTTPException(status_code=404, detail="Realtor not found")
+        
+        # Verify realtor belongs to this PM
+        if realtor.property_manager_id != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only sync phone numbers for your own realtors"
+            )
+        
+        # Check if realtor has an assigned phone number
+        if not realtor.purchased_phone_number_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Realtor does not have an assigned phone number"
+            )
+        
+        # Get the purchased phone number
+        purchased_number = session.get(PurchasedPhoneNumber, realtor.purchased_phone_number_id)
+        if not purchased_number:
+            raise HTTPException(
+                status_code=404,
+                detail="Assigned phone number not found"
+            )
+        
+        # Sync the contact number
+        realtor.twilio_contact = purchased_number.phone_number
+        realtor.twilio_sid = purchased_number.twilio_sid
+        flag_modified(realtor, "twilio_contact")
+        flag_modified(realtor, "twilio_sid")
+        session.add(realtor)
+        
+        try:
+            session.commit()
+            session.refresh(realtor)
+        except Exception as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to sync phone number: {str(e)}"
+            )
+        
+        return JSONResponse(content={
+            "message": f"Realtor {realtor.name}'s phone number has been synced",
+            "realtor_id": realtor_id,
+            "realtor_name": realtor.name,
+            "phone_number": realtor.twilio_contact,
+        })
 
 
 # ============================================================================
