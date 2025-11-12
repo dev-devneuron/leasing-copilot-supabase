@@ -8,7 +8,7 @@ This module contains:
 - Data access scope functions for multi-tenant isolation
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import date, time, datetime
 from uuid import UUID
 import os
