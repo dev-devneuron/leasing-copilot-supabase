@@ -428,10 +428,76 @@ async function bookDemo(formData) {
 }
 ```
 
+**Frontend Implementation:**
+```javascript
+async function unassignPhoneNumber(purchasedPhoneNumberId) {
+  try {
+    const response = await fetch('/unassign-phone-number', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        purchased_phone_number_id: purchasedPhoneNumberId
+      })
+    });
+    
+    // IMPORTANT: Always parse JSON response
+    const data = await response.json();
+    
+    if (response.ok) {
+      // Success - data is already parsed
+      console.log('Success:', data);
+      console.log('Message:', data.message); // This will show the actual message
+      alert(data.message); // Display the message properly
+      // Refresh the phone numbers list
+      loadPurchasedNumbers();
+      return data; // Return the parsed data
+    } else {
+      // Error response
+      console.error('Error:', data);
+      alert(`Error: ${data.detail || 'Unknown error'}`);
+      throw new Error(data.detail || 'Unknown error');
+    }
+  } catch (error) {
+    console.error('Fetch error:', error);
+    alert(`Failed to unassign phone number: ${error.message}`);
+    throw error;
+  }
+}
+```
+
+**Common Issues & Debugging:**
+
+1. **If you see `[object Object]`:**
+   - ❌ **WRONG:** `console.log(response)` or `alert(response)`
+   - ✅ **CORRECT:** `const data = await response.json(); console.log(data.message);`
+
+2. **Check the Network Tab:**
+   - Open browser DevTools → Network tab
+   - Make the request
+   - Click on the `/unassign-phone-number` request
+   - Check the "Response" tab - you should see JSON like:
+     ```json
+     {
+       "message": "Phone number +14125551234 has been unassigned...",
+       "purchased_phone_number_id": 1,
+       "phone_number": "+14125551234",
+       "status": "available"
+     }
+     ```
+
+3. **If response is not JSON:**
+   - Check the response headers - should have `Content-Type: application/json`
+   - Check for CORS issues
+   - Verify the endpoint URL is correct
+
 **Notes:**
 - PMs can unassign numbers from themselves or their realtors
 - Unassigning makes the number available for reassignment
 - The number is not deleted (only tech team can delete purchased numbers)
+- **Important:** Make sure to call `await response.json()` to parse the response, don't display the response object directly
 
 ### 6. Get My Phone Number
 
