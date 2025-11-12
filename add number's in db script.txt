@@ -1,0 +1,11 @@
+$body = @{
+  property_manager_id = 12
+  phone_number        = "+123456789101"
+  twilio_sid          = "PN1234567890abcdef"
+  notes               = "Demo"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "https://leasing-copilot-mvp.onrender.com/admin/add-purchased-number" `
+  -Method POST `
+  -Headers @{ "Content-Type" = "application/json" } `
+  -Body $body

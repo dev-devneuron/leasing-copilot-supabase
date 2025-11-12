@@ -3226,6 +3226,87 @@ def assign_phone_number(
         })
 
 
+@app.post("/unassign-phone-number")
+def unassign_phone_number(
+    purchased_phone_number_id: int = Body(...),
+    user_data: dict = Depends(get_current_user_data),
+):
+    """
+    Property Manager unassigns a phone number, making it available again.
+    
+    This will:
+    - Remove the number from the current assignee (PM or Realtor)
+    - Set the number status back to "available"
+    - Clear assignment details
+    """
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can unassign phone numbers"
+        )
+    
+    with Session(engine) as session:
+        # Verify the purchased number belongs to this PM
+        purchased_number = session.get(PurchasedPhoneNumber, purchased_phone_number_id)
+        if not purchased_number:
+            raise HTTPException(status_code=404, detail="Purchased phone number not found")
+        
+        if purchased_number.property_manager_id != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only unassign phone numbers that belong to you"
+            )
+        
+        if purchased_number.status != "assigned":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number is not currently assigned (status: {purchased_number.status})"
+            )
+        
+        # Unassign from current assignee
+        if purchased_number.assigned_to_type == "property_manager" and purchased_number.assigned_to_id:
+            pm = session.get(PropertyManager, purchased_number.assigned_to_id)
+            if pm:
+                pm.purchased_phone_number_id = None
+                pm.twilio_contact = "TBD"
+                pm.twilio_sid = None
+                session.add(pm)
+        
+        elif purchased_number.assigned_to_type == "realtor" and purchased_number.assigned_to_id:
+            realtor = session.get(Realtor, purchased_number.assigned_to_id)
+            if realtor:
+                # Verify realtor belongs to this PM
+                if realtor.property_manager_id != user_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Cannot unassign number from a realtor that doesn't belong to you"
+                    )
+                realtor.purchased_phone_number_id = None
+                realtor.twilio_contact = "TBD"
+                realtor.twilio_sid = None
+                session.add(realtor)
+        
+        # Mark number as available
+        purchased_number.status = "available"
+        purchased_number.assigned_to_type = None
+        purchased_number.assigned_to_id = None
+        purchased_number.assigned_at = None
+        session.add(purchased_number)
+        
+        session.commit()
+        session.refresh(purchased_number)
+        
+        return JSONResponse(content={
+            "message": f"Phone number {purchased_number.phone_number} has been unassigned and is now available",
+            "purchased_phone_number_id": purchased_phone_number_id,
+            "phone_number": purchased_number.phone_number,
+            "status": purchased_number.status,
+        })
+
+
 # ============================================================================
 # ADMIN ENDPOINTS (For Tech Team)
 # ============================================================================

@@ -406,7 +406,34 @@ async function bookDemo(formData) {
 }
 ```
 
-### 5. Get My Phone Number
+### 5. Unassign Phone Number
+
+**Endpoint:** `POST /unassign-phone-number`  
+**Auth:** Required (PM only)
+
+**Request:**
+```json
+{
+  "purchased_phone_number_id": 1
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Phone number +14125551234 has been unassigned and is now available",
+  "purchased_phone_number_id": 1,
+  "phone_number": "+14125551234",
+  "status": "available"
+}
+```
+
+**Notes:**
+- PMs can unassign numbers from themselves or their realtors
+- Unassigning makes the number available for reassignment
+- The number is not deleted (only tech team can delete purchased numbers)
+
+### 6. Get My Phone Number
 
 **Endpoint:** `GET /my-number`  
 **Auth:** Required
