@@ -192,6 +192,39 @@ class Source(SQLModel, table=True):
     listings: List["ApartmentListing"] = Relationship(back_populates="source")
 
 
+class DemoRequest(SQLModel, table=True):
+    """Stores demo booking requests from potential customers."""
+    demo_request_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Contact information
+    name: str
+    email: str
+    phone: str
+    company_name: Optional[str] = None
+    
+    # Demo preferences
+    preferred_date: Optional[date] = None
+    preferred_time: Optional[str] = None  # e.g., "10:00 AM", "2:00 PM"
+    timezone: Optional[str] = None  # e.g., "America/New_York"
+    notes: Optional[str] = None  # Additional information from requester
+    
+    # Status tracking
+    status: str = Field(default="pending")  # pending, scheduled, completed, cancelled, converted
+    scheduled_at: Optional[datetime] = None  # When demo is actually scheduled
+    completed_at: Optional[datetime] = None  # When demo was completed
+    
+    # Conversion tracking
+    converted_to_pm_id: Optional[int] = Field(default=None, foreign_key="propertymanager.property_manager_id")
+    converted_at: Optional[datetime] = None
+    
+    # Timestamps
+    requested_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    
+    # Relationship (if converted to PM)
+    converted_property_manager: Optional["PropertyManager"] = Relationship()
+
+
 class PhoneNumberRequest(SQLModel, table=True):
     """Stores PM requests for phone numbers."""
     request_id: Optional[int] = Field(default=None, primary_key=True)

@@ -2704,6 +2704,197 @@ def get_db():
 
 
 # ============================================================================
+# DEMO REQUEST SYSTEM (Public - No Auth Required)
+# ============================================================================
+# Replaces sign-up with "Book a Demo" functionality
+
+@app.post("/book-demo")
+def book_demo(
+    name: str = Body(...),
+    email: str = Body(...),
+    phone: str = Body(...),
+    company_name: Optional[str] = Body(None),
+    preferred_date: Optional[str] = Body(None),  # ISO format: "2024-01-15"
+    preferred_time: Optional[str] = Body(None),  # e.g., "10:00 AM"
+    timezone: Optional[str] = Body(None),  # e.g., "America/New_York"
+    notes: Optional[str] = Body(None),
+):
+    """
+    Public endpoint to book a demo. No authentication required.
+    Anyone can submit a demo request.
+    """
+    from datetime import date as date_type
+    
+    try:
+        # Parse preferred_date if provided
+        parsed_date = None
+        if preferred_date:
+            try:
+                parsed_date = datetime.strptime(preferred_date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid date format. Use YYYY-MM-DD format."
+                )
+        
+        with Session(engine) as session:
+            # Create demo request
+            demo_request = DemoRequest(
+                name=name,
+                email=email,
+                phone=phone,
+                company_name=company_name,
+                preferred_date=parsed_date,
+                preferred_time=preferred_time,
+                timezone=timezone,
+                notes=notes,
+                status="pending"
+            )
+            
+            session.add(demo_request)
+            session.commit()
+            session.refresh(demo_request)
+            
+            return JSONResponse(content={
+                "message": "Thank you for your interest! We've received your demo request and will contact you soon to schedule a time.",
+                "demo_request_id": demo_request.demo_request_id,
+                "status": demo_request.status,
+                "requested_at": demo_request.requested_at.isoformat() if demo_request.requested_at else None,
+            })
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error creating demo request: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error submitting demo request: {error_msg}"
+        )
+
+
+@app.get("/demo-requests")
+def get_demo_requests(
+    status: Optional[str] = None,  # Filter by status: pending, scheduled, completed, cancelled, converted
+    # In production, add admin authentication here
+):
+    """
+    Admin endpoint to view all demo requests.
+    In production, this should be protected with admin authentication.
+    """
+    with Session(engine) as session:
+        query = select(DemoRequest)
+        if status:
+            query = query.where(DemoRequest.status == status)
+        query = query.order_by(DemoRequest.requested_at.desc())
+        
+        requests = session.exec(query).all()
+        
+        return JSONResponse(content={
+            "demo_requests": [
+                {
+                    "demo_request_id": req.demo_request_id,
+                    "name": req.name,
+                    "email": req.email,
+                    "phone": req.phone,
+                    "company_name": req.company_name,
+                    "preferred_date": req.preferred_date.isoformat() if req.preferred_date else None,
+                    "preferred_time": req.preferred_time,
+                    "timezone": req.timezone,
+                    "notes": req.notes,
+                    "status": req.status,
+                    "scheduled_at": req.scheduled_at.isoformat() if req.scheduled_at else None,
+                    "completed_at": req.completed_at.isoformat() if req.completed_at else None,
+                    "converted_to_pm_id": req.converted_to_pm_id,
+                    "converted_at": req.converted_at.isoformat() if req.converted_at else None,
+                    "requested_at": req.requested_at.isoformat() if req.requested_at else None,
+                }
+                for req in requests
+            ]
+        })
+
+
+@app.patch("/demo-requests/{demo_request_id}")
+def update_demo_request(
+    demo_request_id: int,
+    status: Optional[str] = Body(None),
+    scheduled_at: Optional[str] = Body(None),  # ISO format datetime
+    completed_at: Optional[str] = Body(None),  # ISO format datetime
+    converted_to_pm_id: Optional[int] = Body(None),
+    notes: Optional[str] = Body(None),
+    # In production, add admin authentication here
+):
+    """
+    Admin endpoint to update demo request status.
+    In production, this should be protected with admin authentication.
+    """
+    with Session(engine) as session:
+        demo_request = session.get(DemoRequest, demo_request_id)
+        if not demo_request:
+            raise HTTPException(status_code=404, detail="Demo request not found")
+        
+        # Update status
+        if status:
+            if status not in ["pending", "scheduled", "completed", "cancelled", "converted"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid status. Must be: pending, scheduled, completed, cancelled, or converted"
+                )
+            demo_request.status = status
+        
+        # Update scheduled_at
+        if scheduled_at:
+            try:
+                demo_request.scheduled_at = datetime.fromisoformat(scheduled_at.replace('Z', '+00:00'))
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid scheduled_at format. Use ISO format datetime."
+                )
+        
+        # Update completed_at
+        if completed_at:
+            try:
+                demo_request.completed_at = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid completed_at format. Use ISO format datetime."
+                )
+        
+        # Update converted_to_pm_id
+        if converted_to_pm_id is not None:
+            # Verify PM exists
+            pm = session.get(PropertyManager, converted_to_pm_id)
+            if not pm:
+                raise HTTPException(status_code=404, detail="Property Manager not found")
+            demo_request.converted_to_pm_id = converted_to_pm_id
+            demo_request.converted_at = datetime.utcnow()
+            demo_request.status = "converted"
+        
+        # Update notes
+        if notes is not None:
+            demo_request.notes = notes
+        
+        demo_request.updated_at = datetime.utcnow()
+        
+        session.add(demo_request)
+        session.commit()
+        session.refresh(demo_request)
+        
+        return JSONResponse(content={
+            "message": "Demo request updated successfully",
+            "demo_request_id": demo_request.demo_request_id,
+            "status": demo_request.status,
+            "scheduled_at": demo_request.scheduled_at.isoformat() if demo_request.scheduled_at else None,
+            "completed_at": demo_request.completed_at.isoformat() if demo_request.completed_at else None,
+            "converted_to_pm_id": demo_request.converted_to_pm_id,
+        })
+
+
+# ============================================================================
 # PHONE NUMBER REQUEST & ASSIGNMENT SYSTEM
 # ============================================================================
 # New system: PM requests numbers, tech team purchases, PM assigns to self/realtors

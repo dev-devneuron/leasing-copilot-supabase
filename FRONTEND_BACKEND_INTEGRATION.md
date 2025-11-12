@@ -1,18 +1,256 @@
 # Frontend & Backend Integration Guide
 ## Complete API Documentation
 
-This guide documents all backend endpoints for user profile, realtor management, property management, and **AI-powered listing uploads**.
+This guide documents all backend endpoints for user profile, realtor management, property management, **AI-powered listing uploads**, and **demo booking system**.
+
+---
+
+## 🎯 Demo Booking System (Public - No Auth Required)
+
+### Overview
+
+The system uses a "Book a Demo" approach instead of direct sign-up:
+1. Visitors book a demo through the public endpoint
+2. Admin team reviews and schedules demos
+3. After demo, PMs are onboarded if they're interested
+4. Demo requests can be marked as "converted" when PM account is created
+
+### 1. Book a Demo (Public Endpoint)
+
+**Endpoint:**
+```http
+POST /book-demo
+Content-Type: application/json
+
+{
+  "name": "John Smith",
+  "email": "john@example.com",
+  "phone": "+14125551234",
+  "company_name": "ABC Properties",  // Optional
+  "preferred_date": "2024-01-15",  // Optional: YYYY-MM-DD format
+  "preferred_time": "10:00 AM",  // Optional
+  "timezone": "America/New_York",  // Optional
+  "notes": "Interested in property management features"  // Optional
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Thank you for your interest! We've received your demo request and will contact you soon to schedule a time.",
+  "demo_request_id": 1,
+  "status": "pending",
+  "requested_at": "2024-01-15T10:30:00Z"
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// Public landing page - Book Demo Form
+async function bookDemo(formData) {
+  const response = await fetch('/book-demo', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: formData.name,
+      email: formData.email,
+      phone: formData.phone,
+      company_name: formData.companyName || null,
+      preferred_date: formData.preferredDate || null,  // YYYY-MM-DD
+      preferred_time: formData.preferredTime || null,
+      timezone: formData.timezone || null,
+      notes: formData.notes || null
+    })
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Show success message
+    alert(data.message);
+    // Clear form or redirect
+  } else {
+    const error = await response.json();
+    alert(`Error: ${error.detail}`);
+  }
+}
+```
+
+**UI Requirements:**
+- Replace "Sign Up" button with "Book a Demo" button
+- Create a demo booking form with:
+  - Name (required)
+  - Email (required)
+  - Phone (required)
+  - Company Name (optional)
+  - Preferred Date (optional date picker)
+  - Preferred Time (optional time picker)
+  - Timezone (optional dropdown)
+  - Notes/Message (optional textarea)
+- Show success message after submission
+- No authentication required - this is a public endpoint
+
+---
+
+### 2. Admin: View Demo Requests
+
+**Endpoint:**
+```http
+GET /demo-requests?status=pending
+Authorization: Bearer <admin_token>
+```
+
+**Query Parameters:**
+- `status` (optional): Filter by status - `pending`, `scheduled`, `completed`, `cancelled`, `converted`
+
+**Response:**
+```json
+{
+  "demo_requests": [
+    {
+      "demo_request_id": 1,
+      "name": "John Smith",
+      "email": "john@example.com",
+      "phone": "+14125551234",
+      "company_name": "ABC Properties",
+      "preferred_date": "2024-01-15",
+      "preferred_time": "10:00 AM",
+      "timezone": "America/New_York",
+      "notes": "Interested in property management features",
+      "status": "pending",
+      "scheduled_at": null,
+      "completed_at": null,
+      "converted_to_pm_id": null,
+      "converted_at": null,
+      "requested_at": "2024-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// Admin Dashboard - View Demo Requests
+async function getDemoRequests(status = null) {
+  const url = status ? `/demo-requests?status=${status}` : '/demo-requests';
+  const response = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${adminToken}` }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Display demo requests in a table
+    data.demo_requests.forEach(req => {
+      console.log(`${req.name} - ${req.status}`);
+    });
+  }
+}
+```
+
+---
+
+### 3. Admin: Update Demo Request
+
+**Endpoint:**
+```http
+PATCH /demo-requests/{demo_request_id}
+Authorization: Bearer <admin_token>
+Content-Type: application/json
+
+{
+  "status": "scheduled",  // pending, scheduled, completed, cancelled, converted
+  "scheduled_at": "2024-01-20T10:00:00Z",  // Optional: ISO datetime
+  "completed_at": "2024-01-20T11:00:00Z",  // Optional: ISO datetime
+  "converted_to_pm_id": 5,  // Optional: PM ID if converted
+  "notes": "Demo completed successfully"  // Optional
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Demo request updated successfully",
+  "demo_request_id": 1,
+  "status": "scheduled",
+  "scheduled_at": "2024-01-20T10:00:00Z",
+  "completed_at": null,
+  "converted_to_pm_id": null
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// Admin Dashboard - Update Demo Request
+async function updateDemoRequest(demoRequestId, updates) {
+  const response = await fetch(`/demo-requests/${demoRequestId}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${adminToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(updates)
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    alert(data.message);
+    // Refresh demo requests list
+    getDemoRequests();
+  }
+}
+
+// Example: Mark as scheduled
+updateDemoRequest(1, {
+  status: "scheduled",
+  scheduled_at: "2024-01-20T10:00:00Z"
+});
+
+// Example: Mark as converted (after creating PM account)
+updateDemoRequest(1, {
+  status: "converted",
+  converted_to_pm_id: 5  // The PM ID created from this demo
+});
+```
+
+**UI Requirements:**
+- Admin dashboard to view all demo requests
+- Filter by status (pending, scheduled, completed, cancelled, converted)
+- Update status with dropdown
+- Schedule demo with date/time picker
+- Mark as completed after demo
+- Link to PM account when converted
+- Add internal notes
+
+---
+
+### Demo Request Status Flow
+
+```
+pending → scheduled → completed → converted
+   ↓         ↓
+cancelled  cancelled
+```
+
+**Status Meanings:**
+- `pending`: New request, not yet reviewed
+- `scheduled`: Demo has been scheduled
+- `completed`: Demo was completed
+- `cancelled`: Request was cancelled
+- `converted`: Demo led to PM account creation
 
 ---
 
 ## 🔐 Authentication
 
-All endpoints require JWT authentication. Include the token in the Authorization header:
+Most endpoints require JWT authentication. Include the token in the Authorization header:
 ```
 Authorization: Bearer <jwt_token>
 ```
 
 The token is obtained from Supabase Auth after login.
+
+**Note:** The `/book-demo` endpoint is **public** and does not require authentication.
 
 ---
 
