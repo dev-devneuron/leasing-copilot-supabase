@@ -231,7 +231,8 @@ class PhoneNumberRequest(SQLModel, table=True):
     property_manager_id: int = Field(foreign_key="propertymanager.property_manager_id", index=True)
     
     # Request details
-    area_code: Optional[str] = None  # Preferred area code (optional)
+    country_code: Optional[str] = None  # Country code (e.g., "+1", "1", "+44")
+    area_code: Optional[str] = None  # Preferred area code (3-digit, e.g., "412")
     status: str = Field(default="pending")  # pending, approved, fulfilled, cancelled
     notes: Optional[str] = None  # Any additional notes from PM
     

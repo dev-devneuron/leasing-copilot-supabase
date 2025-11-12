@@ -2901,8 +2901,9 @@ def update_demo_request(
 
 @app.post("/request-phone-number")
 def request_phone_number(
-    area_code: Optional[str] = None,
-    notes: Optional[str] = None,
+    country_code: Optional[str] = Body(None),
+    area_code: Optional[str] = Body(None),
+    notes: Optional[str] = Body(None),
     user_data: dict = Depends(get_current_user_data),
 ):
     """
@@ -2923,9 +2924,19 @@ def request_phone_number(
         if not pm:
             raise HTTPException(status_code=404, detail="Property Manager not found")
         
+        # Normalize country code (remove + if present, keep it consistent)
+        normalized_country_code = None
+        if country_code:
+            # Remove + and spaces, keep just digits
+            normalized_country_code = country_code.replace("+", "").strip()
+            if normalized_country_code:
+                # Add + back for display consistency
+                normalized_country_code = f"+{normalized_country_code}"
+        
         # Create request
         request = PhoneNumberRequest(
             property_manager_id=user_id,
+            country_code=normalized_country_code,
             area_code=area_code,
             notes=notes,
             status="pending"
@@ -2938,6 +2949,8 @@ def request_phone_number(
         return JSONResponse(content={
             "message": "Your phone number request has been submitted successfully. A new number will be available in your portal within 24 hours.",
             "request_id": request.request_id,
+            "country_code": request.country_code,
+            "area_code": request.area_code,
             "status": request.status,
             "requested_at": request.requested_at.isoformat() if request.requested_at else None,
         })
@@ -2968,6 +2981,7 @@ def get_my_phone_number_requests(
             "requests": [
                 {
                     "request_id": req.request_id,
+                    "country_code": req.country_code,
                     "area_code": req.area_code,
                     "status": req.status,
                     "notes": req.notes,
@@ -3353,6 +3367,7 @@ def admin_get_all_phone_number_requests(
                 {
                     "request_id": req.request_id,
                     "property_manager_id": req.property_manager_id,
+                    "country_code": req.country_code,
                     "area_code": req.area_code,
                     "status": req.status,
                     "notes": req.notes,

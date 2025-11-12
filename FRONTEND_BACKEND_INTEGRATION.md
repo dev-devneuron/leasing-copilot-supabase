@@ -1327,7 +1327,8 @@ Authorization: Bearer <pm_jwt_token>
 Content-Type: application/json
 
 {
-  "area_code": "412",  // Optional: Preferred area code
+  "country_code": "+1",  // Optional: Country code (e.g., "+1", "1", "+44")
+  "area_code": "412",  // Optional: Preferred area code (3-digit, e.g., "412")
   "notes": "Need number for new realtor"  // Optional: Additional notes
 }
 ```
@@ -1337,10 +1338,17 @@ Content-Type: application/json
 {
   "message": "Your phone number request has been submitted successfully. A new number will be available in your portal within 24 hours.",
   "request_id": 1,
+  "country_code": "+1",
+  "area_code": "412",
   "status": "pending",
   "requested_at": "2024-01-15T10:30:00Z"
 }
 ```
+
+**Notes:**
+- `country_code`: Country code with or without + (e.g., "+1", "1", "+44"). Will be normalized to include +.
+- `area_code`: 3-digit area code (e.g., "412" for Pittsburgh, "415" for San Francisco)
+- Both fields are optional, but at least one should be provided for better number selection
 
 **Frontend Implementation:**
 ```javascript
