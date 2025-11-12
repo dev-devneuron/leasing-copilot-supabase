@@ -67,12 +67,17 @@ class PropertyManager(SQLModel, table=True):
     twilio_contact: str
     twilio_sid: Optional[str] = None
     credentials: Optional[str] = Field(default=None)  # Store as serialized JSON string
+    # Link to purchased phone number (if assigned)
+    purchased_phone_number_id: Optional[int] = Field(default=None, foreign_key="purchasedphonenumber.purchased_phone_number_id")
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
 
     # Relationships
     managed_realtors: List["Realtor"] = Relationship(back_populates="property_manager")
     sources: List["Source"] = Relationship(back_populates="property_manager")
+    phone_number_requests: List["PhoneNumberRequest"] = Relationship(back_populates="property_manager")
+    purchased_phone_numbers: List["PurchasedPhoneNumber"] = Relationship(back_populates="property_manager")
+    purchased_phone_number: Optional["PurchasedPhoneNumber"] = Relationship(back_populates="assigned_property_manager")
 
 
 class Realtor(SQLModel, table=True):
@@ -88,6 +93,8 @@ class Realtor(SQLModel, table=True):
     # Property Manager relationship (optional for standalone realtors)
     property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.property_manager_id")
     is_standalone: bool = Field(default=True)  # True if not under any property manager
+    # Link to purchased phone number (if assigned)
+    purchased_phone_number_id: Optional[int] = Field(default=None, foreign_key="purchasedphonenumber.purchased_phone_number_id")
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
 
@@ -95,6 +102,7 @@ class Realtor(SQLModel, table=True):
     property_manager: Optional["PropertyManager"] = Relationship(back_populates="managed_realtors")
     sources: List["Source"] = Relationship(back_populates="realtor")
     bookings: List["Booking"] = Relationship(back_populates="realtor")
+    purchased_phone_number: Optional["PurchasedPhoneNumber"] = Relationship(back_populates="assigned_realtor")
 
 
 class Customer(SQLModel, table=True):
@@ -176,6 +184,58 @@ class Source(SQLModel, table=True):
     realtor: Optional[Realtor] = Relationship(back_populates="sources")
     rule_chunks: List["RuleChunk"] = Relationship(back_populates="source")
     listings: List["ApartmentListing"] = Relationship(back_populates="source")
+
+
+class PhoneNumberRequest(SQLModel, table=True):
+    """Stores PM requests for phone numbers."""
+    request_id: Optional[int] = Field(default=None, primary_key=True)
+    property_manager_id: int = Field(foreign_key="propertymanager.property_manager_id", index=True)
+    
+    # Request details
+    area_code: Optional[str] = None  # Preferred area code (optional)
+    status: str = Field(default="pending")  # pending, approved, fulfilled, cancelled
+    notes: Optional[str] = None  # Any additional notes from PM
+    
+    # Timestamps
+    requested_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    fulfilled_at: Optional[datetime] = None
+    
+    # Relationship
+    property_manager: Optional["PropertyManager"] = Relationship(back_populates="phone_number_requests")
+
+
+class PurchasedPhoneNumber(SQLModel, table=True):
+    """Stores phone numbers purchased by tech team for PMs."""
+    purchased_phone_number_id: Optional[int] = Field(default=None, primary_key=True)
+    property_manager_id: int = Field(foreign_key="propertymanager.property_manager_id", index=True)
+    
+    # Phone number details
+    phone_number: str = Field(unique=True, index=True)  # E.164 format: +14125551234
+    twilio_sid: str = Field(unique=True, index=True)  # Twilio SID
+    vapi_phone_number_id: Optional[str] = None  # VAPI phone number ID
+    
+    # Assignment status
+    status: str = Field(default="available")  # available, assigned, inactive
+    assigned_to_type: Optional[str] = None  # "property_manager" or "realtor"
+    assigned_to_id: Optional[int] = None  # ID of PM or Realtor
+    
+    # Timestamps
+    purchased_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    assigned_at: Optional[datetime] = None
+    
+    # Notes
+    notes: Optional[str] = None  # Internal notes from tech team
+    
+    # Relationships
+    property_manager: Optional["PropertyManager"] = Relationship(back_populates="purchased_phone_numbers")
+    assigned_property_manager: Optional["PropertyManager"] = Relationship(
+        back_populates="purchased_phone_number",
+        sa_relationship_kwargs={"foreign_keys": "[PropertyManager.purchased_phone_number_id]"}
+    )
+    assigned_realtor: Optional["Realtor"] = Relationship(
+        back_populates="purchased_phone_number",
+        sa_relationship_kwargs={"foreign_keys": "[Realtor.purchased_phone_number_id]"}
+    )
 
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:

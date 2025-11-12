@@ -2703,85 +2703,370 @@ def get_db():
         yield session
 
 
-@app.post("/buy-number")
-def buy_number(
-    area_code: str = "412",
+# ============================================================================
+# PHONE NUMBER REQUEST & ASSIGNMENT SYSTEM
+# ============================================================================
+# New system: PM requests numbers, tech team purchases, PM assigns to self/realtors
+
+@app.post("/request-phone-number")
+def request_phone_number(
+    area_code: Optional[str] = None,
+    notes: Optional[str] = None,
     user_data: dict = Depends(get_current_user_data),
 ):
-    """Buy Twilio number, link with Vapi, and save to DB. Supports both Property Managers and Realtors."""
-
+    """
+    Property Manager requests a phone number.
+    Returns message that number will be available in 24 hours.
+    """
     user_type = user_data.get("user_type")
     user_id = user_data.get("id")
     
-    if not user_type or not user_id:
-        raise HTTPException(status_code=400, detail="Invalid user data")
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can request phone numbers"
+        )
     
+    with Session(engine) as session:
+        pm = session.get(PropertyManager, user_id)
+        if not pm:
+            raise HTTPException(status_code=404, detail="Property Manager not found")
+        
+        # Create request
+        request = PhoneNumberRequest(
+            property_manager_id=user_id,
+            area_code=area_code,
+            notes=notes,
+            status="pending"
+        )
+        
+        session.add(request)
+        session.commit()
+        session.refresh(request)
+        
+        return JSONResponse(content={
+            "message": "Your phone number request has been submitted successfully. A new number will be available in your portal within 24 hours.",
+            "request_id": request.request_id,
+            "status": request.status,
+            "requested_at": request.requested_at.isoformat() if request.requested_at else None,
+        })
+
+
+@app.get("/my-phone-number-requests")
+def get_my_phone_number_requests(
+    user_data: dict = Depends(get_current_user_data),
+):
+    """Get all phone number requests for the current Property Manager."""
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can view phone number requests"
+        )
+    
+    with Session(engine) as session:
+        requests = session.exec(
+            select(PhoneNumberRequest)
+            .where(PhoneNumberRequest.property_manager_id == user_id)
+            .order_by(PhoneNumberRequest.requested_at.desc())
+        ).all()
+        
+        return JSONResponse(content={
+            "requests": [
+                {
+                    "request_id": req.request_id,
+                    "area_code": req.area_code,
+                    "status": req.status,
+                    "notes": req.notes,
+                    "requested_at": req.requested_at.isoformat() if req.requested_at else None,
+                    "fulfilled_at": req.fulfilled_at.isoformat() if req.fulfilled_at else None,
+                }
+                for req in requests
+            ]
+        })
+
+
+@app.get("/purchased-phone-numbers")
+def get_purchased_phone_numbers(
+    user_data: dict = Depends(get_current_user_data),
+):
+    """
+    Get all purchased phone numbers available for assignment.
+    Only shows numbers for the current Property Manager.
+    """
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can view purchased phone numbers"
+        )
+    
+    with Session(engine) as session:
+        # Get all purchased numbers for this PM
+        purchased_numbers = session.exec(
+            select(PurchasedPhoneNumber)
+            .where(PurchasedPhoneNumber.property_manager_id == user_id)
+            .order_by(PurchasedPhoneNumber.purchased_at.desc())
+        ).all()
+        
+        # Get realtors for assignment options
+        realtors = session.exec(
+            select(Realtor)
+            .where(Realtor.property_manager_id == user_id)
+        ).all()
+        
+        return JSONResponse(content={
+            "purchased_numbers": [
+                {
+                    "purchased_phone_number_id": pn.purchased_phone_number_id,
+                    "phone_number": pn.phone_number,
+                    "status": pn.status,
+                    "assigned_to_type": pn.assigned_to_type,
+                    "assigned_to_id": pn.assigned_to_id,
+                    "purchased_at": pn.purchased_at.isoformat() if pn.purchased_at else None,
+                    "assigned_at": pn.assigned_at.isoformat() if pn.assigned_at else None,
+                }
+                for pn in purchased_numbers
+            ],
+            "available_for_assignment": [
+                {
+                    "purchased_phone_number_id": pn.purchased_phone_number_id,
+                    "phone_number": pn.phone_number,
+                    "purchased_at": pn.purchased_at.isoformat() if pn.purchased_at else None,
+                }
+                for pn in purchased_numbers
+                if pn.status == "available"
+            ],
+            "realtors": [
+                {
+                    "realtor_id": r.realtor_id,
+                    "name": r.name,
+                    "email": r.email,
+                }
+                for r in realtors
+            ],
+        })
+
+
+@app.post("/assign-phone-number")
+def assign_phone_number(
+    purchased_phone_number_id: int = Body(...),
+    assign_to_type: str = Body(...),  # "property_manager" or "realtor"
+    assign_to_id: Optional[int] = Body(None),  # Required if assign_to_type is "realtor"
+    user_data: dict = Depends(get_current_user_data),
+):
+    """
+    Property Manager assigns a purchased phone number to themselves or a realtor.
+    """
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can assign phone numbers"
+        )
+    
+    if assign_to_type not in ["property_manager", "realtor"]:
+        raise HTTPException(
+            status_code=400,
+            detail="assign_to_type must be 'property_manager' or 'realtor'"
+        )
+    
+    if assign_to_type == "realtor" and not assign_to_id:
+        raise HTTPException(
+            status_code=400,
+            detail="assign_to_id is required when assign_to_type is 'realtor'"
+        )
+    
+    with Session(engine) as session:
+        # Verify the purchased number belongs to this PM
+        purchased_number = session.get(PurchasedPhoneNumber, purchased_phone_number_id)
+        if not purchased_number:
+            raise HTTPException(status_code=404, detail="Purchased phone number not found")
+        
+        if purchased_number.property_manager_id != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only assign phone numbers that belong to you"
+            )
+        
+        if purchased_number.status != "available":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number is not available for assignment (current status: {purchased_number.status})"
+            )
+        
+        # Unassign any previous assignment
+        if assign_to_type == "property_manager":
+            # Unassign from any realtor first
+            if purchased_number.assigned_to_type == "realtor" and purchased_number.assigned_to_id:
+                old_realtor = session.get(Realtor, purchased_number.assigned_to_id)
+                if old_realtor:
+                    old_realtor.purchased_phone_number_id = None
+                    old_realtor.twilio_contact = "TBD"
+                    old_realtor.twilio_sid = None
+                    session.add(old_realtor)
+            
+            # Assign to PM
+            pm = session.get(PropertyManager, user_id)
+            if pm:
+                # Unassign from old number if any
+                if pm.purchased_phone_number_id:
+                    old_pn = session.get(PurchasedPhoneNumber, pm.purchased_phone_number_id)
+                    if old_pn:
+                        old_pn.status = "available"
+                        old_pn.assigned_to_type = None
+                        old_pn.assigned_to_id = None
+                        old_pn.assigned_at = None
+                        session.add(old_pn)
+                
+                pm.purchased_phone_number_id = purchased_phone_number_id
+                pm.twilio_contact = purchased_number.phone_number
+                pm.twilio_sid = purchased_number.twilio_sid
+                session.add(pm)
+            
+            purchased_number.status = "assigned"
+            purchased_number.assigned_to_type = "property_manager"
+            purchased_number.assigned_to_id = user_id
+            purchased_number.assigned_at = datetime.utcnow()
+            
+        elif assign_to_type == "realtor":
+            # Verify realtor belongs to this PM
+            realtor = session.get(Realtor, assign_to_id)
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            
+            if realtor.property_manager_id != user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You can only assign numbers to your own realtors"
+                )
+            
+            # Unassign from PM if assigned
+            if purchased_number.assigned_to_type == "property_manager" and purchased_number.assigned_to_id:
+                old_pm = session.get(PropertyManager, purchased_number.assigned_to_id)
+                if old_pm:
+                    old_pm.purchased_phone_number_id = None
+                    old_pm.twilio_contact = "TBD"
+                    old_pm.twilio_sid = None
+                    session.add(old_pm)
+            
+            # Unassign from old number if realtor has one
+            if realtor.purchased_phone_number_id:
+                old_pn = session.get(PurchasedPhoneNumber, realtor.purchased_phone_number_id)
+                if old_pn:
+                    old_pn.status = "available"
+                    old_pn.assigned_to_type = None
+                    old_pn.assigned_to_id = None
+                    old_pn.assigned_at = None
+                    session.add(old_pn)
+            
+            # Assign to realtor
+            realtor.purchased_phone_number_id = purchased_phone_number_id
+            realtor.twilio_contact = purchased_number.phone_number
+            realtor.twilio_sid = purchased_number.twilio_sid
+            session.add(realtor)
+            
+            purchased_number.status = "assigned"
+            purchased_number.assigned_to_type = "realtor"
+            purchased_number.assigned_to_id = assign_to_id
+            purchased_number.assigned_at = datetime.utcnow()
+        
+        session.add(purchased_number)
+        session.commit()
+        session.refresh(purchased_number)
+        
+        return JSONResponse(content={
+            "message": f"Phone number {purchased_number.phone_number} has been successfully assigned",
+            "purchased_phone_number_id": purchased_phone_number_id,
+            "phone_number": purchased_number.phone_number,
+            "assigned_to_type": purchased_number.assigned_to_type,
+            "assigned_to_id": purchased_number.assigned_to_id,
+            "assigned_at": purchased_number.assigned_at.isoformat() if purchased_number.assigned_at else None,
+        })
+
+
+# ============================================================================
+# ADMIN ENDPOINTS (For Tech Team)
+# ============================================================================
+
+@app.post("/admin/purchase-phone-number")
+def admin_purchase_phone_number(
+    property_manager_id: int = Body(...),
+    area_code: Optional[str] = Body(None),
+    notes: Optional[str] = Body(None),
+    # In production, add admin authentication here
+):
+    """
+    Admin endpoint for tech team to purchase a phone number for a PM.
+    This should be protected with admin authentication in production.
+    """
     # Check if Twilio credentials are configured
     if not TWILIO_ACCOUNT_SID2 or not TWILIO_AUTH_TOKEN2:
         raise HTTPException(
             status_code=500,
-            detail="Twilio credentials not configured. Please set TWILIO_ACCOUNT_SID2 and TWILIO_AUTH_TOKEN2 in environment variables."
+            detail="Twilio credentials not configured"
         )
     
-    # Check if Twilio client is initialized
     if not twillio_client:
         raise HTTPException(
             status_code=500,
-            detail="Twilio client not initialized. Please check your TWILIO_ACCOUNT_SID2 and TWILIO_AUTH_TOKEN2 credentials."
+            detail="Twilio client not initialized"
         )
     
-    # Check if VAPI credentials are configured
     if not VAPI_API_KEY2 or not VAPI_ASSISTANT_ID2:
         raise HTTPException(
             status_code=500,
-            detail="VAPI credentials not configured. Please set VAPI_API_KEY2 and VAPI_ASSISTANT_ID2 in environment variables."
+            detail="VAPI credentials not configured"
         )
-
-    try:
-        # Step 1: Check for available phone numbers
-        print(f"🔍 Searching for available numbers in area code {area_code}...")
-        available = twillio_client.available_phone_numbers("US").local.list(
-            area_code=area_code, limit=1
-        )
+    
+    with Session(engine) as session:
+        pm = session.get(PropertyManager, property_manager_id)
+        if not pm:
+            raise HTTPException(status_code=404, detail="Property Manager not found")
         
-        if not available:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No phone numbers available for area code {area_code}. Try a different area code."
-            )
-
-        number_to_buy = available[0].phone_number
-        print(f"📞 Found available number: {number_to_buy}")
-
-        # Step 2: Purchase the Twilio number
-        print(f"💰 Purchasing number from Twilio...")
         try:
+            # Search for available numbers
+            search_area_code = area_code or "412"
+            print(f"🔍 Searching for available numbers in area code {search_area_code}...")
+            available = twillio_client.available_phone_numbers("US").local.list(
+                area_code=search_area_code, limit=1
+            )
+            
+            if not available:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No numbers available for area code {search_area_code}"
+                )
+            
+            number_to_buy = available[0].phone_number
+            print(f"📞 Found available number: {number_to_buy}")
+            
+            # Purchase from Twilio
+            print(f"💰 Purchasing number from Twilio...")
             purchased = twillio_client.incoming_phone_numbers.create(
                 phone_number=number_to_buy,
                 sms_url=f"https://api.vapi.ai/sms/twilio/{VAPI_ASSISTANT_ID2}",
                 voice_url="https://api.vapi.ai/twilio/inbound_call",
             )
-            print(f"✅ Successfully purchased number: {purchased.phone_number} (SID: {purchased.sid})")
-        except Exception as e:
-            error_msg = str(e)
-            print(f"❌ Twilio purchase failed: {error_msg}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to purchase number from Twilio: {error_msg}"
-            )
-
-        # Step 3: Link with VAPI assistant
-        print(f"🔗 Linking number with VAPI assistant...")
-        payload = {
-            "provider": "twilio",
-            "number": purchased.phone_number,
-            "twilioAccountSid": TWILIO_ACCOUNT_SID2,
-            "twilioAuthToken": TWILIO_AUTH_TOKEN2,
-            "assistantId": VAPI_ASSISTANT_ID2,
-            "name": f"{user_type.title()} {user_id} Bot Number",
-        }
-
-        try:
+            print(f"✅ Successfully purchased: {purchased.phone_number} (SID: {purchased.sid})")
+            
+            # Register with VAPI
+            print(f"🔗 Linking with VAPI...")
+            payload = {
+                "provider": "twilio",
+                "number": purchased.phone_number,
+                "twilioAccountSid": TWILIO_ACCOUNT_SID2,
+                "twilioAuthToken": TWILIO_AUTH_TOKEN2,
+                "assistantId": VAPI_ASSISTANT_ID2,
+                "name": f"PM {property_manager_id} - {purchased.phone_number}",
+            }
+            
             response = requests.post(
                 "https://api.vapi.ai/phone-number",
                 headers={
@@ -2793,80 +3078,136 @@ def buy_number(
             )
             
             if response.status_code not in [200, 201]:
-                error_detail = response.text
-                print(f"❌ VAPI registration failed: {response.status_code} - {error_detail}")
-                # Try to clean up the purchased number
+                # Clean up Twilio number
                 try:
                     twillio_client.incoming_phone_numbers(purchased.sid).delete()
-                    print(f"🧹 Cleaned up purchased number from Twilio")
                 except:
                     pass
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Failed to register number with VAPI: {error_detail}"
+                    detail=f"Failed to register with VAPI: {response.text}"
                 )
             
             vapi_response = response.json()
-            print(f"✅ Successfully registered number with VAPI")
-        except requests.exceptions.RequestException as e:
-            error_msg = str(e)
-            print(f"❌ VAPI API request failed: {error_msg}")
-            # Try to clean up the purchased number
-            try:
-                twillio_client.incoming_phone_numbers(purchased.sid).delete()
-                print(f"🧹 Cleaned up purchased number from Twilio")
-            except:
-                pass
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to connect to VAPI API: {error_msg}"
+            vapi_phone_number_id = vapi_response.get("id")
+            print(f"✅ Successfully registered with VAPI")
+            
+            # Save to database
+            purchased_number = PurchasedPhoneNumber(
+                property_manager_id=property_manager_id,
+                phone_number=purchased.phone_number,
+                twilio_sid=purchased.sid,
+                vapi_phone_number_id=vapi_phone_number_id,
+                status="available",
+                notes=notes,
             )
-
-        # Step 4: Save to database
-        print(f"💾 Saving number to database for {user_type} ID: {user_id}...")
-        with Session(engine) as session:
-            if user_type == "realtor":
-                user_record = session.get(Realtor, user_id)
-                if not user_record:
-                    raise HTTPException(status_code=404, detail="Realtor not found")
-            elif user_type == "property_manager":
-                user_record = session.get(PropertyManager, user_id)
-                if not user_record:
-                    raise HTTPException(status_code=404, detail="Property Manager not found")
-            else:
-                raise HTTPException(status_code=400, detail=f"Invalid user type: {user_type}")
-
-            # Save the Twilio number
-            user_record.twilio_contact = purchased.phone_number
-            user_record.twilio_sid = purchased.sid
-
-            session.add(user_record)
+            
+            session.add(purchased_number)
+            
+            # Mark any pending requests as fulfilled
+            pending_requests = session.exec(
+                select(PhoneNumberRequest)
+                .where(
+                    PhoneNumberRequest.property_manager_id == property_manager_id,
+                    PhoneNumberRequest.status == "pending"
+                )
+            ).all()
+            
+            for req in pending_requests:
+                req.status = "fulfilled"
+                req.fulfilled_at = datetime.utcnow()
+                session.add(req)
+            
             session.commit()
-            session.refresh(user_record)
-
-            print(f"✅ Successfully saved number to database")
-
+            session.refresh(purchased_number)
+            
             return JSONResponse(content={
-                "message": f"Successfully purchased and configured phone number",
-                "twilio_contact": user_record.twilio_contact,
-                "twilio_sid": user_record.twilio_sid,
-                "user_type": user_type,
-                "user_id": user_id,
+                "message": "Phone number purchased and registered successfully",
+                "purchased_phone_number_id": purchased_number.purchased_phone_number_id,
+                "phone_number": purchased_number.phone_number,
+                "status": purchased_number.status,
+                "property_manager_id": property_manager_id,
                 "vapi_response": vapi_response,
             })
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Error purchasing number: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error purchasing number: {error_msg}"
+            )
 
-    except HTTPException:
-        # Re-raise HTTP exceptions as-is
-        raise
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Unexpected error in buy_number: {error_msg}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unexpected error while purchasing number: {error_msg}"
-        )
+
+@app.get("/admin/all-phone-number-requests")
+def admin_get_all_phone_number_requests(
+    status: Optional[str] = None,  # Filter by status: pending, fulfilled, cancelled
+    # In production, add admin authentication here
+):
+    """Admin endpoint to view all phone number requests."""
+    with Session(engine) as session:
+        query = select(PhoneNumberRequest)
+        if status:
+            query = query.where(PhoneNumberRequest.status == status)
+        query = query.order_by(PhoneNumberRequest.requested_at.desc())
+        
+        requests = session.exec(query).all()
+        
+        return JSONResponse(content={
+            "requests": [
+                {
+                    "request_id": req.request_id,
+                    "property_manager_id": req.property_manager_id,
+                    "area_code": req.area_code,
+                    "status": req.status,
+                    "notes": req.notes,
+                    "requested_at": req.requested_at.isoformat() if req.requested_at else None,
+                    "fulfilled_at": req.fulfilled_at.isoformat() if req.fulfilled_at else None,
+                }
+                for req in requests
+            ]
+        })
+
+
+@app.get("/admin/all-purchased-numbers")
+def admin_get_all_purchased_numbers(
+    property_manager_id: Optional[int] = None,
+    status: Optional[str] = None,
+    # In production, add admin authentication here
+):
+    """Admin endpoint to view all purchased phone numbers."""
+    with Session(engine) as session:
+        query = select(PurchasedPhoneNumber)
+        if property_manager_id:
+            query = query.where(PurchasedPhoneNumber.property_manager_id == property_manager_id)
+        if status:
+            query = query.where(PurchasedPhoneNumber.status == status)
+        query = query.order_by(PurchasedPhoneNumber.purchased_at.desc())
+        
+        numbers = session.exec(query).all()
+        
+        return JSONResponse(content={
+            "purchased_numbers": [
+                {
+                    "purchased_phone_number_id": pn.purchased_phone_number_id,
+                    "property_manager_id": pn.property_manager_id,
+                    "phone_number": pn.phone_number,
+                    "twilio_sid": pn.twilio_sid,
+                    "vapi_phone_number_id": pn.vapi_phone_number_id,
+                    "status": pn.status,
+                    "assigned_to_type": pn.assigned_to_type,
+                    "assigned_to_id": pn.assigned_to_id,
+                    "purchased_at": pn.purchased_at.isoformat() if pn.purchased_at else None,
+                    "assigned_at": pn.assigned_at.isoformat() if pn.assigned_at else None,
+                    "notes": pn.notes,
+                }
+                for pn in numbers
+            ]
+        })
 
 
 @app.get("/my-number")

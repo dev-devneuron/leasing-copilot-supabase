@@ -1061,6 +1061,521 @@ if (confirm('Are you sure you want to delete this property?')) {
 
 ---
 
+## 📞 Phone Number Request & Assignment System
+
+### Overview
+
+The phone number system has been redesigned to provide better control and management:
+
+1. **Property Managers** request phone numbers via dashboard
+2. **Tech Team** purchases and configures numbers (within 24 hours)
+3. **Property Managers** assign purchased numbers to themselves or their realtors
+4. **Chatbot** automatically uses the correct data based on assigned number
+
+### Workflow
+
+```
+PM Dashboard → Request Number → Tech Team Purchases → PM Assigns → Chatbot Works
+```
+
+---
+
+### 1. Request Phone Number (Property Manager Only)
+
+**Endpoint:**
+```http
+POST /request-phone-number
+Authorization: Bearer <pm_jwt_token>
+Content-Type: application/json
+
+{
+  "area_code": "412",  // Optional: Preferred area code
+  "notes": "Need number for new realtor"  // Optional: Additional notes
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Your phone number request has been submitted successfully. A new number will be available in your portal within 24 hours.",
+  "request_id": 1,
+  "status": "pending",
+  "requested_at": "2024-01-15T10:30:00Z"
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// PM Dashboard - Request Phone Number Button
+async function requestPhoneNumber(areaCode = null, notes = null) {
+  const response = await fetch('/request-phone-number', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      area_code: areaCode,
+      notes: notes
+    })
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Show success message: "Number will be available in 24 hours"
+    alert(data.message);
+  } else {
+    const error = await response.json();
+    alert(`Error: ${error.detail}`);
+  }
+}
+```
+
+**UI Requirements:**
+- Show a "Request Phone Number" button on PM dashboard
+- Optional: Form with area code input and notes field
+- Display success message: "Your phone number request has been submitted. A new number will be available in your portal within 24 hours."
+
+---
+
+### 2. View Phone Number Requests (Property Manager)
+
+**Endpoint:**
+```http
+GET /my-phone-number-requests
+Authorization: Bearer <pm_jwt_token>
+```
+
+**Response:**
+```json
+{
+  "requests": [
+    {
+      "request_id": 1,
+      "area_code": "412",
+      "status": "pending",  // pending, fulfilled, cancelled
+      "notes": "Need number for new realtor",
+      "requested_at": "2024-01-15T10:30:00Z",
+      "fulfilled_at": null
+    },
+    {
+      "request_id": 2,
+      "area_code": "415",
+      "status": "fulfilled",
+      "notes": null,
+      "requested_at": "2024-01-14T09:00:00Z",
+      "fulfilled_at": "2024-01-14T14:30:00Z"
+    }
+  ]
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// PM Dashboard - View Requests
+async function getPhoneNumberRequests() {
+  const response = await fetch('/my-phone-number-requests', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Display requests in a table
+    data.requests.forEach(req => {
+      console.log(`Request ${req.request_id}: ${req.status}`);
+    });
+  }
+}
+```
+
+**UI Requirements:**
+- Display requests in a table/list
+- Show status badges (Pending, Fulfilled, Cancelled)
+- Show timestamps for request and fulfillment
+
+---
+
+### 3. View Purchased Phone Numbers (Property Manager)
+
+**Endpoint:**
+```http
+GET /purchased-phone-numbers
+Authorization: Bearer <pm_jwt_token>
+```
+
+**Response:**
+```json
+{
+  "purchased_numbers": [
+    {
+      "purchased_phone_number_id": 1,
+      "phone_number": "+14125551234",
+      "status": "available",  // available, assigned, inactive
+      "assigned_to_type": null,
+      "assigned_to_id": null,
+      "purchased_at": "2024-01-15T14:30:00Z",
+      "assigned_at": null
+    },
+    {
+      "purchased_phone_number_id": 2,
+      "phone_number": "+14125551235",
+      "status": "assigned",
+      "assigned_to_type": "realtor",
+      "assigned_to_id": 5,
+      "purchased_at": "2024-01-14T10:00:00Z",
+      "assigned_at": "2024-01-15T09:00:00Z"
+    }
+  ],
+  "available_for_assignment": [
+    {
+      "purchased_phone_number_id": 1,
+      "phone_number": "+14125551234",
+      "purchased_at": "2024-01-15T14:30:00Z"
+    }
+  ],
+  "realtors": [
+    {
+      "realtor_id": 5,
+      "name": "Sarah Johnson",
+      "email": "sarah@example.com"
+    }
+  ]
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// PM Dashboard - View Available Numbers
+async function getPurchasedNumbers() {
+  const response = await fetch('/purchased-phone-numbers', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Show available numbers for assignment
+    data.available_for_assignment.forEach(num => {
+      console.log(`Available: ${num.phone_number}`);
+    });
+    // Show realtors for assignment dropdown
+    data.realtors.forEach(realtor => {
+      console.log(`Realtor: ${realtor.name} (ID: ${realtor.realtor_id})`);
+    });
+  }
+}
+```
+
+**UI Requirements:**
+- Display all purchased numbers (available and assigned)
+- Highlight available numbers that can be assigned
+- Show assignment status (Assigned to PM, Assigned to Realtor, Available)
+- Display realtors list for assignment dropdown
+
+---
+
+### 4. Assign Phone Number (Property Manager)
+
+**Endpoint:**
+```http
+POST /assign-phone-number
+Authorization: Bearer <pm_jwt_token>
+Content-Type: application/json
+
+{
+  "purchased_phone_number_id": 1,
+  "assign_to_type": "property_manager",  // or "realtor"
+  "assign_to_id": null  // Required if assign_to_type is "realtor"
+}
+```
+
+**Assign to Property Manager:**
+```json
+{
+  "purchased_phone_number_id": 1,
+  "assign_to_type": "property_manager"
+}
+```
+
+**Assign to Realtor:**
+```json
+{
+  "purchased_phone_number_id": 1,
+  "assign_to_type": "realtor",
+  "assign_to_id": 5
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Phone number +14125551234 has been successfully assigned",
+  "purchased_phone_number_id": 1,
+  "phone_number": "+14125551234",
+  "assigned_to_type": "realtor",
+  "assigned_to_id": 5,
+  "assigned_at": "2024-01-15T15:00:00Z"
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// PM Dashboard - Assign Number to Self
+async function assignToSelf(purchasedPhoneNumberId) {
+  const response = await fetch('/assign-phone-number', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      purchased_phone_number_id: purchasedPhoneNumberId,
+      assign_to_type: "property_manager"
+    })
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    alert(data.message);
+    // Refresh purchased numbers list
+    getPurchasedNumbers();
+  }
+}
+
+// PM Dashboard - Assign Number to Realtor
+async function assignToRealtor(purchasedPhoneNumberId, realtorId) {
+  const response = await fetch('/assign-phone-number', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      purchased_phone_number_id: purchasedPhoneNumberId,
+      assign_to_type: "realtor",
+      assign_to_id: realtorId
+    })
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    alert(data.message);
+    // Refresh purchased numbers list
+    getPurchasedNumbers();
+  }
+}
+```
+
+**UI Requirements:**
+- For each available number, show "Assign to Me" button
+- For each available number, show dropdown to select realtor and "Assign to Realtor" button
+- After assignment, update the UI to show new status
+- Show confirmation message
+
+---
+
+### 5. Get My Phone Number (Property Manager or Realtor)
+
+**Endpoint:**
+```http
+GET /my-number
+Authorization: Bearer <jwt_token>
+```
+
+**Response (if assigned):**
+```json
+{
+  "twilio_number": "+14125551234",
+  "twilio_sid": "PN...",
+  "user_type": "property_manager",
+  "user_id": 1
+}
+```
+
+**Response (if not assigned):**
+```json
+{
+  "detail": "You haven't purchased a phone number yet! Use the /buy-number endpoint to purchase one."
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// Display current phone number
+async function getMyNumber() {
+  const response = await fetch('/my-number', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Display phone number in UI
+    document.getElementById('phone-number').textContent = data.twilio_number;
+  } else {
+    // Show "No number assigned" message
+    document.getElementById('phone-number').textContent = "No number assigned";
+  }
+}
+```
+
+**UI Requirements:**
+- Display current assigned phone number (if any)
+- Show "No number assigned" if none
+- For PMs: Show link to request/assign numbers
+
+---
+
+### 6. Admin Endpoints (Tech Team)
+
+These endpoints are for the tech team to manage phone number purchases. **In production, these should be protected with admin authentication.**
+
+#### View All Requests
+```http
+GET /admin/all-phone-number-requests?status=pending
+Authorization: Bearer <admin_token>
+```
+
+#### Purchase Phone Number
+```http
+POST /admin/purchase-phone-number
+Authorization: Bearer <admin_token>
+Content-Type: application/json
+
+{
+  "property_manager_id": 1,
+  "area_code": "412",  // Optional
+  "notes": "Purchased for PM request #1"  // Optional
+}
+```
+
+#### View All Purchased Numbers
+```http
+GET /admin/all-purchased-numbers?property_manager_id=1&status=available
+Authorization: Bearer <admin_token>
+```
+
+---
+
+### Complete Frontend Flow Example
+
+```javascript
+// PM Dashboard - Complete Phone Number Management
+
+// 1. Request a new number
+async function requestNewNumber() {
+  const areaCode = document.getElementById('area-code-input').value;
+  const notes = document.getElementById('notes-input').value;
+  
+  const response = await fetch('/request-phone-number', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ area_code: areaCode, notes: notes })
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    showSuccessMessage(data.message); // "Number will be available in 24 hours"
+  }
+}
+
+// 2. Load and display purchased numbers
+async function loadPurchasedNumbers() {
+  const response = await fetch('/purchased-phone-numbers', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    
+    // Display available numbers
+    const availableList = document.getElementById('available-numbers');
+    data.available_for_assignment.forEach(num => {
+      const item = document.createElement('div');
+      item.innerHTML = `
+        <span>${num.phone_number}</span>
+        <button onclick="assignToSelf(${num.purchased_phone_number_id})">Assign to Me</button>
+        <select id="realtor-${num.purchased_phone_number_id}">
+          ${data.realtors.map(r => `<option value="${r.realtor_id}">${r.name}</option>`).join('')}
+        </select>
+        <button onclick="assignToRealtor(${num.purchased_phone_number_id})">Assign to Realtor</button>
+      `;
+      availableList.appendChild(item);
+    });
+    
+    // Display assigned numbers
+    const assignedList = document.getElementById('assigned-numbers');
+    data.purchased_numbers
+      .filter(num => num.status === 'assigned')
+      .forEach(num => {
+        const item = document.createElement('div');
+        item.innerHTML = `
+          <span>${num.phone_number}</span>
+          <span>Assigned to: ${num.assigned_to_type} (ID: ${num.assigned_to_id})</span>
+        `;
+        assignedList.appendChild(item);
+      });
+  }
+}
+
+// 3. Assign to self
+async function assignToSelf(purchasedPhoneNumberId) {
+  const response = await fetch('/assign-phone-number', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      purchased_phone_number_id: purchasedPhoneNumberId,
+      assign_to_type: "property_manager"
+    })
+  });
+  
+  if (response.ok) {
+    showSuccessMessage("Number assigned successfully!");
+    loadPurchasedNumbers(); // Refresh list
+  }
+}
+
+// 4. Assign to realtor
+async function assignToRealtor(purchasedPhoneNumberId) {
+  const realtorId = document.getElementById(`realtor-${purchasedPhoneNumberId}`).value;
+  
+  const response = await fetch('/assign-phone-number', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      purchased_phone_number_id: purchasedPhoneNumberId,
+      assign_to_type: "realtor",
+      assign_to_id: parseInt(realtorId)
+    })
+  });
+  
+  if (response.ok) {
+    showSuccessMessage("Number assigned to realtor successfully!");
+    loadPurchasedNumbers(); // Refresh list
+  }
+}
+```
+
+---
+
+### Key Points
+
+- ✅ **PM Only:** Only Property Managers can request and assign numbers
+- ✅ **24 Hour Promise:** Show message that numbers will be available within 24 hours
+- ✅ **Flexible Assignment:** PM can assign to themselves or any of their realtors
+- ✅ **Automatic Data Isolation:** Chatbot automatically uses correct data based on assigned number
+- ✅ **Status Tracking:** Track request status (pending, fulfilled) and number status (available, assigned)
+- ✅ **Reassignment:** Numbers can be reassigned (old assignment is automatically unassigned)
+
+---
+
 ## 🔧 Technical Details
 
 ### Property Update Fix
