@@ -50,8 +50,19 @@ CREATE INDEX IF NOT EXISTS idx_purchasedphonenumber_assigned ON purchasedphonenu
 ALTER TABLE propertymanager 
 ADD COLUMN IF NOT EXISTS purchased_phone_number_id INTEGER;
 
+-- Add foreign key constraint (drop first if exists to avoid errors)
+DO $$ 
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'fk_pm_purchased_phone'
+    ) THEN
+        ALTER TABLE propertymanager DROP CONSTRAINT fk_pm_purchased_phone;
+    END IF;
+END $$;
+
 ALTER TABLE propertymanager
-ADD CONSTRAINT IF NOT EXISTS fk_pm_purchased_phone 
+ADD CONSTRAINT fk_pm_purchased_phone 
 FOREIGN KEY (purchased_phone_number_id) 
 REFERENCES purchasedphonenumber(purchased_phone_number_id) 
 ON DELETE SET NULL;
@@ -64,8 +75,19 @@ CREATE INDEX IF NOT EXISTS idx_propertymanager_purchased_phone ON propertymanage
 ALTER TABLE realtor 
 ADD COLUMN IF NOT EXISTS purchased_phone_number_id INTEGER;
 
+-- Add foreign key constraint (drop first if exists to avoid errors)
+DO $$ 
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'fk_realtor_purchased_phone'
+    ) THEN
+        ALTER TABLE realtor DROP CONSTRAINT fk_realtor_purchased_phone;
+    END IF;
+END $$;
+
 ALTER TABLE realtor
-ADD CONSTRAINT IF NOT EXISTS fk_realtor_purchased_phone 
+ADD CONSTRAINT fk_realtor_purchased_phone 
 FOREIGN KEY (purchased_phone_number_id) 
 REFERENCES purchasedphonenumber(purchased_phone_number_id) 
 ON DELETE SET NULL;

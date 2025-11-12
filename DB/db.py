@@ -76,8 +76,14 @@ class PropertyManager(SQLModel, table=True):
     managed_realtors: List["Realtor"] = Relationship(back_populates="property_manager")
     sources: List["Source"] = Relationship(back_populates="property_manager")
     phone_number_requests: List["PhoneNumberRequest"] = Relationship(back_populates="property_manager")
-    purchased_phone_numbers: List["PurchasedPhoneNumber"] = Relationship(back_populates="property_manager")
-    purchased_phone_number: Optional["PurchasedPhoneNumber"] = Relationship(back_populates="assigned_property_manager")
+    purchased_phone_numbers: List["PurchasedPhoneNumber"] = Relationship(
+        back_populates="property_manager",
+        sa_relationship_kwargs={"foreign_keys": "[PurchasedPhoneNumber.property_manager_id]"}
+    )
+    purchased_phone_number: Optional["PurchasedPhoneNumber"] = Relationship(
+        back_populates="assigned_property_manager",
+        sa_relationship_kwargs={"foreign_keys": "[PropertyManager.purchased_phone_number_id]"}
+    )
 
 
 class Realtor(SQLModel, table=True):
@@ -227,7 +233,10 @@ class PurchasedPhoneNumber(SQLModel, table=True):
     notes: Optional[str] = None  # Internal notes from tech team
     
     # Relationships
-    property_manager: Optional["PropertyManager"] = Relationship(back_populates="purchased_phone_numbers")
+    property_manager: Optional["PropertyManager"] = Relationship(
+        back_populates="purchased_phone_numbers",
+        sa_relationship_kwargs={"foreign_keys": "[PurchasedPhoneNumber.property_manager_id]"}
+    )
     assigned_property_manager: Optional["PropertyManager"] = Relationship(
         back_populates="purchased_phone_number",
         sa_relationship_kwargs={"foreign_keys": "[PropertyManager.purchased_phone_number_id]"}
