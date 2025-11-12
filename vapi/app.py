@@ -192,6 +192,11 @@ class VapiRequest(BaseModel):
     message: Message
 
 
+class UnassignPhoneNumberRequest(BaseModel):
+    """Request model for unassigning a phone number."""
+    purchased_phone_number_id: int
+
+
 # ------------------ CreateCustomer ----------------#
 @app.post("/create_customer/")
 def create_customer(request: VapiRequest):
@@ -3228,7 +3233,7 @@ def assign_phone_number(
 
 @app.post("/unassign-phone-number")
 def unassign_phone_number(
-    purchased_phone_number_id: int = Body(...),
+    request: UnassignPhoneNumberRequest,
     user_data: dict = Depends(get_current_user_data),
 ):
     """
@@ -3264,6 +3269,7 @@ def unassign_phone_number(
         
         with Session(engine) as session:
             # Verify the purchased number belongs to this PM
+            purchased_phone_number_id = request.purchased_phone_number_id
             purchased_number = session.get(PurchasedPhoneNumber, purchased_phone_number_id)
             if not purchased_number:
                 raise HTTPException(status_code=404, detail="Purchased phone number not found")
