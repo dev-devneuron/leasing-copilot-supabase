@@ -443,8 +443,15 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
       })
     });
     
-    // IMPORTANT: Always parse JSON response
-    const data = await response.json();
+    // IMPORTANT: Always parse JSON response - even for errors!
+    let data;
+    try {
+      data = await response.json();
+    } catch (parseError) {
+      // If response is not JSON, handle it
+      const text = await response.text();
+      throw new Error(`Server error: ${text || response.statusText}`);
+    }
     
     if (response.ok) {
       // Success - data is already parsed
@@ -455,14 +462,26 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
       loadPurchasedNumbers();
       return data; // Return the parsed data
     } else {
-      // Error response
-      console.error('Error:', data);
-      alert(`Error: ${data.detail || 'Unknown error'}`);
-      throw new Error(data.detail || 'Unknown error');
+      // Error response - data.detail contains the error message
+      const errorMessage = data.detail || data.message || 'Unknown error';
+      console.error('Error response:', data);
+      alert(`Error: ${errorMessage}`); // Show the actual error message
+      throw new Error(errorMessage);
     }
   } catch (error) {
+    // Handle network errors or other exceptions
     console.error('Fetch error:', error);
-    alert(`Failed to unassign phone number: ${error.message}`);
+    
+    // If error is already a string or has a message, use it
+    const errorMessage = error.message || String(error);
+    
+    // Don't show [object Object] - check if it's an object
+    if (typeof error === 'object' && error !== null && !error.message) {
+      alert('Failed to unassign phone number. Please check the console for details.');
+      console.error('Full error object:', error);
+    } else {
+      alert(`Failed to unassign phone number: ${errorMessage}`);
+    }
     throw error;
   }
 }

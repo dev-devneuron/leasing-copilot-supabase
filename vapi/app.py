@@ -3240,8 +3240,21 @@ def unassign_phone_number(
     - Clear assignment details
     """
     try:
+        # Validate user_data
+        if not user_data:
+            raise HTTPException(
+                status_code=401,
+                detail="User authentication failed"
+            )
+        
         user_type = user_data.get("user_type")
         user_id = user_data.get("id")
+        
+        if not user_type or not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid user data"
+            )
         
         if user_type != "property_manager":
             raise HTTPException(
