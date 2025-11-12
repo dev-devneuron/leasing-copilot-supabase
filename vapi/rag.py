@@ -1,4 +1,13 @@
-# vapi/rag.py
+"""
+RAG (Retrieval Augmented Generation) Engine
+
+This module provides the RAG engine for semantic search over:
+- Property listing data (apartments)
+- Rules and policy documents
+
+Uses vector embeddings and pgvector for efficient similarity search.
+"""
+
 import json
 from typing import Optional, List
 from langchain_community.document_loaders import TextLoader
@@ -11,6 +20,12 @@ from DB.db import (
 
 
 class RAGEngine:
+    """
+    RAG Engine for semantic search over property listings and rules.
+    
+    Provides methods to query relevant listings and rule chunks based on
+    natural language questions using vector similarity search.
+    """
     def __init__(self):
         pass
 

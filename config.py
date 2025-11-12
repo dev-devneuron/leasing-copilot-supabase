@@ -1,82 +1,147 @@
+"""
+Configuration Module
+
+Centralized configuration for the Leasap Backend application.
+All environment variables and application constants are defined here.
+"""
+
 import os
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from typing import Optional
-from datetime import date
 import httpx
 
 load_dotenv()
 
+# ============================================================================
+# SUPABASE CONFIGURATION
+# ============================================================================
 
-# ---------------------------------------------------------------------
-#                    SUPABASE CONFIG
-# ---------------------------------------------------------------------
+# Supabase Storage bucket name for file uploads
 BUCKET_NAME = "realtor-files"
 
-# for bucket collection
+# Supabase connection settings
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-DATABASE_URL = os.getenv("DATABASE_1_URL")
+DATABASE_URL = os.getenv("DATABASE_1_URL")  # PostgreSQL connection string
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-# --------------------------------------------------------------------
 
-# Embedding dimensions
+# ============================================================================
+# EMBEDDING CONFIGURATION
+# ============================================================================
+
+# Vector embedding dimensions (768 for textembedding-gecko models)
 EMBED_DIM = 768
 
+# ============================================================================
+# TWILIO CONFIGURATION
+# ============================================================================
 
+# Default Twilio phone number for WhatsApp/SMS
 TWILIO_PHONE_NUMBER = "whatsapp:+14155238886"
-# ========================================
-# API Keys and URLs
-# ========================================
 
+# ============================================================================
+# OAUTH & REDIRECT URLS
+# ============================================================================
+
+# Google OAuth redirect URI
 REDIRECT_URI = "https://leasing-copilot-mvp.onrender.com/oauth2callback"
-# ========================================
-# File Paths
-# ========================================
+
+# ============================================================================
+# FILE PATHS
+# ============================================================================
+
+# Google Calendar credentials file
 CREDENTIALS_FILE = "gCalendar.json"
 TOKEN_FILE = "token.pkl"
-#RULES_FILE = os.getenv("RULES_FILE", "Rules.txt")
-#DATA_FILE = os.getenv("DATA_FILE", "data.json")
+
+# ============================================================================
+# HTTP CLIENT CONFIGURATION
+# ============================================================================
+
+# HTTP request timeout (25 seconds)
 timeout = httpx.Timeout(25.0)
+
+# ============================================================================
+# RATE LIMITING
+# ============================================================================
+
+# Daily message limit per user
 DAILY_LIMIT = 50
 
+# ============================================================================
+# APPLICATION SETTINGS
+# ============================================================================
 
-# ========================================
-# Application Settings
-# ========================================
+# Default timezone for scheduling
 DEFAULT_TIMEZONE = "Asia/Karachi"
-WORKING_HOURS = {"start": 8, "end": 21}  # 8 AM  # 9 PM
-SLOT_DURATION = 30  # minutes
 
+# Working hours for appointment scheduling (24-hour format)
+WORKING_HOURS = {"start": 8, "end": 21}  # 8 AM to 9 PM
 
-# ========================================
-# Zillow URL Settings
-# ========================================
+# Appointment slot duration in minutes
+SLOT_DURATION = 30
+
+# ============================================================================
+# ZILLOW INTEGRATION
+# ============================================================================
+
+# Zillow API base URL for property listings
 ZILLOW_BASE_URL = "https://www.zillow.com/_sp/homes/for_sale/"
+
+# Default map bounds for property search
 DEFAULT_MAP_BOUNDS = {"west": -77.2, "east": -76.8, "south": 35.6, "north": 35.9}
 
+# ============================================================================
+# GOOGLE CALENDAR SETTINGS
+# ============================================================================
 
-# ========================================
-# Google Calendar Settings
-# ========================================
+# OAuth scopes for Google Calendar API
 GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-# Model names
+# ============================================================================
+# AI MODEL CONFIGURATION
+# ============================================================================
+
+# Embedding model name (HuggingFace model for fallback)
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-large-en-v1.5")
+
+# LLM model name (Gemini model for fallback)
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "models/gemini-2.0-flash")
 
-# Vertex AI Configuration
+# ============================================================================
+# VERTEX AI CONFIGURATION (Primary AI Platform)
+# ============================================================================
+
+# Enable/disable Vertex AI (default: true)
 USE_VERTEX_AI = os.getenv("USE_VERTEX_AI", "true").lower() == "true"
+
+# Google Cloud Platform project ID
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+
+# GCP location/region (default: us-central1)
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
-VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-2.0-flash-exp")  # or gemini-1.5-pro, gemini-1.5-flash
+
+# Vertex AI model name for text generation
+# Options: gemini-2.0-flash-exp, gemini-1.5-pro, gemini-1.5-flash
+VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-2.0-flash-exp")
+
+# Vertex AI embedding model name
 VERTEX_AI_EMBEDDING_MODEL = os.getenv("VERTEX_AI_EMBEDDING_MODEL", "textembedding-gecko@003")
 
-# Fallback to Gemini API if Vertex AI not configured
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Fallback option
+# ============================================================================
+# GEMINI API CONFIGURATION (Fallback)
+# ============================================================================
 
-# Other constants (add as needed)
+# Gemini API key (used as fallback if Vertex AI is not configured)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# ============================================================================
+# TEXT PROCESSING CONFIGURATION
+# ============================================================================
+
+# Chunk size for text splitting (characters)
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 800))
+
+# Chunk overlap for text splitting (characters)
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))

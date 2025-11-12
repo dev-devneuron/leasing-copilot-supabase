@@ -1,3 +1,16 @@
+"""
+FastAPI Application - Main API Server
+
+This module contains all API endpoints for:
+- User authentication and profile management
+- Property Manager and Realtor management
+- Property listing uploads and management
+- Phone number request and assignment system
+- Demo booking system
+- VAPI chatbot integration
+- RAG (Retrieval Augmented Generation) for apartment search
+"""
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -7,29 +20,40 @@ from fastapi import (
     UploadFile,
     Depends,
     Header,
+    Body,
 )
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Union
-from datetime import datetime
-import json, os
-import numpy as np
-from fastapi.encoders import jsonable_encoder
-from sqlmodel import select, Session
-import httpx
-from httpx import TimeoutException
-from dotenv import load_dotenv
 from fastapi.responses import (
+    JSONResponse,
     FileResponse,
     RedirectResponse,
     Response,
     PlainTextResponse,
 )
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel
+from typing import Union, Optional
+from datetime import datetime
+from contextlib import asynccontextmanager
+import json
+import os
+import jwt
+import numpy as np
+import httpx
+from httpx import TimeoutException
+from dotenv import load_dotenv
 from google_auth_oauthlib.flow import Flow
 from twilio.twiml.messaging_response import MessagingResponse
-from contextlib import asynccontextmanager
+from twilio.rest import Client
+from sqlmodel import select, Session
+from sqlalchemy import update
+from sqlalchemy.orm.attributes import flag_modified
+
+# Local imports
 from DB.db import *
+from DB.sync import sync_apartment_listings
 from utils.calendar_utils import GoogleCalendar
+from utils.auth_module import get_current_realtor_id, get_current_user_data
 from vapi.rag import RAGEngine
 from vapi.bounded_usage import MessageLimiter
 from config import (
@@ -40,30 +64,75 @@ from config import (
     TWILIO_PHONE_NUMBER,
     SCOPES,
 )
-from sqlalchemy import update
-from sqlalchemy.orm.attributes import flag_modified
-from fastapi.middleware.cors import CORSMiddleware
-from DB.sync import sync_apartment_listings
-from utils.auth_module import get_current_realtor_id, get_current_user_data
-from fastapi import Body
-import jwt
-from twilio.rest import Client
 
+load_dotenv()
 
-load_dotenv()  # Load .env values
+# ============================================================================
+# FASTAPI APPLICATION INITIALIZATION
+# ============================================================================
 
+# Lifespan context manager for startup/shutdown events
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handle application startup and shutdown."""
+    try:
+        init_db()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"⚠️ Database initialization failed: {e}")
+        print("⚠️ Continuing without database connection...")
+    
+    yield  # Application runs here
+    
+    print("Shutting down FastAPI app...")
 
+# CORS allowed origins
+origins = [
+    "https://react-app-form.onrender.com",
+    "https://leaseap.com",
+    "https://www.leasap.com",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:8080",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:8080",
+]
+
+# Create FastAPI application with lifespan
+app = FastAPI(
+    title="Leasap Backend API",
+    description="Backend API for Leasap property management platform",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
+)
+
+# ============================================================================
+# VAPI & TWILIO CONFIGURATION
+# ============================================================================
+
+# Primary VAPI/Twilio credentials
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
 VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 VAPI_BASE_URL = "https://api.vapi.ai"
-headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+headers = {"Authorization": f"Bearer {VAPI_API_KEY}"} if VAPI_API_KEY else {}
 
-
-# --------------------------------------------------------------------------------
-# --------------------------------------------------------------------------------
-# ----------------- For Automatic Number Buying from Twilio ---------------------
+# Secondary VAPI/Twilio credentials (for phone number purchasing)
 TWILIO_ACCOUNT_SID2 = os.getenv("TWILIO_ACCOUNT_SID2")
 TWILIO_ACCOUNT_SID1 = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN2 = os.getenv("TWILIO_AUTH_TOKEN2")
@@ -89,13 +158,17 @@ if TWILIO_ACCOUNT_SID1 and TWILIO_AUTH_TOKEN1:
     except Exception as e:
         print(f"⚠️  Failed to initialize Twilio client 1: {e}")
 
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
+# ============================================================================
+# GLOBAL SERVICES
+# ============================================================================
 
+# RAG Engine for semantic search
+rag = RAGEngine()
 
-rag = RAGEngine()  # pgvector RAG
-
+# Message limiter for rate limiting
 message_limiter = MessageLimiter(DAILY_LIMIT)
+
+# Database session (legacy - prefer using SessionLocal in endpoints)
 session = Session(engine)
 
 
@@ -115,51 +188,8 @@ class Message(BaseModel):
 
 
 class VapiRequest(BaseModel):
+    """Request model for VAPI webhook calls."""
     message: Message
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    try:
-        init_db()
-        print("✅ Database initialized successfully")
-    except Exception as e:
-        print(f"⚠️ Database initialization failed: {e}")
-        print("⚠️ Continuing without database connection...")
-
-    yield  # This is where FastAPI app runs
-
-    print("Shutting down fastapi app...")
-
-
-app = FastAPI(lifespan=lifespan)
-
-# set origin here
-origins = [
-    "https://react-app-form.onrender.com",
-    "https://leaseap.com",
-    "https://www.leasap.com",
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://localhost:8080",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:5174",
-    "http://127.0.0.1:8080",
-    # Add your frontend URL here if it's different from the above
-]
-
-# Add CORS middleware with proper configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
-)
 
 
 # ------------------ CreateCustomer ----------------#
@@ -3199,6 +3229,94 @@ def assign_phone_number(
 # ============================================================================
 # ADMIN ENDPOINTS (For Tech Team)
 # ============================================================================
+
+@app.post("/admin/add-purchased-number")
+def admin_add_purchased_number(
+    property_manager_id: int = Body(...),
+    phone_number: str = Body(...),  # E.164 format: +14125551234
+    twilio_sid: Optional[str] = Body(None),  # Twilio SID (optional - if purchased from Twilio)
+    vapi_phone_number_id: Optional[str] = Body(None),  # VAPI phone number ID (optional - if registered with VAPI)
+    notes: Optional[str] = Body(None),
+    # In production, add admin authentication here
+):
+    """
+    Simple endpoint for tech team to add a purchased phone number to the database.
+    Tech team can purchase from any platform (Twilio, other providers, etc.) and then
+    add the number details here. The number will appear as "available" for the PM to assign.
+    
+    This is simpler than /admin/purchase-phone-number which actually purchases from Twilio.
+    Use this when you've already purchased the number from another platform.
+    """
+    with Session(engine) as session:
+        # Verify PM exists
+        pm = session.get(PropertyManager, property_manager_id)
+        if not pm:
+            raise HTTPException(status_code=404, detail="Property Manager not found")
+        
+        # Validate phone number format (basic check)
+        phone_number = phone_number.strip()
+        if not phone_number.startswith("+"):
+            # Try to add + if missing
+            if phone_number.startswith("1") and len(phone_number) == 11:
+                phone_number = f"+{phone_number}"
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Phone number should be in E.164 format (e.g., +14125551234)"
+                )
+        
+        # Check if phone number already exists
+        existing = session.exec(
+            select(PurchasedPhoneNumber).where(PurchasedPhoneNumber.phone_number == phone_number)
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number {phone_number} already exists in database"
+            )
+        
+        # Create purchased number record
+        # Generate a unique SID if not provided (for non-Twilio numbers)
+        final_twilio_sid = twilio_sid or f"MANUAL_{phone_number.replace('+', '').replace('-', '').replace(' ', '')}"
+        
+        purchased_number = PurchasedPhoneNumber(
+            property_manager_id=property_manager_id,
+            phone_number=phone_number,
+            twilio_sid=final_twilio_sid,
+            vapi_phone_number_id=vapi_phone_number_id,
+            status="available",
+            notes=notes or f"Added manually by tech team",
+        )
+        
+        session.add(purchased_number)
+        
+        # Mark any pending requests as fulfilled
+        pending_requests = session.exec(
+            select(PhoneNumberRequest)
+            .where(
+                PhoneNumberRequest.property_manager_id == property_manager_id,
+                PhoneNumberRequest.status == "pending"
+            )
+        ).all()
+        
+        for req in pending_requests:
+            req.status = "fulfilled"
+            req.fulfilled_at = datetime.utcnow()
+            session.add(req)
+        
+        session.commit()
+        session.refresh(purchased_number)
+        
+        return JSONResponse(content={
+            "message": f"Phone number {phone_number} added successfully and is now available for assignment",
+            "purchased_phone_number_id": purchased_number.purchased_phone_number_id,
+            "phone_number": purchased_number.phone_number,
+            "status": purchased_number.status,
+            "property_manager_id": property_manager_id,
+            "pm_name": pm.name,
+            "pm_email": pm.email,
+        })
+
 
 @app.post("/admin/purchase-phone-number")
 def admin_purchase_phone_number(

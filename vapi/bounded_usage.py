@@ -1,3 +1,10 @@
+"""
+Message Rate Limiting
+
+This module provides rate limiting functionality to prevent abuse
+by limiting the number of messages a user can send per day.
+"""
+
 from datetime import date, datetime
 from typing import Dict, Any
 
@@ -5,11 +12,17 @@ from DB.db import (
     increment_message_count,
     get_message_count,
     init_db,
-)  # Import from your db.py
+)
 from sqlmodel import Session
 
 
 class MessageLimiter:
+    """
+    Rate limiter for user messages.
+    
+    Tracks daily message counts per user and enforces daily limits
+    to prevent API abuse.
+    """
     def __init__(self, daily_limit: int = 100):
         self.daily_limit = daily_limit
 

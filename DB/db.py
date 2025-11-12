@@ -1,11 +1,30 @@
-from typing import Optional, List, Dict, Union, Any
+"""
+Database Models and Configuration
+
+This module contains:
+- Database connection setup
+- SQLModel table definitions for all entities
+- Embedding utilities for vector search
+- Data access scope functions for multi-tenant isolation
+"""
+
+from typing import Optional, List, Dict, Any
 from datetime import date, time, datetime
+from uuid import UUID
+import os
+import json
+import csv
+import io
+import requests
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+# SQLModel and SQLAlchemy imports
 from sqlmodel import (
     SQLModel,
     Field,
     create_engine,
     Session,
-    JSON,
     Relationship,
     select,
     Column,
@@ -13,23 +32,23 @@ from sqlmodel import (
 )
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import JSONB
-from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import sessionmaker
-from langchain_huggingface import HuggingFaceEmbeddings
-import requests, os, json
-import google.generativeai as genai
-from langchain_core.documents import Document
-from sqlmodel import SQLModel, Field, Relationship
 from pgvector.sqlalchemy import Vector
-from typing import Optional, List, Dict, Any
-from .secondary_db import insert_listing_records
-from sqlmodel import Session, select
-from datetime import date
-from supabase import create_client, Client
-from fastapi import UploadFile, File, Form, HTTPException, APIRouter
-from dotenv import load_dotenv
+
+# Langchain imports for embeddings and document processing
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.documents import Document
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import CharacterTextSplitter
+
+# Supabase imports
+from supabase import create_client, Client
+
+# FastAPI imports
+from fastapi import UploadFile, File, Form, HTTPException, APIRouter
+
+# Local imports
+from .secondary_db import insert_listing_records
 from config import (
     BUCKET_NAME,
     SUPABASE_URL,
@@ -37,38 +56,49 @@ from config import (
     DATABASE_URL,
     SUPABASE_SERVICE_ROLE_KEY,
 )
-from uuid import UUID
-import jwt
-import json, csv, io, requests
-from langchain_core.documents import Document
-from langchain_text_splitters import CharacterTextSplitter
 
 load_dotenv()
 
-# ---------------------- DATABASE CONFIG ----------------------
-
+# ============================================================================
+# DATABASE CONNECTION CONFIGURATION
+# ============================================================================
 
 if DATABASE_URL:
+    # Create database engine with connection pooling
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 else:
     engine = None
     SessionLocal = None
 
-# ----------------------Table MODELS ----------------------
+# ============================================================================
+# DATABASE MODELS
+# ============================================================================
 
 class PropertyManager(SQLModel, table=True):
+    """
+    Property Manager entity.
+    
+    Represents a property management company or individual property manager.
+    Can manage multiple realtors and own multiple property listings.
+    """
     property_manager_id: Optional[int] = Field(default=None, primary_key=True)
-    auth_user_id: UUID = Field(index=True)
+    auth_user_id: UUID = Field(index=True)  # Links to Supabase Auth user
     name: str
     email: str
     contact: str
     company_name: Optional[str] = None
-    twilio_contact: str
-    twilio_sid: Optional[str] = None
-    credentials: Optional[str] = Field(default=None)  # Store as serialized JSON string
-    # Link to purchased phone number (if assigned)
-    purchased_phone_number_id: Optional[int] = Field(default=None, foreign_key="purchasedphonenumber.purchased_phone_number_id")
+    twilio_contact: str  # Phone number for SMS/WhatsApp (legacy or purchased)
+    twilio_sid: Optional[str] = None  # Twilio SID (legacy)
+    credentials: Optional[str] = Field(default=None)  # Google Calendar credentials (JSON string)
+    
+    # Phone number assignment (new system)
+    purchased_phone_number_id: Optional[int] = Field(
+        default=None, 
+        foreign_key="purchasedphonenumber.purchased_phone_number_id"
+    )
+    
+    # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
 
@@ -87,20 +117,38 @@ class PropertyManager(SQLModel, table=True):
 
 
 class Realtor(SQLModel, table=True):
+    """
+    Realtor entity.
+    
+    Represents a real estate agent who can be:
+    - Managed by a Property Manager (property_manager_id set)
+    - Standalone (is_standalone=True, property_manager_id=None)
+    
+    Realtors can own property listings and have bookings.
+    """
     realtor_id: Optional[int] = Field(default=None, primary_key=True)
-    auth_user_id: UUID = Field(index=True)
+    auth_user_id: UUID = Field(index=True)  # Links to Supabase Auth user
     name: str
     email: str
     contact: str
-    twilio_contact: str
-    twilio_sid: Optional[str] = None
-    credentials: Optional[str] = Field(default=None)  # Store as serialized JSON string
+    twilio_contact: str  # Phone number for SMS/WhatsApp (legacy or purchased)
+    twilio_sid: Optional[str] = None  # Twilio SID (legacy)
+    credentials: Optional[str] = Field(default=None)  # Google Calendar credentials (JSON string)
     
-    # Property Manager relationship (optional for standalone realtors)
-    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.property_manager_id")
-    is_standalone: bool = Field(default=True)  # True if not under any property manager
-    # Link to purchased phone number (if assigned)
-    purchased_phone_number_id: Optional[int] = Field(default=None, foreign_key="purchasedphonenumber.purchased_phone_number_id")
+    # Property Manager relationship
+    property_manager_id: Optional[int] = Field(
+        default=None, 
+        foreign_key="propertymanager.property_manager_id"
+    )
+    is_standalone: bool = Field(default=True)  # True if not under any PM
+    
+    # Phone number assignment (new system)
+    purchased_phone_number_id: Optional[int] = Field(
+        default=None, 
+        foreign_key="purchasedphonenumber.purchased_phone_number_id"
+    )
+    
+    # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
 
@@ -174,16 +222,31 @@ class ApartmentListing(SQLModel, table=True):
 
 
 class Source(SQLModel, table=True):
+    """
+    Source entity for grouping listings and rules.
+    
+    A Source represents a collection of listings and rules that belong to either:
+    - A Property Manager (property_manager_id set)
+    - A Realtor (realtor_id set)
+    
+    This allows for data organization and access control. When listings are uploaded,
+    they are associated with a Source, which determines who can access them.
+    """
     source_id: Optional[int] = Field(default=None, primary_key=True)
     
-    # Can belong to either a Property Manager or a Realtor
-    property_manager_id: Optional[int] = Field(default=None, foreign_key="propertymanager.property_manager_id")
-    realtor_id: Optional[int] = Field(default=None, foreign_key="realtor.realtor_id")
+    # Ownership: Source belongs to either PM or Realtor (at least one must be set)
+    property_manager_id: Optional[int] = Field(
+        default=None, 
+        foreign_key="propertymanager.property_manager_id"
+    )
+    realtor_id: Optional[int] = Field(
+        default=None, 
+        foreign_key="realtor.realtor_id"
+    )
     
-    # Ensure at least one is set
+    # Database constraint: At least one owner must be set
     __table_args__ = (
         PrimaryKeyConstraint('source_id'),
-        # Add constraint to ensure either property_manager_id or realtor_id is set
     )
 
     property_manager: Optional["PropertyManager"] = Relationship(back_populates="sources")

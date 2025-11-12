@@ -1,3 +1,10 @@
+"""
+Authentication Module
+
+This module provides authentication and authorization utilities for FastAPI endpoints.
+Handles JWT token validation and user identification for Property Managers and Realtors.
+"""
+
 from fastapi import Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
@@ -5,6 +12,7 @@ from DB.db import engine, Realtor, PropertyManager, get_user_data_by_auth_id
 from sqlmodel import Session, select
 from config import SUPABASE_JWT_SECRET
 
+# HTTP Bearer token security scheme
 security = HTTPBearer()
 
 def get_current_realtor_id(
