@@ -88,11 +88,19 @@ def get_phone_number_from_id(phone_number_id: str) -> Optional[str]:
 
 # Import the cache from vapi.app (will be set at runtime)
 _call_phone_cache: Dict[str, str] = {}
+_phone_id_cache: Dict[str, str] = {}
+_phone_to_id_cache: Dict[str, str] = {}
 
 def set_call_phone_cache(cache: Dict[str, str]) -> None:
     """Set the call phone cache from the main app."""
     global _call_phone_cache
     _call_phone_cache = cache
+
+def set_phone_caches(phone_id_cache: Dict[str, str], phone_to_id_cache: Dict[str, str]) -> None:
+    """Set the phone ID caches from the main app."""
+    global _phone_id_cache, _phone_to_id_cache
+    _phone_id_cache = phone_id_cache
+    _phone_to_id_cache = phone_to_id_cache
 
 def identify_user_from_vapi_request(request_body: Dict[str, Any], request_headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """
@@ -252,8 +260,8 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         print(f"   📞 Found phone number ID: {phone_number_id}")
         
         # Check cache first (from webhook)
-        if phone_number_id in _call_phone_cache:  # Reuse the same cache dict
-            phone_number = _call_phone_cache[phone_number_id]
+        if phone_number_id in _phone_id_cache:
+            phone_number = _phone_id_cache[phone_number_id]
             print(f"   ✅ Got phone number from cache: {phone_number}")
             user_info = get_user_from_phone_number(phone_number)
             if user_info:
@@ -265,7 +273,8 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         if phone_number:
             print(f"   ✅ Got phone number from phone number ID: {phone_number}")
             # Store in cache
-            _call_phone_cache[phone_number_id] = phone_number
+            _phone_id_cache[phone_number_id] = phone_number
+            _phone_to_id_cache[phone_number] = phone_number_id
             user_info = get_user_from_phone_number(phone_number)
             if user_info:
                 return user_info
