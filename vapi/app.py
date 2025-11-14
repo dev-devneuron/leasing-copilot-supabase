@@ -404,10 +404,22 @@ async def search_apartments(request: VapiRequest, http_request: Request):
         # Check if headers contain our custom headers (case-insensitive)
         header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
         if 'x-vapi-to' in header_keys_lower:
-            print(f"   ✅ Found x-vapi-to: {header_keys_lower['x-vapi-to']}")
+            to_value = header_keys_lower['x-vapi-to']
+            if to_value and to_value.strip():
+                print(f"   ✅ Found x-vapi-to: {to_value}")
+            else:
+                print(f"   ⚠️  x-vapi-to header exists but is empty: '{to_value}'")
         else:
             print(f"   ❌ x-vapi-to header NOT FOUND in request!")
-            print(f"   Available headers: {list(header_keys_lower.keys())}")
+        
+        # Also check for x-call-id
+        if 'x-call-id' in header_keys_lower:
+            call_id_value = header_keys_lower['x-call-id']
+            print(f"   ✅ Found x-call-id: {call_id_value}")
+        else:
+            print(f"   ⚠️  x-call-id header NOT FOUND in request!")
+        
+        print(f"   Available headers: {list(header_keys_lower.keys())}")
         user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
         if user_info:
             source_ids = user_info["source_ids"]
@@ -707,11 +719,14 @@ async def vapi_webhook(request: Request):
         print(f"   Body keys: {list(body.keys())}")
         
         # Extract call information - Vapi sends different structures for different events
+        # Also check headers for x-call-id (sent with tool calls)
         call_id = (
             body.get("call") or 
             body.get("callId") or 
             body.get("id") or
-            (body.get("call") and body["call"].get("id")) if isinstance(body.get("call"), dict) else None
+            (body.get("call") and body["call"].get("id")) if isinstance(body.get("call"), dict) else None or
+            request.headers.get("x-call-id") or
+            request.headers.get("X-Call-ID")
         )
         
         # Extract phone number ID

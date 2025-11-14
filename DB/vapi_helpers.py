@@ -131,26 +131,43 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     header_keys_lower = {k.lower(): v for k, v in request_headers.items()}
     call_to_number = header_keys_lower.get("x-vapi-to")
     
-    if call_to_number:
+    # Check if header exists but is empty (template variable not populated)
+    if call_to_number and call_to_number.strip():
         print(f"   📞 Found destination number in x-vapi-to header: {call_to_number}")
         user_info = get_user_from_phone_number(call_to_number)
         if user_info:
             return user_info
         else:
             print(f"   ⚠️  Destination number {call_to_number} not found in database")
+    elif "x-vapi-to" in header_keys_lower:
+        print(f"   ⚠️  x-vapi-to header exists but is empty (template variable {{to}} not populated)")
     
-    # Also store call ID from header for cache lookup
-    call_id_from_header = None
-    for header_key in ["x-call-id", "X-Call-ID", "X-CALL-ID"]:
-        if header_key in request_headers:
-            call_id_from_header = request_headers[header_key]
-            break
-    if call_id_from_header and call_id_from_header in _call_phone_cache:
-        cached_number = _call_phone_cache[call_id_from_header]
-        print(f"   📞 Found phone number from cached call ID: {cached_number}")
-        user_info = get_user_from_phone_number(cached_number)
-        if user_info:
-            return user_info
+    # Method 1b: Use x-call-id header to fetch phone number from Vapi API
+    # This is a fallback when x-vapi-to is empty
+    call_id_from_header = header_keys_lower.get("x-call-id")
+    if call_id_from_header:
+        print(f"   📞 Found x-call-id header: {call_id_from_header}")
+        
+        # First check cache
+        if call_id_from_header in _call_phone_cache:
+            cached_number = _call_phone_cache[call_id_from_header]
+            print(f"   ✅ Found phone number from cached call ID: {cached_number}")
+            user_info = get_user_from_phone_number(cached_number)
+            if user_info:
+                return user_info
+        
+        # Fallback: Fetch from Vapi API
+        print(f"   📞 Call ID not in cache, fetching phone number from Vapi API...")
+        phone_number = get_phone_number_from_vapi_call(call_id_from_header)
+        if phone_number:
+            print(f"   ✅ Got phone number from Vapi API using call ID: {phone_number}")
+            # Store in cache
+            _call_phone_cache[call_id_from_header] = phone_number
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+            else:
+                print(f"   ⚠️  Phone number {phone_number} not found in database")
     
     # Method 2: Twilio destination number (from webhook events)
     # This is the number that was called/texted (YOUR number), which identifies the PM/Realtor
