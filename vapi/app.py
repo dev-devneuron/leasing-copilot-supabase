@@ -238,7 +238,9 @@ async def query_docs(request: VapiRequest, http_request: Request):
     Query documents/rules with data isolation.
     Filters by user's accessible source_ids.
     """
-    from DB.vapi_helpers import identify_user_from_vapi_request
+    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache
+    # Share the cache with the helper module
+    set_call_phone_cache(_call_phone_cache)
     
     source_ids = None
     try:
@@ -342,7 +344,9 @@ async def confirm_apartment(request: VapiRequest, http_request: Request):
     """
     Confirm apartment address with data isolation.
     """
-    from DB.vapi_helpers import identify_user_from_vapi_request
+    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache
+    # Share the cache with the helper module
+    set_call_phone_cache(_call_phone_cache)
     
     source_ids = None
     try:
@@ -375,12 +379,17 @@ async def search_apartments(request: VapiRequest, http_request: Request):
     """
     Search apartments with data isolation based on user's phone number.
     """
-    from DB.vapi_helpers import identify_user_from_vapi_request
+    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache
+    # Share the cache with the helper module
+    set_call_phone_cache(_call_phone_cache)
     
     # Try to identify user from VAPI request
     source_ids = None
     try:
         body = await http_request.json()
+        # Log full request for debugging
+        print(f"🔍 Full request body: {json.dumps(body, default=str)[:500]}...")
+        print(f"🔍 Full request headers: {dict(http_request.headers)}")
         user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
         if user_info:
             source_ids = user_info["source_ids"]
@@ -643,6 +652,88 @@ def oauth2callback(request: Request):
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "message": "Lease Copilot is running"}
+
+
+# ------------------ Vapi Call Event Webhook ------------------ #
+# In-memory cache to store call_id -> phone_number mapping
+# This is populated when Vapi sends call events
+_call_phone_cache: Dict[str, str] = {}
+# Also store phone_number_id -> phone_number for quick lookup
+_phone_id_cache: Dict[str, str] = {}
+
+@app.post("/vapi-webhook")
+async def vapi_webhook(request: Request):
+    """
+    Webhook endpoint to receive Vapi call events.
+    Stores call_id -> phone_number mapping for data isolation.
+    
+    This endpoint should be configured as the Server URL in Vapi phone number settings.
+    """
+    try:
+        body = await request.json()
+        print(f"📞 Vapi webhook received - Event type: {body.get('type', 'unknown')}")
+        print(f"   Body keys: {list(body.keys())}")
+        
+        # Extract call information - Vapi sends different structures for different events
+        call_id = (
+            body.get("call") or 
+            body.get("callId") or 
+            body.get("id") or
+            (body.get("call") and body["call"].get("id")) if isinstance(body.get("call"), dict) else None
+        )
+        
+        # Extract phone number ID
+        phone_number_id = (
+            body.get("phoneNumberId") or 
+            (body.get("phoneNumber") and body["phoneNumber"].get("id")) if isinstance(body.get("phoneNumber"), dict) else None or
+            (body.get("call") and body["call"].get("phoneNumberId")) if isinstance(body.get("call"), dict) else None
+        )
+        
+        # Try to get phone number from various fields
+        phone_number = (
+            body.get("phoneNumber") if isinstance(body.get("phoneNumber"), str) else
+            (body.get("phoneNumber") and body["phoneNumber"].get("number")) if isinstance(body.get("phoneNumber"), dict) else
+            body.get("to") or
+            body.get("To") or
+            (body.get("call") and body["call"].get("phoneNumber")) if isinstance(body.get("call"), dict) else None
+        )
+        
+        # Check for Twilio data (most reliable)
+        twilio_data = body.get("twilio", {})
+        if isinstance(twilio_data, dict):
+            destination_number = twilio_data.get("to") or twilio_data.get("To")
+            if destination_number:
+                phone_number = destination_number
+                print(f"   📞 Found destination number in twilio: {destination_number}")
+        
+        # If we have phoneNumberId but not phone number, fetch it
+        if phone_number_id and not phone_number:
+            from DB.vapi_helpers import get_phone_number_from_id
+            phone_number = get_phone_number_from_id(phone_number_id)
+            if phone_number:
+                _phone_id_cache[phone_number_id] = phone_number
+                print(f"   ✅ Fetched and cached phone number from ID: {phone_number}")
+        
+        # Store mapping if we have both call_id and phone_number
+        if call_id and phone_number:
+            _call_phone_cache[call_id] = phone_number
+            print(f"✅ Stored mapping: call_id={call_id} -> phone_number={phone_number}")
+            # Keep cache size reasonable (last 1000 calls)
+            if len(_call_phone_cache) > 1000:
+                # Remove oldest entries (simple FIFO)
+                oldest_key = next(iter(_call_phone_cache))
+                del _call_phone_cache[oldest_key]
+        
+        # Also store phone_number_id -> phone_number mapping
+        if phone_number_id and phone_number:
+            _phone_id_cache[phone_number_id] = phone_number
+        
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"⚠️  Error processing Vapi webhook: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
 
 
 # ------------------ Twilio WhatsApp ------------------ #

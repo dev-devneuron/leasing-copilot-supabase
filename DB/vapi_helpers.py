@@ -86,6 +86,14 @@ def get_phone_number_from_id(phone_number_id: str) -> Optional[str]:
     return None
 
 
+# Import the cache from vapi.app (will be set at runtime)
+_call_phone_cache: Dict[str, str] = {}
+
+def set_call_phone_cache(cache: Dict[str, str]) -> None:
+    """Set the call phone cache from the main app."""
+    global _call_phone_cache
+    _call_phone_cache = cache
+
 def identify_user_from_vapi_request(request_body: Dict[str, Any], request_headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """
     Identify user from VAPI request by trying multiple methods.
@@ -138,18 +146,43 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         print(f"   📞 Found phone number in request: {phone_number}")
         return get_user_from_phone_number(phone_number)
     
-    # Method 3: From call ID (Vapi tool calls should include this)
+    # Method 3: From call ID (check body, headers, and cache)
+    # Try multiple locations in the request body
     call_id = (
         request_body.get("callId") or 
         request_body.get("call_id") or 
         request_body.get("call") or
-        (request_body.get("call") and request_body["call"].get("id")) if isinstance(request_body.get("call"), dict) else None
+        (request_body.get("call") and request_body["call"].get("id")) if isinstance(request_body.get("call"), dict) else None or
+        request_body.get("callId") or  # Top level
+        request_body.get("id") or  # Top level ID (might be call ID)
+        # Check inside message object
+        (request_body.get("message") and request_body["message"].get("callId")) if isinstance(request_body.get("message"), dict) else None or
+        (request_body.get("message") and request_body["message"].get("call_id")) if isinstance(request_body.get("message"), dict) else None or
+        # Check headers
+        request_headers.get("x-call-id") or
+        request_headers.get("call-id") or
+        request_headers.get("vapi-call-id") or
+        request_headers.get("x-vapi-call-id")
     )
+    
     if call_id:
-        print(f"   📞 Found call ID: {call_id}, fetching phone number from Vapi API...")
+        print(f"   📞 Found call ID: {call_id}")
+        
+        # First check in-memory cache (fastest)
+        if call_id in _call_phone_cache:
+            phone_number = _call_phone_cache[call_id]
+            print(f"   ✅ Got phone number from cache: {phone_number}")
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+        
+        # Fallback: Fetch from Vapi API
+        print(f"   📞 Call ID not in cache, fetching from Vapi API...")
         phone_number = get_phone_number_from_vapi_call(call_id)
         if phone_number:
-            print(f"   ✅ Got phone number from call ID: {phone_number}")
+            print(f"   ✅ Got phone number from Vapi API: {phone_number}")
+            # Store in cache for future requests
+            _call_phone_cache[call_id] = phone_number
             user_info = get_user_from_phone_number(phone_number)
             if user_info:
                 return user_info
@@ -158,16 +191,35 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         else:
             print(f"   ⚠️  Could not get phone number from call ID {call_id}")
     else:
-        print(f"   ⚠️  No call ID found in request body")
+        print(f"   ⚠️  No call ID found in request body or headers")
     
-    # Method 4: From phone number ID
-    phone_number_id = request_body.get("phoneNumberId") or request_body.get("phone_number_id")
+    # Method 4: From phone number ID (check cache first, then API)
+    phone_number_id = (
+        request_body.get("phoneNumberId") or 
+        request_body.get("phone_number_id") or
+        (request_body.get("message") and request_body["message"].get("phoneNumberId")) if isinstance(request_body.get("message"), dict) else None
+    )
     if phone_number_id:
-        print(f"   📞 Found phone number ID: {phone_number_id}, fetching phone number...")
+        print(f"   📞 Found phone number ID: {phone_number_id}")
+        
+        # Check cache first (from webhook)
+        if phone_number_id in _call_phone_cache:  # Reuse the same cache dict
+            phone_number = _call_phone_cache[phone_number_id]
+            print(f"   ✅ Got phone number from cache: {phone_number}")
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+        
+        # Fallback: Fetch from API
+        print(f"   📞 Phone number ID not in cache, fetching from Vapi API...")
         phone_number = get_phone_number_from_id(phone_number_id)
         if phone_number:
-            print(f"   📞 Got phone number from phone number ID: {phone_number}")
-            return get_user_from_phone_number(phone_number)
+            print(f"   ✅ Got phone number from phone number ID: {phone_number}")
+            # Store in cache
+            _call_phone_cache[phone_number_id] = phone_number
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
         else:
             print(f"   ⚠️  Could not get phone number from phone number ID")
     
