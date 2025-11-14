@@ -261,6 +261,14 @@ async def query_docs(request: VapiRequest, http_request: Request):
                 raise HTTPException(status_code=400, detail="Missing query text")
 
     print("Address:", address)
+    
+    # If source_ids is an empty list, user has no data - return error
+    if source_ids is not None and len(source_ids) == 0:
+        raise HTTPException(
+            status_code=404, 
+            detail="No data available. Please upload listings first."
+        )
+    
     with Session(engine) as session:
         # Filter by user's accessible source_ids if available
         if source_ids and len(source_ids) > 0:
@@ -273,6 +281,8 @@ async def query_docs(request: VapiRequest, http_request: Request):
         """
             ).params(addr=address, source_ids=source_ids)
         else:
+            # source_ids is None - user not identified (security risk)
+            print("⚠️  No source_ids provided in query_docs - searching all listings (SECURITY RISK)")
             count_sql = text(
                 """
             SELECT COUNT(*) 
@@ -374,7 +384,10 @@ async def search_apartments(request: VapiRequest, http_request: Request):
         user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
         if user_info:
             source_ids = user_info["source_ids"]
-            print(f"🔒 Filtering listings for {user_info['user_type']} ID: {user_info['user_id']}, source_ids: {source_ids}")
+            if source_ids and len(source_ids) > 0:
+                print(f"🔒 Filtering listings for {user_info['user_type']} ID: {user_info['user_id']}, source_ids: {source_ids}")
+            else:
+                print(f"⚠️  User {user_info['user_type']} ID: {user_info['user_id']} has no data (empty source_ids) - will return empty results")
         else:
             print("⚠️  Could not identify user from VAPI request - searching all listings (SECURITY RISK)")
     except Exception as e:

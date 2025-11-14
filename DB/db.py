@@ -1092,11 +1092,19 @@ def search_apartments(query: str, source_ids: Optional[List[int]] = None, k: int
     Args:
         query: Search query text
         source_ids: Optional list of source_ids to filter by (for data isolation)
+                   - If None: searches all listings (use with caution)
+                   - If empty list []: returns empty (user has no data)
+                   - If list with IDs: filters by those source_ids
         k: Number of results to return
     
     Returns:
         List of listing metadata dictionaries
     """
+    # If source_ids is an empty list, user has no data - return empty results
+    if source_ids is not None and len(source_ids) == 0:
+        print("⚠️  User has no data (empty source_ids) - returning empty results")
+        return []
+    
     qvec = embed_text(query)
     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
     
@@ -1112,6 +1120,8 @@ def search_apartments(query: str, source_ids: Optional[List[int]] = None, k: int
         )
         params = {"source_ids": source_ids, "k": k}
     else:
+        # source_ids is None - user not identified, search all (security risk but logged)
+        print("⚠️  No source_ids provided - searching all listings (SECURITY RISK)")
         sql = text(
             f"""
             SELECT listing_metadata FROM apartmentlisting
