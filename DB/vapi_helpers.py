@@ -28,16 +28,35 @@ def get_phone_number_from_vapi_call(call_id: Optional[str] = None) -> Optional[s
         headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
         response = requests.get(
             f"{VAPI_BASE_URL}/call/{call_id}",
-            headers=headers
+            headers=headers,
+            timeout=5  # Add timeout to avoid hanging
         )
         if response.status_code == 200:
             call_data = response.json()
-            # VAPI call object may have phoneNumberId
-            phone_number_id = call_data.get("phoneNumberId")
+            print(f"   📋 Call data keys: {list(call_data.keys())}")
+            
+            # Try to get phone number directly from call data first
+            phone_number = call_data.get("phoneNumber") or call_data.get("phone_number")
+            if phone_number:
+                print(f"   ✅ Found phone number directly in call data: {phone_number}")
+                return phone_number
+            
+            # Fallback: Get phone number via phoneNumberId
+            phone_number_id = call_data.get("phoneNumberId") or call_data.get("phone_number_id")
             if phone_number_id:
-                return get_phone_number_from_id(phone_number_id)
+                print(f"   📋 Found phoneNumberId: {phone_number_id}, fetching phone number...")
+                phone_number = get_phone_number_from_id(phone_number_id)
+                if phone_number:
+                    print(f"   ✅ Got phone number from phoneNumberId: {phone_number}")
+                    return phone_number
+            else:
+                print(f"   ⚠️  No phoneNumberId found in call data")
+        else:
+            print(f"   ⚠️  Vapi API returned status {response.status_code}: {response.text}")
+    except requests.exceptions.Timeout:
+        print(f"   ⚠️  Timeout fetching call data from Vapi API")
     except Exception as e:
-        print(f"Error getting phone number from VAPI call: {e}")
+        print(f"   ⚠️  Error getting phone number from VAPI call: {e}")
     
     return None
 
@@ -71,10 +90,11 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     """
     Identify user from VAPI request by trying multiple methods.
     
-    Methods tried:
-    1. Direct phone number in request body/headers
-    2. Phone number from call ID
-    3. Phone number from phone number ID
+    Methods tried (in priority order):
+    1. Twilio destination number (twilio.to for calls, twilio.To for SMS) - MOST RELIABLE
+    2. Direct phone number in request body/headers
+    3. Phone number from call ID
+    4. Phone number from phone number ID
     
     Args:
         request_body: Request body as dict
@@ -89,7 +109,22 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     print(f"   Request body keys: {list(request_body.keys())}")
     print(f"   Request headers keys: {list(request_headers.keys())}")
     
-    # Method 1: Direct phone number
+    # Method 1: Twilio destination number (ALWAYS present in Vapi/Twilio webhooks)
+    # This is the number that was called/texted (YOUR number), which identifies the PM/Realtor
+    twilio_data = request_body.get("twilio", {})
+    if isinstance(twilio_data, dict):
+        # For calls: twilio.to
+        # For SMS: twilio.To
+        destination_number = twilio_data.get("to") or twilio_data.get("To")
+        if destination_number:
+            print(f"   📞 Found destination number in twilio.to/To: {destination_number}")
+            user_info = get_user_from_phone_number(destination_number)
+            if user_info:
+                return user_info
+            else:
+                print(f"   ⚠️  Destination number {destination_number} not found in database")
+    
+    # Method 2: Direct phone number in request body/headers
     phone_number = (
         request_body.get("phoneNumber") or
         request_body.get("phone_number") or
@@ -103,18 +138,29 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         print(f"   📞 Found phone number in request: {phone_number}")
         return get_user_from_phone_number(phone_number)
     
-    # Method 2: From call ID
-    call_id = request_body.get("callId") or request_body.get("call_id")
+    # Method 3: From call ID (Vapi tool calls should include this)
+    call_id = (
+        request_body.get("callId") or 
+        request_body.get("call_id") or 
+        request_body.get("call") or
+        (request_body.get("call") and request_body["call"].get("id")) if isinstance(request_body.get("call"), dict) else None
+    )
     if call_id:
-        print(f"   📞 Found call ID: {call_id}, fetching phone number...")
+        print(f"   📞 Found call ID: {call_id}, fetching phone number from Vapi API...")
         phone_number = get_phone_number_from_vapi_call(call_id)
         if phone_number:
-            print(f"   📞 Got phone number from call ID: {phone_number}")
-            return get_user_from_phone_number(phone_number)
+            print(f"   ✅ Got phone number from call ID: {phone_number}")
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+            else:
+                print(f"   ⚠️  Phone number {phone_number} not found in database")
         else:
-            print(f"   ⚠️  Could not get phone number from call ID")
+            print(f"   ⚠️  Could not get phone number from call ID {call_id}")
+    else:
+        print(f"   ⚠️  No call ID found in request body")
     
-    # Method 3: From phone number ID
+    # Method 4: From phone number ID
     phone_number_id = request_body.get("phoneNumberId") or request_body.get("phone_number_id")
     if phone_number_id:
         print(f"   📞 Found phone number ID: {phone_number_id}, fetching phone number...")

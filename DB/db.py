@@ -16,6 +16,7 @@ import json
 import csv
 import io
 import requests
+import jwt
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -119,13 +120,9 @@ class PropertyManager(SQLModel, table=True):
 
 class Realtor(SQLModel, table=True):
     """
-    Realtor entity.
+    Realtor entity that always belongs to a Property Manager.
     
-    Represents a real estate agent who can be:
-    - Managed by a Property Manager (property_manager_id set)
-    - Standalone (is_standalone=True, property_manager_id=None)
-    
-    Realtors can own property listings and have bookings.
+    Realtors can own property listings (assigned from their PM) and have bookings.
     """
     realtor_id: Optional[int] = Field(default=None, primary_key=True)
     auth_user_id: UUID = Field(index=True)  # Links to Supabase Auth user
@@ -136,12 +133,11 @@ class Realtor(SQLModel, table=True):
     twilio_sid: Optional[str] = None  # Twilio SID (legacy)
     credentials: Optional[str] = Field(default=None)  # Google Calendar credentials (JSON string)
     
-    # Property Manager relationship
-    property_manager_id: Optional[int] = Field(
-        default=None, 
-        foreign_key="propertymanager.property_manager_id"
+    # Property Manager relationship (required)
+    property_manager_id: int = Field(
+        foreign_key="propertymanager.property_manager_id",
+        nullable=False,
     )
-    is_standalone: bool = Field(default=True)  # True if not under any PM
     
     # Phone number assignment (new system)
     purchased_phone_number_id: Optional[int] = Field(
@@ -236,9 +232,9 @@ class Source(SQLModel, table=True):
     source_id: Optional[int] = Field(default=None, primary_key=True)
     
     # Ownership: Source belongs to either PM or Realtor (at least one must be set)
-    property_manager_id: Optional[int] = Field(
-        default=None, 
-        foreign_key="propertymanager.property_manager_id"
+    property_manager_id: int = Field(
+        foreign_key="propertymanager.property_manager_id",
+        nullable=False,
     )
     realtor_id: Optional[int] = Field(
         default=None, 
@@ -544,11 +540,8 @@ def create_property_manager(
         session.refresh(property_manager)
         print("Property Manager created")
 
-        # Create Source for Property Manager
-        source = Source(property_manager_id=property_manager.property_manager_id)
-        session.add(source)
-        session.commit()
-        session.refresh(source)
+        # Ensure Source for Property Manager
+        source = create_source(property_manager_id=property_manager.property_manager_id)
         print("Source created for Property Manager")
 
         auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?property_manager_id={property_manager.property_manager_id}"
@@ -571,9 +564,9 @@ def create_realtor(
     name: str,
     email: str,
     contact: str,
-    property_manager_id: Optional[int] = None,
+    property_manager_id: int,
 ):
-    """Create a new Realtor (standalone or under a Property Manager)."""
+    """Create a new Realtor that must belong to a Property Manager."""
     with Session(engine) as session:
         # Check for duplicate realtor
         existing_realtor = session.exec(
@@ -588,16 +581,21 @@ def create_realtor(
                 detail="Realtor with this email or contact already exists",
             )
 
-        # Validate property manager if provided
-        if property_manager_id:
-            property_manager = session.exec(
-                select(PropertyManager).where(PropertyManager.property_manager_id == property_manager_id)
-            ).first()
-            if not property_manager:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Property Manager not found",
-                )
+        if not property_manager_id:
+            raise HTTPException(
+                status_code=400,
+                detail="property_manager_id is required when creating a realtor",
+            )
+        
+        # Validate property manager
+        property_manager = session.exec(
+            select(PropertyManager).where(PropertyManager.property_manager_id == property_manager_id)
+        ).first()
+        if not property_manager:
+            raise HTTPException(
+                status_code=404,
+                detail="Property Manager not found",
+            )
 
         # Create new Realtor
         realtor = Realtor(
@@ -607,18 +605,17 @@ def create_realtor(
             contact=contact,
             twilio_contact="TBD",
             property_manager_id=property_manager_id,
-            is_standalone=property_manager_id is None,
         )
         session.add(realtor)
         session.commit()
         session.refresh(realtor)
         print("Realtor created")
 
-        # Create Source for Realtor
-        source = Source(realtor_id=realtor.realtor_id)
-        session.add(source)
-        session.commit()
-        session.refresh(source)
+        # Create Source for Realtor (scoped to their PM)
+        source = create_source(
+            property_manager_id=property_manager_id,
+            realtor_id=realtor.realtor_id,
+        )
         print("Source created for Realtor")
 
         auth_link = f"https://leasing-copilot-supabase.onrender.com/authorize?realtor_id={realtor.realtor_id}"
@@ -631,7 +628,6 @@ def create_realtor(
                 "email": realtor.email,
                 "contact": realtor.contact,
                 "property_manager_id": realtor.property_manager_id,
-                "is_standalone": realtor.is_standalone,
             },
             "auth_link": auth_link,
         }
@@ -805,14 +801,134 @@ def embed_and_store_listings(
     return True
 
 
-def create_source(realtor_id: int) -> Source:
+def create_source(property_manager_id: int, realtor_id: Optional[int] = None) -> Source:
+    """
+    Create (or return existing) source rows.
+    
+    - If realtor_id is None, returns the Property Manager's main source
+    - If realtor_id is provided, returns the realtor's dedicated source (and validates ownership)
+    """
     with Session(engine) as session:
-        source = Source(realtor_id=realtor_id)
+        property_manager = session.get(PropertyManager, property_manager_id)
+        if not property_manager:
+            raise HTTPException(status_code=404, detail="Property Manager not found")
+        
+        if realtor_id is not None:
+            realtor = session.get(Realtor, realtor_id)
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            if realtor.property_manager_id != property_manager_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Realtor does not belong to the specified Property Manager",
+                )
+            
+            existing = session.exec(
+                select(Source).where(
+                    Source.property_manager_id == property_manager_id,
+                    Source.realtor_id == realtor_id,
+                )
+            ).first()
+        else:
+            existing = session.exec(
+                select(Source).where(
+                    Source.property_manager_id == property_manager_id,
+                    Source.realtor_id == None,  # noqa: E711
+                )
+            ).first()
+        
+        if existing:
+            return existing
+        
+        source = Source(
+            property_manager_id=property_manager_id,
+            realtor_id=realtor_id,
+        )
         session.add(source)
         session.commit()
         session.refresh(source)
         print("Created new Source.")
         return source
+
+
+def enforce_realtor_hierarchy() -> None:
+    """
+    Ensure database rows follow the new hierarchy rules:
+    - Every realtor must belong to a property manager
+    - Every source linked to a realtor must also reference that property manager
+    """
+    if not engine:
+        return
+    
+    with engine.begin() as connection:
+        # Drop legacy constraint that prevented PM + realtor ownership
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'check_source_owner'
+                          AND conrelid = 'source'::regclass
+                    ) THEN
+                        ALTER TABLE source DROP CONSTRAINT check_source_owner;
+                    END IF;
+                END$$;
+                """
+            )
+        )
+        
+        # Backfill property_manager_id on sources linked to realtors (if missing or mismatched)
+        connection.execute(
+            text(
+                """
+                UPDATE source AS s
+                SET property_manager_id = r.property_manager_id
+                FROM realtor AS r
+                WHERE s.realtor_id = r.realtor_id
+                  AND (s.property_manager_id IS DISTINCT FROM r.property_manager_id)
+                """
+            )
+        )
+        
+        # Ensure new constraint exists (property_manager_id always required)
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'check_source_requires_pm'
+                          AND conrelid = 'source'::regclass
+                    ) THEN
+                        ALTER TABLE source
+                        ADD CONSTRAINT check_source_requires_pm CHECK (property_manager_id IS NOT NULL);
+                    END IF;
+                END$$;
+                """
+            )
+        )
+    
+    with engine.connect() as connection:
+        orphan_rows = connection.execute(
+            text(
+                "SELECT realtor_id FROM realtor WHERE property_manager_id IS NULL"
+            )
+        ).fetchall()
+    
+    if orphan_rows:
+        orphan_ids = [row[0] for row in orphan_rows]
+        raise RuntimeError(
+            "Standalone realtors detected. Every realtor must be assigned to a property "
+            f"manager before the backend can start. Offending realtor_ids: {orphan_ids}"
+        )
+
+
+enforce_realtor_hierarchy()
 
 
 # ---------------------------- Bounded Usage------------------------
@@ -1316,7 +1432,6 @@ def authenticate_realtor(email: str, password: str) -> Dict[str, Any]:
                     "realtor_id": realtor.realtor_id,
                     "name": realtor.name,
                     "email": realtor.email,
-                    "is_standalone": realtor.is_standalone,
                     "property_manager": property_manager_info,
                 },
             }
@@ -1356,7 +1471,6 @@ def get_user_data_by_auth_id(auth_user_id: str) -> Dict[str, Any]:
                 "id": realtor.realtor_id,
                 "name": realtor.name,
                 "email": realtor.email,
-                "is_standalone": realtor.is_standalone,
                 "property_manager_id": realtor.property_manager_id,
             }
         
@@ -1376,7 +1490,6 @@ def get_managed_realtors(property_manager_id: int) -> List[Dict[str, Any]]:
                 "name": realtor.name,
                 "email": realtor.email,
                 "contact": realtor.contact,
-                "is_standalone": realtor.is_standalone,
                 "created_at": realtor.created_at,
             }
             for realtor in realtors
@@ -1387,14 +1500,8 @@ def get_data_access_scope(user_type: str, user_id: int) -> Dict[str, Any]:
     """Determine what data a user can access based on their role."""
     with Session(engine) as session:
         if user_type == "property_manager":
-            # Property managers can access their own data and their realtors' data
             source_ids = session.exec(
-                select(Source.source_id).where(
-                    (Source.property_manager_id == user_id) |
-                    (Source.realtor_id.in_(
-                        select(Realtor.realtor_id).where(Realtor.property_manager_id == user_id)
-                    ))
-                )
+                select(Source.source_id).where(Source.property_manager_id == user_id)
             ).all()
             
             return {
@@ -1421,7 +1528,6 @@ def get_data_access_scope(user_type: str, user_id: int) -> Dict[str, Any]:
                 "user_type": "realtor",
                 "user_id": user_id,
                 "source_ids": source_ids,
-                "is_standalone": realtor.is_standalone,
                 "property_manager_id": realtor.property_manager_id,
                 "can_access_managed_realtors": False,
             }

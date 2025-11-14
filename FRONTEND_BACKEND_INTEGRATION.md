@@ -218,22 +218,9 @@ async function bookDemo(formData) {
 
 ## 📤 Listing Uploads
 
-### Upload Listings (Realtor)
+### Upload Listings (Realtor) — Deprecated
 
-**Endpoint:** `POST /UploadListings`  
-**Auth:** Required (Realtor)
-
-**Request:** `multipart/form-data`
-- `listing_file`: File (JSON, CSV, or TXT)
-- `listing_api_url`: string (optional)
-
-**Response:**
-```json
-{
-  "message": "Listings uploaded & embedded",
-  "count": 10
-}
-```
+> Realtors can no longer upload listings directly. All inventory must be uploaded by the Property Manager via `/property-manager/upload-listings`, optionally targeting a specific realtor with `assign_to_realtor_id`.
 
 ### Upload Listings (Property Manager)
 

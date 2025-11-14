@@ -732,8 +732,14 @@ async def twilio_incoming(
 
 # ------------------- CRUD ----------------------
 @app.post("/sources/", response_model=Source)
-def create_source_endpoint(data: Source):
-    return create_source(data.realtor_id)
+def create_source_endpoint(
+    property_manager_id: int = Body(...),
+    realtor_id: Optional[int] = Body(None),
+):
+    """
+    Admin/utility endpoint to (re)create sources. Property manager ownership is mandatory.
+    """
+    return create_source(property_manager_id=property_manager_id, realtor_id=realtor_id)
 
 
 @app.post("/upload_docs/")
@@ -801,9 +807,9 @@ async def create_realtor_endpoint(
     email: str = Form(...),
     password: str = Form(...),
     contact: str = Form(...),
-    property_manager_id: int = Form(None),
+    property_manager_id: int = Form(...),
 ):
-    """Create a new Realtor (standalone or under a Property Manager)."""
+    """Create a new Realtor under a Property Manager."""
     try:
         # Step 1: Create Supabase Auth user
         auth_response = supabase.auth.sign_up({"email": email, "password": password})
@@ -860,10 +866,9 @@ async def upload_listings(
     listing_api_url: str = Form(None),
     realtor_id: int = Depends(get_current_realtor_id),
 ):
-    print("Realtor Id:", realtor_id)
-    embed_and_store_listings(listing_file, listing_api_url, realtor_id)
-    return JSONResponse(
-        content={"message": "Listings uploaded & embedded"}, status_code=200
+    raise HTTPException(
+        status_code=403,
+        detail="Direct realtor uploads are disabled. Please have your Property Manager upload listings on your behalf.",
     )
 
 
@@ -888,7 +893,7 @@ async def options_login(request: Request):
 
 @app.post("/login")
 async def login_realtor(response: Response, payload: dict = Body(...), request: Request = None):
-    """Login endpoint for Realtors (standalone or managed)."""
+    """Login endpoint for Realtors (must belong to a Property Manager)."""
     email = payload.get("email")
     password = payload.get("password")
     print("Realtor login attempt:", email)
@@ -1036,7 +1041,6 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
                         "owner_id": realtor.realtor_id,
                         "owner_name": realtor.name,
                         "owner_email": realtor.email,
-                        "is_standalone": realtor.is_standalone,
                         "property_manager_id": realtor.property_manager_id,
                     }
             
@@ -1583,27 +1587,30 @@ async def property_manager_upload_listings(
             
             # Get realtor's source
             source = session.exec(
-                select(Source).where(Source.realtor_id == assign_to_realtor_id)
+                select(Source).where(
+                    Source.realtor_id == assign_to_realtor_id,
+                    Source.property_manager_id == property_manager_id,
+                )
             ).first()
             
             if not source:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Source not found for realtor"
+                source = create_source(
+                    property_manager_id=property_manager_id,
+                    realtor_id=assign_to_realtor_id,
                 )
             
             source_id = source.source_id
         else:
             # Upload to PM's own source
             source = session.exec(
-                select(Source).where(Source.property_manager_id == property_manager_id)
+                select(Source).where(
+                    Source.property_manager_id == property_manager_id,
+                    Source.realtor_id == None,  # noqa: E711
+                )
             ).first()
             
             if not source:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Source not found for Property Manager"
-                )
+                source = create_source(property_manager_id=property_manager_id)
             
             source_id = source.source_id
         
