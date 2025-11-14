@@ -117,16 +117,14 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     print(f"   Request body keys: {list(request_body.keys())}")
     print(f"   Request headers keys: {list(request_headers.keys())}")
     
-    # Method 1: Custom headers from Vapi tool configuration (MOST RELIABLE)
-    # These are auto-populated by Vapi using {{call.toNumber}}, {{call.fromNumber}}, {{call.id}}
-    # FastAPI normalizes headers to lowercase, so check both variations
-    call_to_number = None
-    for header_key in ["x-call-to-number", "X-Call-To-Number", "X-CALL-TO-NUMBER"]:
-        if header_key in request_headers:
-            call_to_number = request_headers[header_key]
-            break
+    # Method 1: Custom headers from Vapi phone number inbound settings (MOST RELIABLE)
+    # These are set at phone number level: x-vapi-to={{to}}, x-vapi-from={{from}}
+    # FastAPI/Starlette normalizes headers to lowercase, so check lowercase
+    header_keys_lower = {k.lower(): v for k, v in request_headers.items()}
+    call_to_number = header_keys_lower.get("x-vapi-to")
+    
     if call_to_number:
-        print(f"   📞 Found destination number in X-Call-To-Number header: {call_to_number}")
+        print(f"   📞 Found destination number in x-vapi-to header: {call_to_number}")
         user_info = get_user_from_phone_number(call_to_number)
         if user_info:
             return user_info

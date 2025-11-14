@@ -400,13 +400,13 @@ async def search_apartments(request: VapiRequest, http_request: Request):
         body = await http_request.json()
         # Log headers for debugging - especially check for custom headers
         print(f"🔍 Full request headers: {dict(http_request.headers)}")
-        print(f"🔍 Looking for X-Call-To-Number header...")
+        print(f"🔍 Looking for x-vapi-to header...")
         # Check if headers contain our custom headers (case-insensitive)
         header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
-        if 'x-call-to-number' in header_keys_lower:
-            print(f"   ✅ Found X-Call-To-Number: {header_keys_lower['x-call-to-number']}")
+        if 'x-vapi-to' in header_keys_lower:
+            print(f"   ✅ Found x-vapi-to: {header_keys_lower['x-vapi-to']}")
         else:
-            print(f"   ❌ X-Call-To-Number header NOT FOUND in request!")
+            print(f"   ❌ x-vapi-to header NOT FOUND in request!")
             print(f"   Available headers: {list(header_keys_lower.keys())}")
         user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
         if user_info:
