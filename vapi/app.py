@@ -405,11 +405,19 @@ async def search_apartments(request: VapiRequest, http_request: Request):
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "searchApartments":
             args = tool_call.function.arguments
-            query = (
-                args.strip() if isinstance(args, str) else args.get("query", "").strip()
-            )
+            # Parse args if it's a string
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except:
+                    args = {"query": args.strip()}
+            
+            query = args.get("query", "").strip() if isinstance(args, dict) else str(args).strip()
             if not query:
                 raise HTTPException(status_code=400, detail="Missing query text")
+            
+            # Log tool call arguments for debugging
+            print(f"📋 Tool call arguments: {args}")
 
             # Search with source_ids filter for data isolation
             listings = rag.search_apartments(query, source_ids=source_ids)

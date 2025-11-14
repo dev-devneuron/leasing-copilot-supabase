@@ -117,7 +117,36 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     print(f"   Request body keys: {list(request_body.keys())}")
     print(f"   Request headers keys: {list(request_headers.keys())}")
     
-    # Method 1: Twilio destination number (ALWAYS present in Vapi/Twilio webhooks)
+    # Method 1: Custom headers from Vapi tool configuration (MOST RELIABLE)
+    # These are auto-populated by Vapi using {{call.toNumber}}, {{call.fromNumber}}, {{call.id}}
+    # FastAPI normalizes headers to lowercase, so check both variations
+    call_to_number = None
+    for header_key in ["x-call-to-number", "X-Call-To-Number", "X-CALL-TO-NUMBER"]:
+        if header_key in request_headers:
+            call_to_number = request_headers[header_key]
+            break
+    if call_to_number:
+        print(f"   📞 Found destination number in X-Call-To-Number header: {call_to_number}")
+        user_info = get_user_from_phone_number(call_to_number)
+        if user_info:
+            return user_info
+        else:
+            print(f"   ⚠️  Destination number {call_to_number} not found in database")
+    
+    # Also store call ID from header for cache lookup
+    call_id_from_header = None
+    for header_key in ["x-call-id", "X-Call-ID", "X-CALL-ID"]:
+        if header_key in request_headers:
+            call_id_from_header = request_headers[header_key]
+            break
+    if call_id_from_header and call_id_from_header in _call_phone_cache:
+        cached_number = _call_phone_cache[call_id_from_header]
+        print(f"   📞 Found phone number from cached call ID: {cached_number}")
+        user_info = get_user_from_phone_number(cached_number)
+        if user_info:
+            return user_info
+    
+    # Method 2: Twilio destination number (from webhook events)
     # This is the number that was called/texted (YOUR number), which identifies the PM/Realtor
     twilio_data = request_body.get("twilio", {})
     if isinstance(twilio_data, dict):
@@ -133,9 +162,31 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                 print(f"   ⚠️  Destination number {destination_number} not found in database")
     
     # Method 2: Direct phone number in request body/headers
+    # Check tool call arguments first (toNumber/fromNumber from Vapi tool parameters)
+    tool_call_args = None
+    if isinstance(request_body.get("message"), dict):
+        tool_calls = request_body["message"].get("toolCalls") or request_body["message"].get("toolCallList") or []
+        if tool_calls and len(tool_calls) > 0:
+            # Get arguments from first tool call
+            tool_call = tool_calls[0]
+            if isinstance(tool_call, dict):
+                tool_call_args = tool_call.get("function", {}).get("arguments")
+                if isinstance(tool_call_args, str):
+                    import json
+                    try:
+                        tool_call_args = json.loads(tool_call_args)
+                    except:
+                        pass
+    
     phone_number = (
+        # Check tool call arguments (toNumber is the destination number - what we need!)
+        (tool_call_args and tool_call_args.get("toNumber")) if tool_call_args else None or
+        (tool_call_args and tool_call_args.get("to_number")) if tool_call_args else None or
+        # Direct in request body
         request_body.get("phoneNumber") or
         request_body.get("phone_number") or
+        request_body.get("toNumber") or
+        request_body.get("to_number") or
         request_body.get("to") or
         request_body.get("from") or
         request_headers.get("x-phone-number") or
