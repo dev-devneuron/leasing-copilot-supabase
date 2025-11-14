@@ -893,7 +893,28 @@ def enforce_realtor_hierarchy() -> None:
             )
         )
         
+        # Check for sources with NULL property_manager_id that can't be fixed
+        problematic_sources = connection.execute(
+            text(
+                """
+                SELECT source_id, realtor_id, property_manager_id
+                FROM source
+                WHERE property_manager_id IS NULL
+                """
+            )
+        ).fetchall()
+        
+        if problematic_sources:
+            source_ids = [row[0] for row in problematic_sources]
+            raise RuntimeError(
+                f"Found {len(problematic_sources)} source(s) with NULL property_manager_id. "
+                f"These must be fixed before the backend can start. "
+                f"Source IDs: {source_ids}. "
+                f"Please update these sources in Supabase to assign them to a property manager."
+            )
+        
         # Ensure new constraint exists (property_manager_id always required)
+        # Only add if all sources have property_manager_id (checked above)
         connection.execute(
             text(
                 """
