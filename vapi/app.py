@@ -1468,10 +1468,16 @@ async def get_property_assignments(user_data: dict = Depends(get_current_user_da
             select(Realtor).where(Realtor.property_manager_id == property_manager_id)
         ).all()
         
-        # Get PM's sources
+        # Get PM's sources - split into unassigned (no realtor) and assigned (has realtor)
         pm_sources = session.exec(
             select(Source).where(Source.property_manager_id == property_manager_id)
         ).all()
+        
+        # Unassigned sources: PM owns them, no realtor assigned
+        unassigned_sources = [s for s in pm_sources if s.realtor_id is None]
+        unassigned_source_ids = [s.source_id for s in unassigned_sources]
+        
+        # All PM sources (for getting all properties)
         pm_source_ids = [s.source_id for s in pm_sources]
         
         # Get all properties (PM's + all realtors')
@@ -1535,8 +1541,8 @@ async def get_property_assignments(user_data: dict = Depends(get_current_user_da
                 "image_url": meta.get("image_url"),
             }
             
-            # Check if property belongs to PM (unassigned)
-            if prop.source_id in pm_source_ids:
+            # Check if property belongs to PM and is unassigned (no realtor)
+            if prop.source_id in unassigned_source_ids:
                 unassigned_properties.append(property_data)
             else:
                 # Find which realtor this belongs to
@@ -1813,24 +1819,34 @@ async def assign_properties_to_realtor(
                 detail="Source not found for realtor"
             )
         
-        # Get PM's sources to verify property ownership
-        pm_sources = session.exec(
-            select(Source).where(Source.property_manager_id == property_manager_id)
+        # Get PM's unassigned sources (no realtor) to verify property ownership
+        # Only unassigned properties can be assigned to realtors
+        pm_unassigned_sources = session.exec(
+            select(Source).where(
+                Source.property_manager_id == property_manager_id,
+                Source.realtor_id.is_(None)  # Only unassigned sources
+            )
         ).all()
-        pm_source_ids = [s.source_id for s in pm_sources]
+        pm_unassigned_source_ids = [s.source_id for s in pm_unassigned_sources]
         
-        # Get the properties and verify they belong to PM
+        if not pm_unassigned_source_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="No unassigned properties available. All properties are already assigned to realtors."
+            )
+        
+        # Get the properties and verify they belong to PM and are unassigned
         properties = session.exec(
             select(ApartmentListing).where(
                 ApartmentListing.id.in_(property_ids),
-                ApartmentListing.source_id.in_(pm_source_ids)
+                ApartmentListing.source_id.in_(pm_unassigned_source_ids)
             )
         ).all()
         
         if len(properties) != len(property_ids):
             raise HTTPException(
                 status_code=400,
-                detail="Some properties not found or don't belong to this Property Manager"
+                detail=f"Some properties not found or already assigned. Found {len(properties)} unassigned properties out of {len(property_ids)} requested."
             )
         
         # Move properties to realtor's source

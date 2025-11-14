@@ -66,8 +66,15 @@ load_dotenv()
 # ============================================================================
 
 if DATABASE_URL:
-    # Create database engine with connection pooling
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    # Create database engine with connection pooling and better error handling
+    engine = create_engine(
+        DATABASE_URL, 
+        pool_pre_ping=True,  # Verify connections before using
+        pool_size=5,  # Number of connections to maintain
+        max_overflow=10,  # Additional connections beyond pool_size
+        pool_recycle=3600,  # Recycle connections after 1 hour
+        echo=False  # Set to True for SQL query logging
+    )
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 else:
     engine = None
@@ -1410,45 +1417,59 @@ def authenticate_realtor(email: str, password: str) -> Dict[str, Any]:
         uid = auth_result.user.id
         refresh_token = auth_result.session.refresh_token
 
-        # Get realtor from DB
-        with Session(engine) as session:
-            realtor = session.exec(
-                select(Realtor).where(Realtor.auth_user_id == uid)
-            ).first()
-
-            if not realtor:
-                raise HTTPException(status_code=404, detail="Realtor not found")
-
-            # Get property manager info if realtor is managed
-            property_manager_info = None
-            if realtor.property_manager_id:
-                property_manager = session.exec(
-                    select(PropertyManager).where(PropertyManager.property_manager_id == realtor.property_manager_id)
+        # Get realtor from DB with error handling
+        if not engine:
+            raise HTTPException(status_code=500, detail="Database connection not available")
+        
+        try:
+            with Session(engine) as session:
+                realtor = session.exec(
+                    select(Realtor).where(Realtor.auth_user_id == uid)
                 ).first()
-                if property_manager:
-                    property_manager_info = {
-                        "id": property_manager.property_manager_id,
-                        "name": property_manager.name,
-                        "company_name": property_manager.company_name,
-                    }
 
-            auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.realtor_id}"
+                if not realtor:
+                    raise HTTPException(status_code=404, detail="Realtor not found")
 
-            return {
-                "message": "Realtor login successful",
-                "auth_link": auth_link,
-                "access_token": auth_result.session.access_token,
-                "refresh_token": refresh_token,
-                "realtor_id": realtor.realtor_id,
-                "user_type": "realtor",
-                "user": {
-                    "uid": uid,
+                # Get property manager info if realtor is managed
+                property_manager_info = None
+                if realtor.property_manager_id:
+                    property_manager = session.exec(
+                        select(PropertyManager).where(PropertyManager.property_manager_id == realtor.property_manager_id)
+                    ).first()
+                    if property_manager:
+                        property_manager_info = {
+                            "id": property_manager.property_manager_id,
+                            "name": property_manager.name,
+                            "company_name": property_manager.company_name,
+                        }
+
+                auth_link = f"https://leasing-copilot-mvp.onrender.com/authorize?realtor_id={realtor.realtor_id}"
+
+                return {
+                    "message": "Realtor login successful",
+                    "auth_link": auth_link,
+                    "access_token": auth_result.session.access_token,
+                    "refresh_token": refresh_token,
                     "realtor_id": realtor.realtor_id,
-                    "name": realtor.name,
-                    "email": realtor.email,
-                    "property_manager": property_manager_info,
-                },
-            }
+                    "user_type": "realtor",
+                    "user": {
+                        "uid": uid,
+                        "realtor_id": realtor.realtor_id,
+                        "name": realtor.name,
+                        "email": realtor.email,
+                        "property_manager": property_manager_info,
+                    },
+                }
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions as-is
+        except Exception as db_error:
+            print(f"Database error during realtor lookup: {db_error}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=503, 
+                detail=f"Database connection error. Please try again. Error: {str(db_error)}"
+            )
 
     except HTTPException:
         raise
