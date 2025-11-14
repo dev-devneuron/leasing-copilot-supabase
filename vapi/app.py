@@ -238,19 +238,28 @@ async def query_docs(request: VapiRequest, http_request: Request):
     Query documents/rules with data isolation.
     Filters by user's accessible source_ids.
     """
-    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache
-    # Share the cache with the helper module
+    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
+    # Share the caches with the helper module
     set_call_phone_cache(_call_phone_cache)
+    set_phone_caches(_phone_id_cache, _phone_to_id_cache)
     
     source_ids = None
     try:
         body = await http_request.json()
+        # Log headers for debugging
+        print(f"🔍 Query docs - Request headers: {dict(http_request.headers)}")
         user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
         if user_info:
             source_ids = user_info["source_ids"]
             print(f"🔒 Filtering rules for {user_info['user_type']} ID: {user_info['user_id']}")
+        else:
+            print("⚠️  Could not identify user from VAPI request - returning empty results for security")
+            source_ids = []  # Fail secure
     except Exception as e:
-        print(f"⚠️  Error identifying user: {e}")
+        print(f"⚠️  Error identifying user: {e} - returning empty results for security")
+        import traceback
+        traceback.print_exc()
+        source_ids = []  # Fail secure
 
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "queryDocs":
@@ -344,9 +353,10 @@ async def confirm_apartment(request: VapiRequest, http_request: Request):
     """
     Confirm apartment address with data isolation.
     """
-    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache
-    # Share the cache with the helper module
+    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
+    # Share the caches with the helper module
     set_call_phone_cache(_call_phone_cache)
+    set_phone_caches(_phone_id_cache, _phone_to_id_cache)
     
     source_ids = None
     try:
@@ -379,17 +389,25 @@ async def search_apartments(request: VapiRequest, http_request: Request):
     """
     Search apartments with data isolation based on user's phone number.
     """
-    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache
-    # Share the cache with the helper module
+    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
+    # Share the caches with the helper module
     set_call_phone_cache(_call_phone_cache)
+    set_phone_caches(_phone_id_cache, _phone_to_id_cache)
     
     # Try to identify user from VAPI request
     source_ids = None
     try:
         body = await http_request.json()
-        # Log full request for debugging
-        print(f"🔍 Full request body: {json.dumps(body, default=str)[:500]}...")
+        # Log headers for debugging - especially check for custom headers
         print(f"🔍 Full request headers: {dict(http_request.headers)}")
+        print(f"🔍 Looking for X-Call-To-Number header...")
+        # Check if headers contain our custom headers (case-insensitive)
+        header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
+        if 'x-call-to-number' in header_keys_lower:
+            print(f"   ✅ Found X-Call-To-Number: {header_keys_lower['x-call-to-number']}")
+        else:
+            print(f"   ❌ X-Call-To-Number header NOT FOUND in request!")
+            print(f"   Available headers: {list(header_keys_lower.keys())}")
         user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
         if user_info:
             source_ids = user_info["source_ids"]
@@ -398,9 +416,13 @@ async def search_apartments(request: VapiRequest, http_request: Request):
             else:
                 print(f"⚠️  User {user_info['user_type']} ID: {user_info['user_id']} has no data (empty source_ids) - will return empty results")
         else:
-            print("⚠️  Could not identify user from VAPI request - searching all listings (SECURITY RISK)")
+            print("⚠️  Could not identify user from VAPI request - returning empty results for security")
+            source_ids = []  # Fail secure: return empty if we can't identify user
     except Exception as e:
-        print(f"⚠️  Error identifying user: {e} - searching all listings (SECURITY RISK)")
+        print(f"⚠️  Error identifying user: {e} - returning empty results for security")
+        import traceback
+        traceback.print_exc()
+        source_ids = []  # Fail secure: return empty if error identifying user
     
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == "searchApartments":
@@ -668,6 +690,8 @@ def health_check():
 _call_phone_cache: Dict[str, str] = {}
 # Also store phone_number_id -> phone_number for quick lookup
 _phone_id_cache: Dict[str, str] = {}
+# Store phone_number -> phone_number_id mapping (reverse lookup)
+_phone_to_id_cache: Dict[str, str] = {}
 
 @app.post("/vapi-webhook")
 async def vapi_webhook(request: Request):
@@ -732,9 +756,11 @@ async def vapi_webhook(request: Request):
                 oldest_key = next(iter(_call_phone_cache))
                 del _call_phone_cache[oldest_key]
         
-        # Also store phone_number_id -> phone_number mapping
+        # Also store phone_number_id -> phone_number mapping (both directions)
         if phone_number_id and phone_number:
             _phone_id_cache[phone_number_id] = phone_number
+            _phone_to_id_cache[phone_number] = phone_number_id
+            print(f"✅ Stored phone_number_id mapping: {phone_number_id} <-> {phone_number}")
         
         return {"status": "ok"}
     except Exception as e:
