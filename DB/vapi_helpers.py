@@ -85,6 +85,10 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     """
     from .user_lookup import get_user_from_phone_number
     
+    print(f"🔍 Identifying user from VAPI request...")
+    print(f"   Request body keys: {list(request_body.keys())}")
+    print(f"   Request headers keys: {list(request_headers.keys())}")
+    
     # Method 1: Direct phone number
     phone_number = (
         request_body.get("phoneNumber") or
@@ -96,21 +100,31 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     )
     
     if phone_number:
+        print(f"   📞 Found phone number in request: {phone_number}")
         return get_user_from_phone_number(phone_number)
     
     # Method 2: From call ID
     call_id = request_body.get("callId") or request_body.get("call_id")
     if call_id:
+        print(f"   📞 Found call ID: {call_id}, fetching phone number...")
         phone_number = get_phone_number_from_vapi_call(call_id)
         if phone_number:
+            print(f"   📞 Got phone number from call ID: {phone_number}")
             return get_user_from_phone_number(phone_number)
+        else:
+            print(f"   ⚠️  Could not get phone number from call ID")
     
     # Method 3: From phone number ID
     phone_number_id = request_body.get("phoneNumberId") or request_body.get("phone_number_id")
     if phone_number_id:
+        print(f"   📞 Found phone number ID: {phone_number_id}, fetching phone number...")
         phone_number = get_phone_number_from_id(phone_number_id)
         if phone_number:
+            print(f"   📞 Got phone number from phone number ID: {phone_number}")
             return get_user_from_phone_number(phone_number)
+        else:
+            print(f"   ⚠️  Could not get phone number from phone number ID")
     
+    print(f"   ❌ Could not identify user - no phone number found in request")
     return None
 

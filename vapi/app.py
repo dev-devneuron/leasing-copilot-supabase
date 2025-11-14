@@ -404,6 +404,15 @@ async def search_apartments(request: VapiRequest, http_request: Request):
 
             # Search with source_ids filter for data isolation
             listings = rag.search_apartments(query, source_ids=source_ids)
+            
+            # Log the results for debugging
+            if not listings or len(listings) == 0:
+                print(f"⚠️  No listings found for query: '{query}' with source_ids: {source_ids}")
+                if source_ids is not None and len(source_ids) == 0:
+                    print(f"🚫 User has no data - returning empty results to chatbot")
+            else:
+                print(f"✅ Found {len(listings)} listings for query: '{query}'")
+            
             return {"results": [{"toolCallId": tool_call.id, "result": listings}]}
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
