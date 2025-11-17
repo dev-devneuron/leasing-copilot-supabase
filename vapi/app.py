@@ -270,12 +270,38 @@ def _reset_forwarding_state(user_record):
 
 
 def _normalize_bot_number(number: Optional[str]) -> Optional[str]:
-    """Treat placeholders like 'TBD' as missing."""
+    """Normalize phone number to E.164 format (+1XXXXXXXXXX)."""
     if not number:
         return None
     stripped = number.strip()
     if not stripped or stripped.upper() == "TBD":
         return None
+    
+    # Remove all non-digit characters except leading +
+    # This handles formats like "+1 (412) 388-2328" -> "+14123882328"
+    if stripped.startswith("+1"):
+        # Keep +1, then extract only digits
+        digits = "".join(filter(str.isdigit, stripped[2:]))
+        if len(digits) == 10:
+            return f"+1{digits}"
+        # If it's already in the right format, return as-is
+        if len(stripped) == 12 and stripped.startswith("+1") and stripped[2:].isdigit():
+            return stripped
+    
+    # Fallback: try to extract +1 and 10 digits from anywhere in the string
+    import re
+    match = re.search(r'\+1(\d{10})', stripped.replace(" ", "").replace("-", "").replace("(", "").replace(")", ""))
+    if match:
+        return f"+1{match.group(1)}"
+    
+    # If no +1 found but has 10 digits, assume US number
+    digits_only = "".join(filter(str.isdigit, stripped))
+    if len(digits_only) == 10:
+        return f"+1{digits_only}"
+    if len(digits_only) == 11 and digits_only.startswith("1"):
+        return f"+{digits_only}"
+    
+    # Return as-is if we can't normalize (let validation catch it)
     return stripped
 
 
@@ -287,39 +313,73 @@ def _get_or_sync_twilio_number(session: Session, user_record):
     if isinstance(user_record, PropertyManager):
         assigned_type = "property_manager"
         target_id = user_record.property_manager_id
+        pm_id = user_record.property_manager_id
     else:
         assigned_type = "realtor"
         target_id = user_record.realtor_id
+        pm_id = user_record.property_manager_id
 
     def _lookup_assigned_number():
+        # First, try a simple direct lookup by assigned_to_id and property_manager_id
+        # This matches what the frontend sees in /purchased-phone-numbers
         query = select(PurchasedPhoneNumber).where(
+            PurchasedPhoneNumber.property_manager_id == pm_id,
             PurchasedPhoneNumber.assigned_to_id == target_id
         )
         
-        # Case-insensitive match for assigned_to_type
-        # Handle variations: "property_manager", "Property Manager", "PROPERTY_MANAGER", etc.
-        query = query.where(
-            or_(
-                func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")) == assigned_type,
-                func.replace(func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")), " ", "_") == assigned_type,
-            )
-        )
+        # Try multiple variations of assigned_to_type matching
+        # Handle: "property_manager", "Property Manager", "PROPERTY_MANAGER", etc.
+        type_conditions = [
+            func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")) == assigned_type,
+            func.replace(func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")), " ", "_") == assigned_type,
+            func.replace(func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")), "_", " ") == assigned_type.replace("_", " "),
+        ]
         
-        # For PropertyManager, ensure the number belongs to their inventory
+        # Also try exact match (case-sensitive) in case it's stored correctly
+        if assigned_type == "property_manager":
+            type_conditions.extend([
+                PurchasedPhoneNumber.assigned_to_type == "property_manager",
+                PurchasedPhoneNumber.assigned_to_type == "Property Manager",
+            ])
+        
+        query = query.where(or_(*type_conditions))
+        
+        result = session.exec(query.order_by(PurchasedPhoneNumber.assigned_at.desc())).first()
+        
+        # Debug logging
         if isinstance(user_record, PropertyManager):
-            query = query.where(
-                PurchasedPhoneNumber.property_manager_id == user_record.property_manager_id
-            )
-        # For Realtor, ensure the number belongs to their PM's inventory
-        elif isinstance(user_record, Realtor):
-            query = query.where(
-                PurchasedPhoneNumber.property_manager_id == user_record.property_manager_id
-            )
+            all_pm_numbers = session.exec(
+                select(PurchasedPhoneNumber)
+                .where(PurchasedPhoneNumber.property_manager_id == pm_id)
+            ).all()
+            print(f"🔍 DEBUG _lookup_assigned_number for PM {pm_id}:")
+            print(f"  - Looking for assigned_to_id={target_id}, assigned_to_type={assigned_type}")
+            print(f"  - Found {len(all_pm_numbers)} total numbers in PM inventory")
+            for pn in all_pm_numbers:
+                print(f"    * {pn.phone_number}: assigned_to_type='{pn.assigned_to_type}', assigned_to_id={pn.assigned_to_id}, status={pn.status}")
+            if result:
+                print(f"  ✅ Found matching number: {result.phone_number}")
+            else:
+                print(f"  ❌ No matching number found")
         
-        return session.exec(query.order_by(PurchasedPhoneNumber.assigned_at.desc())).first()
+        return result
 
     if not purchased:
         purchased = _lookup_assigned_number()
+    
+    # Fallback: If still not found, try a very lenient lookup - just find ANY number
+    # assigned to this PM/realtor (ignore assigned_to_type format issues)
+    if not purchased and isinstance(user_record, PropertyManager):
+        print(f"🔍 DEBUG: Trying lenient fallback for PM {pm_id}")
+        purchased = session.exec(
+            select(PurchasedPhoneNumber)
+            .where(PurchasedPhoneNumber.property_manager_id == pm_id)
+            .where(PurchasedPhoneNumber.assigned_to_id == target_id)
+            .where(PurchasedPhoneNumber.assigned_to_type.isnot(None))
+            .order_by(PurchasedPhoneNumber.assigned_at.desc())
+        ).first()
+        if purchased:
+            print(f"  ✅ Lenient fallback found: {purchased.phone_number} (assigned_to_type='{purchased.assigned_to_type}')")
 
     # If the PM never explicitly assigned the bot number to themselves,
     # auto-promote the oldest number they own so the dashboard always has a callbot DID.
@@ -349,8 +409,13 @@ def _get_or_sync_twilio_number(session: Session, user_record):
         return None
 
     fallback_number = _normalize_bot_number(purchased.phone_number)
-    if not fallback_number or not BOT_NUMBER_REGEX.match(fallback_number):
+    if not fallback_number:
+        print(f"⚠️  DEBUG: Could not normalize phone number '{purchased.phone_number}' for PM {pm_id if isinstance(user_record, PropertyManager) else 'Realtor'}")
         return None
+    if not BOT_NUMBER_REGEX.match(fallback_number):
+        print(f"⚠️  DEBUG: Normalized number '{fallback_number}' (from '{purchased.phone_number}') does not match E.164 regex for PM {pm_id if isinstance(user_record, PropertyManager) else 'Realtor'}")
+        return None
+    print(f"✅ DEBUG: Successfully normalized and validated number '{fallback_number}' for PM {pm_id if isinstance(user_record, PropertyManager) else 'Realtor'}")
 
     updated = False
 
