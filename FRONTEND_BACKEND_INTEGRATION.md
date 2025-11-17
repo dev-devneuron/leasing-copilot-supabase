@@ -588,9 +588,18 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
 }
 ```
 
-> **Heads-up:** If a legacy PM/realtor already has a purchased number but their profile still shows the “Assign a phone number to unlock forwarding controls” banner, simply call `GET /my-number` once after assignment. The backend now auto-synchronizes the stored Twilio DID from the assigned `purchased_phone_number_id`, so existing users don’t need to be re-saved manually.
-
-Behind the scenes, the backend also scans the `purchased_phone_numbers` table for entries whose `assigned_to_type/assigned_to_id` match the user (even if `purchased_phone_number_id` on the profile is `NULL`) and automatically links it. That means any PM who was assigned a number prior to this release will be brought up-to-date the first time the dashboard hits `GET /my-number` or `GET /call-forwarding-state`.
+> **Important:** The backend automatically finds assigned bot numbers by:
+> 1. Checking the user's `purchased_phone_number_id` field
+> 2. Searching `purchased_phone_numbers` for entries where `assigned_to_type`/`assigned_to_id` matches the user
+> 3. For PMs only: Auto-promoting the oldest unassigned number from their inventory if none is explicitly assigned
+>
+> **Troubleshooting "No Number Assigned":**
+> - If a PM has assigned themselves a number via `/assign-phone-number` but `/my-number` still returns 404, check:
+>   1. The number's `property_manager_id` must match the PM's ID (numbers can only be assigned from the PM's own inventory)
+>   2. The number's `assigned_to_type` should be `"property_manager"` (case-insensitive matching handles variations)
+>   3. The number's `assigned_to_id` must equal the PM's `property_manager_id`
+> - The backend now handles case variations in `assigned_to_type` (e.g., "Property Manager", "property_manager", "PROPERTY_MANAGER")
+> - If the issue persists, check backend logs for debug output showing what numbers were found in the inventory
 
 > **Property Manager fallback:** If tech has added at least one purchased number for a PM but never explicitly assigned it (i.e., it just lives in the PM’s inventory), the backend now auto-promotes the oldest available number to the PM on first load. It updates both the PM record (`purchased_phone_number_id`, `twilio_contact`) and the `PurchasedPhoneNumber` row (`assigned_to_type = property_manager`). So the dashboard only needs to call `GET /my-number`; there’s no extra “assign to myself” step for existing customers.
 

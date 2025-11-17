@@ -292,12 +292,31 @@ def _get_or_sync_twilio_number(session: Session, user_record):
         target_id = user_record.realtor_id
 
     def _lookup_assigned_number():
-        return session.exec(
-            select(PurchasedPhoneNumber)
-            .where(func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")) == assigned_type)
-            .where(PurchasedPhoneNumber.assigned_to_id == target_id)
-            .order_by(PurchasedPhoneNumber.assigned_at.desc())
-        ).first()
+        query = select(PurchasedPhoneNumber).where(
+            PurchasedPhoneNumber.assigned_to_id == target_id
+        )
+        
+        # Case-insensitive match for assigned_to_type
+        # Handle variations: "property_manager", "Property Manager", "PROPERTY_MANAGER", etc.
+        query = query.where(
+            or_(
+                func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")) == assigned_type,
+                func.replace(func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")), " ", "_") == assigned_type,
+            )
+        )
+        
+        # For PropertyManager, ensure the number belongs to their inventory
+        if isinstance(user_record, PropertyManager):
+            query = query.where(
+                PurchasedPhoneNumber.property_manager_id == user_record.property_manager_id
+            )
+        # For Realtor, ensure the number belongs to their PM's inventory
+        elif isinstance(user_record, Realtor):
+            query = query.where(
+                PurchasedPhoneNumber.property_manager_id == user_record.property_manager_id
+            )
+        
+        return session.exec(query.order_by(PurchasedPhoneNumber.assigned_at.desc())).first()
 
     if not purchased:
         purchased = _lookup_assigned_number()
@@ -4285,6 +4304,18 @@ def get_my_number(user_data: dict = Depends(get_current_user_data)):
         
         bot_number = _get_or_sync_twilio_number(session, user_record)
         if not bot_number:
+            # Debug: Check what's actually in the database
+            if isinstance(user_record, PropertyManager):
+                pm_id = user_record.property_manager_id
+                assigned_numbers = session.exec(
+                    select(PurchasedPhoneNumber)
+                    .where(PurchasedPhoneNumber.property_manager_id == pm_id)
+                    .where(PurchasedPhoneNumber.assigned_to_id == pm_id)
+                ).all()
+                print(f"🔍 DEBUG: PM {pm_id} - Found {len(assigned_numbers)} assigned numbers in inventory")
+                for pn in assigned_numbers:
+                    print(f"  - Number: {pn.phone_number}, assigned_to_type: {pn.assigned_to_type}, assigned_to_id: {pn.assigned_to_id}")
+            
             raise HTTPException(
                 status_code=404,
                 detail="You haven't purchased a phone number yet! Use the /buy-number endpoint to purchase one."
