@@ -39,6 +39,10 @@ EMBED_DIM = 768
 # Default Twilio phone number for WhatsApp/SMS
 TWILIO_PHONE_NUMBER = "whatsapp:+14155238886"
 
+# Optional alert destinations for forwarding confirmations
+FORWARDING_ALERT_NUMBER = os.getenv("FORWARDING_ALERT_NUMBER")
+FORWARDING_ALERT_FROM_NUMBER = os.getenv("FORWARDING_ALERT_FROM_NUMBER")
+
 # ============================================================================
 # OAUTH & REDIRECT URLS
 # ============================================================================
@@ -67,6 +71,9 @@ timeout = httpx.Timeout(25.0)
 
 # Daily message limit per user
 DAILY_LIMIT = 50
+
+# Call forwarding toggle protection (requests per hour per user)
+CALL_FORWARDING_RATE_LIMIT_PER_HOUR = int(os.getenv("CALL_FORWARDING_RATE_LIMIT_PER_HOUR", "10"))
 
 # ============================================================================
 # APPLICATION SETTINGS

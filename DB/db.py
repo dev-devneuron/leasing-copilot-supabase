@@ -106,6 +106,16 @@ class PropertyManager(SQLModel, table=True):
         default=None, 
         foreign_key="purchasedphonenumber.purchased_phone_number_id"
     )
+
+    # Call forwarding state
+    business_forwarding_enabled: bool = Field(default=False)
+    after_hours_enabled: bool = Field(default=False)
+    last_after_hours_update: Optional[datetime] = None
+    business_forwarding_confirmed_at: Optional[datetime] = None
+    after_hours_last_enabled_at: Optional[datetime] = None
+    after_hours_last_disabled_at: Optional[datetime] = None
+    forwarding_failure_reason: Optional[str] = None
+    last_forwarding_update: Optional[datetime] = None
     
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -151,6 +161,16 @@ class Realtor(SQLModel, table=True):
         default=None, 
         foreign_key="purchasedphonenumber.purchased_phone_number_id"
     )
+
+    # Call forwarding state
+    business_forwarding_enabled: bool = Field(default=False)
+    after_hours_enabled: bool = Field(default=False)
+    last_after_hours_update: Optional[datetime] = None
+    business_forwarding_confirmed_at: Optional[datetime] = None
+    after_hours_last_enabled_at: Optional[datetime] = None
+    after_hours_last_disabled_at: Optional[datetime] = None
+    forwarding_failure_reason: Optional[str] = None
+    last_forwarding_update: Optional[datetime] = None
     
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -346,6 +366,21 @@ class PurchasedPhoneNumber(SQLModel, table=True):
         back_populates="purchased_phone_number",
         sa_relationship_kwargs={"foreign_keys": "[Realtor.purchased_phone_number_id]"}
     )
+
+
+class CallForwardingEvent(SQLModel, table=True):
+    """Audit log for call forwarding state changes."""
+    event_id: Optional[int] = Field(default=None, primary_key=True)
+    target_user_type: str = Field(index=True)  # property_manager or realtor
+    target_user_id: int = Field(index=True)
+    action: str  # e.g., business_enable, after_hours_on, after_hours_off, state_update
+    initiated_by_user_type: str
+    initiated_by_user_id: int
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)  # Allows storing dial codes, frontend context, etc.
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:

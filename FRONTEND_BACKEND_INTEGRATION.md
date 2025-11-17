@@ -13,7 +13,8 @@ Complete API documentation for integrating the frontend with the Leasap Backend 
 5. [Property Management](#-property-management)
 6. [Listing Uploads](#-listing-uploads)
 7. [Phone Number System](#-phone-number-request--assignment-system)
-8. [Admin Endpoints](#-admin-endpoints-tech-team)
+8. [Call Forwarding Controls](#-call-forwarding-controls-pm--realtor)
+9. [Admin Endpoints](#-admin-endpoints-tech-team)
 
 ---
 
@@ -354,7 +355,13 @@ async function bookDemo(formData) {
     {
       "realtor_id": 5,
       "name": "Sarah Johnson",
-      "email": "sarah@example.com"
+      "email": "sarah@example.com",
+      "twilio_number": "+14125551234",
+      "forwarding_state": {
+        "business_forwarding_enabled": true,
+        "after_hours_enabled": false,
+        "last_after_hours_update": "2024-01-15T17:00:00Z"
+      }
     }
   ]
 }
@@ -389,7 +396,12 @@ async function bookDemo(formData) {
   "purchased_phone_number_id": 1,
   "phone_number": "+14125551234",
   "assigned_to_type": "realtor",
-  "assigned_to_id": 5
+  "assigned_to_id": 5,
+  "forwarding_state": {
+    "business_forwarding_enabled": false,
+    "after_hours_enabled": false,
+    "last_after_hours_update": null
+  }
 }
 ```
 
@@ -560,9 +572,166 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
   "twilio_number": "+14125551234",
   "twilio_sid": "PN...",
   "user_type": "property_manager",
-  "user_id": 1
+  "user_id": 1,
+  "forwarding_state": {
+    "business_forwarding_enabled": true,
+    "business_forwarding_active": true,
+    "business_forwarding_confirmed_at": "2024-01-10T15:30:00Z",
+    "after_hours_enabled": false,
+    "after_hours_active": false,
+    "after_hours_last_enabled_at": null,
+    "after_hours_last_disabled_at": "2024-02-10T09:05:00Z",
+    "last_after_hours_update": "2024-02-10T09:05:00Z",
+    "last_forwarding_update": "2024-02-10T09:05:00Z",
+    "forwarding_failure_reason": null
+  }
 }
 ```
+
+---
+
+## 📲 Call Forwarding Controls (PM & Realtor)
+
+Property managers and their realtors keep their SIM-based carrier numbers, but we still need to drive calls into VAPI (Twilio bot) when certain conditions are met. Since carriers expose forwarding only via GSM/USSD dial codes, the frontend simply opens the dialer with pre-filled codes. Your backend responsibilities are:
+
+1. **Expose each PM/realtor’s `bot_number` (Twilio DID)** via `GET /my-number` (self) and existing management endpoints (for realtors that a PM manages). The frontend uses that value to build carrier codes dynamically.
+2. **Persist forwarding state** per user so the UI can show which modes are “enabled.” Suggested schema additions:
+   - `business_forwarding_enabled` (boolean, default `false`, set to `true` after the PM confirms one-time setup)
+   - `after_hours_enabled` (boolean, toggled daily)
+   - `last_after_hours_update` (timestamp, optional, helps with UX hints)
+3. **Provide a lightweight state update endpoint**:
+
+   ```
+   PATCH /call-forwarding-state
+   {
+     "after_hours_enabled": true,   // or false
+     "business_forwarding_enabled": true // optional future use
+   }
+   ```
+
+   - Auth required.
+   - Applies to the authenticated PM, or to a specific realtor if `realtor_id` is provided and owned by that PM.
+   - The endpoint should only change database flags; carriers are controlled entirely by the dial codes below.
+
+### Carrier Compatibility Testing
+
+Use the built-in matrix to render QA checklists:
+
+```http
+GET /call-forwarding-carriers
+```
+
+```json
+{
+  "carriers": ["AT&T", "Verizon", "T-Mobile", "Mint", "Metro", "Google Fi"]
+}
+```
+
+Each time we onboard a new PM, run through this list (or as many carriers as the team uses) to verify the GSM codes perform as expected. Record discrepancies so Support can coach PMs with carrier-specific notes.
+
+### Frontend Button Mapping
+
+| Button Label | Purpose | Dial Sequence | When Used | Backend UI Flag |
+|--------------|---------|--------------|-----------|-----------------|
+| Enable Business Hours Forwarding (One-Time Setup) | Conditional “no-answer” forwarding so missed calls route to the bot after 25s | `**61*${botNumber}**25#` | Run once per PM/realtor | Sets `business_forwarding_enabled = true` |
+| Enable After-Hours Mode (Forward All Calls) | Every incoming call goes straight to the bot | `**21*${botNumber}#` | Daily at 5pm (or when manually enabling) | Sets `after_hours_enabled = true` |
+| Disable After-Hours Mode (Back to Normal) | Remove full forwarding while keeping conditional forwarding | `##21#` | Daily at 9am (or when resuming live phone) | Sets `after_hours_enabled = false` |
+
+> `botNumber` is the Twilio DID returned by the backend. Include the leading `+1`. Example: `+18885551234`.
+
+### API Reference
+
+**Get forwarding state (self or managed realtor)**  
+`GET /call-forwarding-state?realtor_id=<optional>`  
+Auth required. If `realtor_id` is omitted, the authenticated user’s state is returned. `realtor_id` is only allowed for property managers and must belong to them.
+
+**Response**
+```json
+{
+  "user_type": "property_manager",
+  "user_id": 12,
+  "twilio_number": "+18885551234",
+  "twilio_sid": "PNabc...",
+  "forwarding_state": {
+    "business_forwarding_enabled": true,
+    "business_forwarding_active": true,
+    "business_forwarding_confirmed_at": "2024-01-10T15:30:00Z",
+    "after_hours_enabled": false,
+    "after_hours_active": false,
+    "after_hours_last_enabled_at": null,
+    "after_hours_last_disabled_at": "2024-02-10T09:05:00Z",
+    "last_after_hours_update": "2024-02-10T09:05:00Z",
+    "last_forwarding_update": "2024-02-10T09:05:00Z",
+    "forwarding_failure_reason": null
+  }
+}
+```
+
+**Update forwarding state**  
+`PATCH /call-forwarding-state`
+
+**Request**
+```json
+{
+  "after_hours_enabled": true,
+  "business_forwarding_enabled": true,
+  "realtor_id": 99,          // Optional; only PMs can set this
+  "notes": "Enabled after-hours from dashboard",
+  "confirmation_status": "success",  // "success" | "failure" | "pending"
+  "failure_reason": "Carrier busy tone" // Only when confirmation_status = "failure"
+}
+```
+
+At least one of `after_hours_enabled`, `business_forwarding_enabled`, or `confirmation_status` must be present. When `realtor_id` is set, the PM must own that realtor. The endpoint simply flips database flags; carriers are controlled solely via dial codes. Setting `confirmation_status` lets the backend know whether the carrier confirmed or rejected the dial code so Support can react (and optionally triggers an internal SMS alert if configured).
+
+**Response**
+```json
+{
+  "message": "Forwarding state updated",
+  "user_type": "realtor",
+  "user_id": 99,
+  "forwarding_state": {
+    "business_forwarding_enabled": true,
+    "business_forwarding_active": true,
+    "business_forwarding_confirmed_at": "2024-02-01T22:05:00Z",
+    "after_hours_enabled": true,
+    "after_hours_active": true,
+    "after_hours_last_enabled_at": "2024-02-01T22:05:00Z",
+    "after_hours_last_disabled_at": "2024-02-01T09:00:00Z",
+    "last_after_hours_update": "2024-02-01T22:05:00Z",
+    "last_forwarding_update": "2024-02-01T22:05:00Z",
+    "forwarding_failure_reason": null
+  }
+}
+```
+
+> **Rate limiting:** Backend enforces a default limit of `CALL_FORWARDING_RATE_LIMIT_PER_HOUR` (10 by default) updates per user per hour. If the UI receives HTTP 429, show a friendly “you’ve toggled too many times, please wait” toast.
+
+> **Error handling:** When `confirmation_status` is `"failure"`, include a human-readable `failure_reason`. The backend stores it and returns it in `forwarding_state.forwarding_failure_reason` so the UI can surface troubleshooting tips.
+
+### Example Workflow
+
+1. **Initial setup:** PM opens dashboard, sees “Business Hours Forwarding” card. Backend reports `business_forwarding_enabled = false`, so the button is highlighted. When the PM taps the button, the frontend:
+   - Generates `**61*${botNumber}**25#`
+   - Opens the device dialer via `tel:` link (no backend call here)
+   - Once the PM confirms success, the frontend calls `PATCH /call-forwarding-state` with `{ "business_forwarding_enabled": true }`
+
+2. **Daily after-hours toggle:**
+   - At 5pm, PM presses “Enable After-Hours Mode.” Frontend triggers `tel:**21*${botNumber}#`, then `PATCH /call-forwarding-state` with `{ "after_hours_enabled": true }`.
+   - At 9am, PM uses “Disable After-Hours Mode.” Frontend triggers `tel:##21#`, then `PATCH /call-forwarding-state` with `{ "after_hours_enabled": false }`.
+
+3. **Realtor assignment:** When a PM assigns a bot number to a realtor (`POST /assign-phone-number`), store the `bot_number` relationship and initialize the forwarding flags for that realtor. The PM-facing UI should query both the realtor profile and the `forwarding_state` so the PM can walk their realtor through the exact same buttons/codes.
+
+### Implementation Tips
+
+- No carrier APIs are required; do not attempt to automate the GSM codes server-side.
+- `bot_number` should mirror the value Twilio/VAPI expects for inbound routing. If you support regional numbers, return the exact E.164 string to avoid formatting errors.
+- Consider adding an audit log table (`call_forwarding_events`) capturing the user, action (`business_enable`, `after_hours_on`, `after_hours_off`), timestamp, and optional notes so Support can troubleshoot.
+- The backend already persists these audit entries in `call_forwarding_events`, so Support can filter by `target_user_type`/`target_user_id` to confirm when a PM toggled a mode.
+- For mobile apps, use the native deep link format (`tel:${encodedCode}`); for web, `<a href="tel:**61*+18885551234**25#">`.
+- Frontend should display clear success instructions (e.g., “Tap call, wait for carrier confirmation tone, then return to the app”). Backend can return these copy strings as part of `/call-forwarding-state` if you want server-driven UX.
+- **Security guardrails:** The backend validates Twilio numbers (E.164 format) before responding, so disable the three dialer buttons if `twilio_number` is missing. Rate limit errors (HTTP 429) indicate the PM toggled more than the configured hourly allowance—surface a non-blocking alert and retry later.
+- **User feedback:** After the dial code completes, call `PATCH /call-forwarding-state` with `confirmation_status`. For failures, pass `failure_reason` and show `forwarding_state.forwarding_failure_reason` in the UI until the next success. Success responses may trigger an internal SMS alert for Support, so you don’t need to page them manually.
 
 ---
 

@@ -32,8 +32,9 @@ from fastapi.responses import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
-from typing import Union, Optional
-from datetime import datetime
+import re
+from typing import Union, Optional, Dict, Any
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 import json
 import os
@@ -46,7 +47,7 @@ from google_auth_oauthlib.flow import Flow
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from sqlmodel import select, Session
-from sqlalchemy import update
+from sqlalchemy import update, func
 from sqlalchemy.orm.attributes import flag_modified
 
 # Local imports
@@ -63,6 +64,9 @@ from config import (
     DAILY_LIMIT,
     TWILIO_PHONE_NUMBER,
     SCOPES,
+    CALL_FORWARDING_RATE_LIMIT_PER_HOUR,
+    FORWARDING_ALERT_NUMBER,
+    FORWARDING_ALERT_FROM_NUMBER,
 )
 
 load_dotenv()
@@ -158,6 +162,9 @@ if TWILIO_ACCOUNT_SID1 and TWILIO_AUTH_TOKEN1:
     except Exception as e:
         print(f"⚠️  Failed to initialize Twilio client 1: {e}")
 
+CALL_FORWARDING_CARRIERS = ["AT&T", "Verizon", "T-Mobile", "Mint", "Metro", "Google Fi"]
+BOT_NUMBER_REGEX = re.compile(r"^\+1\d{10}$")
+
 # ============================================================================
 # GLOBAL SERVICES
 # ============================================================================
@@ -195,6 +202,188 @@ class VapiRequest(BaseModel):
 class UnassignPhoneNumberRequest(BaseModel):
     """Request model for unassigning a phone number."""
     purchased_phone_number_id: int
+
+
+class CallForwardingStateUpdate(BaseModel):
+    """Request model for updating call forwarding state."""
+    after_hours_enabled: Optional[bool] = None
+    business_forwarding_enabled: Optional[bool] = None
+    realtor_id: Optional[int] = None  # Only allowed for PMs
+    notes: Optional[str] = None
+    confirmation_status: Optional[str] = None  # "success", "failure", "pending"
+    failure_reason: Optional[str] = None
+
+
+def _serialize_forwarding_state(user_record) -> Dict[str, Optional[Union[bool, str]]]:
+    """Normalize forwarding state for JSON responses."""
+    if not user_record:
+        return {
+            "business_forwarding_enabled": False,
+            "after_hours_enabled": False,
+            "last_after_hours_update": None,
+            "business_forwarding_active": False,
+            "after_hours_active": False,
+            "last_forwarding_update": None,
+            "business_forwarding_confirmed_at": None,
+            "after_hours_last_enabled_at": None,
+            "after_hours_last_disabled_at": None,
+            "forwarding_failure_reason": None,
+        }
+    last_update = getattr(user_record, "last_forwarding_update", None) or getattr(
+        user_record, "last_after_hours_update", None
+    )
+    state = {
+        "business_forwarding_enabled": bool(getattr(user_record, "business_forwarding_enabled", False)),
+        "after_hours_enabled": bool(getattr(user_record, "after_hours_enabled", False)),
+        "last_after_hours_update": getattr(user_record, "last_after_hours_update", None).isoformat()
+        if getattr(user_record, "last_after_hours_update", None)
+        else None,
+        "business_forwarding_confirmed_at": getattr(user_record, "business_forwarding_confirmed_at", None).isoformat()
+        if getattr(user_record, "business_forwarding_confirmed_at", None)
+        else None,
+        "after_hours_last_enabled_at": getattr(user_record, "after_hours_last_enabled_at", None).isoformat()
+        if getattr(user_record, "after_hours_last_enabled_at", None)
+        else None,
+        "after_hours_last_disabled_at": getattr(user_record, "after_hours_last_disabled_at", None).isoformat()
+        if getattr(user_record, "after_hours_last_disabled_at", None)
+        else None,
+        "forwarding_failure_reason": getattr(user_record, "forwarding_failure_reason", None),
+        "last_forwarding_update": last_update.isoformat() if last_update else None,
+    }
+    state["business_forwarding_active"] = state["business_forwarding_enabled"]
+    state["after_hours_active"] = state["after_hours_enabled"]
+    return state
+
+
+def _reset_forwarding_state(user_record):
+    """Reset forwarding flags when numbers change."""
+    if not user_record:
+        return
+    user_record.business_forwarding_enabled = False
+    user_record.after_hours_enabled = False
+    user_record.last_after_hours_update = None
+    user_record.business_forwarding_confirmed_at = None
+    user_record.after_hours_last_enabled_at = None
+    user_record.after_hours_last_disabled_at = None
+    user_record.forwarding_failure_reason = None
+    user_record.last_forwarding_update = None
+
+
+def _normalize_bot_number(number: Optional[str]) -> Optional[str]:
+    """Treat placeholders like 'TBD' as missing."""
+    if not number:
+        return None
+    stripped = number.strip()
+    if not stripped or stripped.upper() == "TBD":
+        return None
+    return stripped
+
+
+def _validate_bot_number_or_422(number: Optional[str], *, field_name: str = "bot number") -> str:
+    normalized = _normalize_bot_number(number)
+    if not normalized:
+        raise HTTPException(status_code=422, detail=f"{field_name} is not configured")
+    if not BOT_NUMBER_REGEX.match(normalized):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be in E.164 format (e.g., +18885551234). Got: {normalized}",
+        )
+    return normalized
+
+
+def _log_forwarding_event(
+    session: Session,
+    *,
+    target_user_type: str,
+    target_user_id: int,
+    action: str,
+    initiated_by_user_type: str,
+    initiated_by_user_id: int,
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    """Persist a CallForwardingEvent record."""
+    event = CallForwardingEvent(
+        target_user_type=target_user_type,
+        target_user_id=target_user_id,
+        action=action,
+        initiated_by_user_type=initiated_by_user_type,
+        initiated_by_user_id=initiated_by_user_id,
+        metadata=metadata or {},
+    )
+    session.add(event)
+
+
+def _enforce_forwarding_rate_limit(session: Session, target_type: str, target_id: int):
+    """Prevent excessive toggles within a short window."""
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    total = session.exec(
+        select(func.count(CallForwardingEvent.event_id))
+        .where(CallForwardingEvent.target_user_type == target_type)
+        .where(CallForwardingEvent.target_user_id == target_id)
+        .where(CallForwardingEvent.created_at >= cutoff)
+    ).one()
+    event_count = total[0] if isinstance(total, tuple) else total
+    if event_count and event_count >= CALL_FORWARDING_RATE_LIMIT_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many forwarding updates in the last hour. Please wait before trying again.",
+        )
+
+
+def _notify_forwarding_status_via_sms(message: str):
+    """Send SMS notification to internal number when forwarding state changes."""
+    if not FORWARDING_ALERT_NUMBER or not FORWARDING_ALERT_FROM_NUMBER:
+        return
+    client = twillio_client1 or twillio_client
+    if not client:
+        return
+    try:
+        client.messages.create(
+            body=message,
+            from_=FORWARDING_ALERT_FROM_NUMBER,
+            to=FORWARDING_ALERT_NUMBER,
+        )
+    except Exception as sms_error:
+        print(f"⚠️  Failed to send forwarding SMS alert: {sms_error}")
+
+
+def _resolve_forwarding_target(
+    session: Session,
+    requester: Dict[str, Any],
+    realtor_id: Optional[int] = None,
+):
+    """Return (record, target_type) for forwarding operations."""
+    requester_type = requester.get("user_type")
+    requester_id = requester.get("id")
+
+    if realtor_id is not None:
+        if requester_type != "property_manager":
+            raise HTTPException(
+                status_code=403,
+                detail="Only Property Managers can manage realtor forwarding state",
+            )
+        realtor = session.get(Realtor, realtor_id)
+        if not realtor:
+            raise HTTPException(status_code=404, detail="Realtor not found")
+        if realtor.property_manager_id != requester_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only manage forwarding for your own realtors",
+            )
+        return realtor, "realtor"
+
+    if requester_type == "property_manager":
+        record = session.get(PropertyManager, requester_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Property Manager not found")
+        return record, "property_manager"
+    elif requester_type == "realtor":
+        record = session.get(Realtor, requester_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Realtor not found")
+        return record, "realtor"
+
+    raise HTTPException(status_code=400, detail="Unsupported user type")
 
 
 # ------------------ CreateCustomer ----------------#
@@ -3271,6 +3460,8 @@ def get_purchased_phone_numbers(
                     "realtor_id": r.realtor_id,
                     "name": r.name,
                     "email": r.email,
+                    "twilio_number": _normalize_bot_number(r.twilio_contact),
+                    "forwarding_state": _serialize_forwarding_state(r),
                 }
                 for r in realtors
             ],
@@ -3309,6 +3500,7 @@ def assign_phone_number(
         )
     
     with Session(engine) as session:
+        target_forwarding_owner = None
         # Verify the purchased number belongs to this PM
         purchased_number = session.get(PurchasedPhoneNumber, purchased_phone_number_id)
         if not purchased_number:
@@ -3325,6 +3517,10 @@ def assign_phone_number(
                 status_code=400,
                 detail=f"Phone number is not available for assignment (current status: {purchased_number.status})"
             )
+        validated_number = _validate_bot_number_or_422(
+            purchased_number.phone_number,
+            field_name="Purchased phone number",
+        )
         
         # Unassign any previous assignment
         if assign_to_type == "property_manager":
@@ -3351,8 +3547,10 @@ def assign_phone_number(
                         session.add(old_pn)
                 
                 pm.purchased_phone_number_id = purchased_phone_number_id
-                pm.twilio_contact = purchased_number.phone_number
+                pm.twilio_contact = validated_number
                 pm.twilio_sid = purchased_number.twilio_sid
+                _reset_forwarding_state(pm)
+                target_forwarding_owner = pm
                 session.add(pm)
                 # Mark the object as modified to ensure SQLAlchemy detects the change
                 flag_modified(pm, "twilio_contact")
@@ -3396,8 +3594,10 @@ def assign_phone_number(
             
             # Assign to realtor
             realtor.purchased_phone_number_id = purchased_phone_number_id
-            realtor.twilio_contact = purchased_number.phone_number
+            realtor.twilio_contact = validated_number
             realtor.twilio_sid = purchased_number.twilio_sid
+            _reset_forwarding_state(realtor)
+            target_forwarding_owner = realtor
             session.add(realtor)
             # Mark the object as modified to ensure SQLAlchemy detects the change
             flag_modified(realtor, "twilio_contact")
@@ -3454,6 +3654,7 @@ def assign_phone_number(
             "assigned_to_type": purchased_number.assigned_to_type,
             "assigned_to_id": purchased_number.assigned_to_id,
             "assigned_at": purchased_number.assigned_at.isoformat() if purchased_number.assigned_at else None,
+            "forwarding_state": _serialize_forwarding_state(target_forwarding_owner) if target_forwarding_owner else None,
         })
 
 
@@ -3514,6 +3715,7 @@ def unassign_phone_number(
             
             # Unassign from current assignee
             phone_number_str = str(purchased_number.phone_number)
+            previous_assignee_name = None
             
             if purchased_number.assigned_to_type == "property_manager" and purchased_number.assigned_to_id:
                 pm = session.get(PropertyManager, purchased_number.assigned_to_id)
@@ -3521,7 +3723,9 @@ def unassign_phone_number(
                     pm.purchased_phone_number_id = None
                     pm.twilio_contact = "TBD"
                     pm.twilio_sid = None
+                    _reset_forwarding_state(pm)
                     session.add(pm)
+                    previous_assignee_name = pm.name
             
             elif purchased_number.assigned_to_type == "realtor" and purchased_number.assigned_to_id:
                 realtor = session.get(Realtor, purchased_number.assigned_to_id)
@@ -3535,7 +3739,9 @@ def unassign_phone_number(
                     realtor.purchased_phone_number_id = None
                     realtor.twilio_contact = "TBD"
                     realtor.twilio_sid = None
+                    _reset_forwarding_state(realtor)
                     session.add(realtor)
+                    previous_assignee_name = realtor.name
             
             # Mark number as available
             purchased_number.status = "available"
@@ -3556,17 +3762,6 @@ def unassign_phone_number(
                     status_code=500,
                     detail=f"Database error: Failed to save changes. {str(db_error)}"
                 )
-            
-            # Get the name of who it was assigned to (for response message)
-            previous_assignee_name = None
-            if purchased_number.assigned_to_type == "realtor" and purchased_number.assigned_to_id:
-                # We already have the realtor object from above
-                if realtor:
-                    previous_assignee_name = realtor.name
-            elif purchased_number.assigned_to_type == "property_manager" and purchased_number.assigned_to_id:
-                # We already have the PM object from above
-                if pm:
-                    previous_assignee_name = pm.name
             
             # Return response matching the format of assign-phone-number endpoint
             # Ensure all values are JSON-serializable
@@ -4004,17 +4199,204 @@ def get_my_number(user_data: dict = Depends(get_current_user_data)):
         if not user_record:
             raise HTTPException(status_code=404, detail=f"{user_type.title()} not found")
         
-        if not user_record.twilio_contact:
-            raise HTTPException(
-                status_code=404,
-                detail="You haven't purchased a phone number yet! Use the /buy-number endpoint to purchase one."
+        try:
+            bot_number = _validate_bot_number_or_422(
+                getattr(user_record, "twilio_contact", None),
+                field_name="Twilio number",
             )
-        
+        except HTTPException as exc:
+            if exc.status_code == 422:
+                raise HTTPException(
+                    status_code=404,
+                    detail="You haven't purchased a phone number yet! Use the /buy-number endpoint to purchase one."
+                ) from exc
+            raise
+
         return JSONResponse(content={
-            "twilio_number": user_record.twilio_contact,
+            "twilio_number": bot_number,
             "twilio_sid": user_record.twilio_sid,
             "user_type": user_type,
             "user_id": user_id,
+            "forwarding_state": _serialize_forwarding_state(user_record),
+        })
+
+
+@app.get("/call-forwarding-state")
+def get_call_forwarding_state(
+    realtor_id: Optional[int] = None,
+    user_data: dict = Depends(get_current_user_data),
+):
+    """Return forwarding state for current user or a managed realtor."""
+    with Session(engine) as session:
+        target_record, target_type = _resolve_forwarding_target(session, user_data, realtor_id)
+        target_id = (
+            target_record.property_manager_id
+            if target_type == "property_manager"
+            else target_record.realtor_id
+        )
+
+        raw_number = getattr(target_record, "twilio_contact", None)
+        bot_number = _normalize_bot_number(raw_number)
+        if bot_number and not BOT_NUMBER_REGEX.match(bot_number):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Twilio number must be in E.164 format. Got: {bot_number}",
+            )
+
+        return JSONResponse(content={
+            "user_type": target_type,
+            "user_id": target_id,
+            "twilio_number": bot_number,
+            "twilio_sid": target_record.twilio_sid,
+            "forwarding_state": _serialize_forwarding_state(target_record),
+        })
+
+
+@app.get("/call-forwarding-carriers")
+def list_call_forwarding_carriers():
+    """Provide the recommended carrier testing matrix for the frontend."""
+    return {"carriers": CALL_FORWARDING_CARRIERS}
+
+
+@app.patch("/call-forwarding-state")
+def update_call_forwarding_state(
+    payload: CallForwardingStateUpdate,
+    user_data: dict = Depends(get_current_user_data),
+):
+    """Persist the UI state for business-hours and after-hours forwarding."""
+    if (
+        payload.after_hours_enabled is None
+        and payload.business_forwarding_enabled is None
+        and payload.confirmation_status is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least one of after_hours_enabled, business_forwarding_enabled, or confirmation_status",
+        )
+
+    requester_type = user_data.get("user_type")
+    requester_id = user_data.get("id")
+
+    confirmation_status = None
+    if payload.confirmation_status:
+        normalized_status = payload.confirmation_status.lower()
+        if normalized_status not in {"success", "failure", "pending"}:
+            raise HTTPException(
+                status_code=400,
+                detail="confirmation_status must be one of: success, failure, pending",
+            )
+        confirmation_status = normalized_status
+
+    with Session(engine) as session:
+        target_record, target_type = _resolve_forwarding_target(session, user_data, payload.realtor_id)
+        target_id = (
+            target_record.property_manager_id
+            if target_type == "property_manager"
+            else target_record.realtor_id
+        )
+
+        _enforce_forwarding_rate_limit(session, target_type, target_id)
+
+        state_changes: Dict[str, Any] = {}
+        now = datetime.utcnow()
+
+        if payload.business_forwarding_enabled is not None:
+            if target_record.business_forwarding_enabled != payload.business_forwarding_enabled:
+                target_record.business_forwarding_enabled = payload.business_forwarding_enabled
+                if not payload.business_forwarding_enabled:
+                    target_record.business_forwarding_confirmed_at = None
+                state_changes["business_forwarding_enabled"] = payload.business_forwarding_enabled
+
+        if payload.after_hours_enabled is not None:
+            if target_record.after_hours_enabled != payload.after_hours_enabled:
+                target_record.after_hours_enabled = payload.after_hours_enabled
+                target_record.last_after_hours_update = now
+                state_changes["after_hours_enabled"] = payload.after_hours_enabled
+                state_changes["last_after_hours_update"] = now.isoformat()
+                if not payload.after_hours_enabled:
+                    target_record.after_hours_last_disabled_at = now
+                    state_changes["after_hours_last_disabled_at"] = now.isoformat()
+
+        sms_message = None
+        if confirmation_status is not None:
+            state_changes["confirmation_status"] = confirmation_status
+
+            if confirmation_status == "success":
+                target_record.forwarding_failure_reason = None
+                if target_record.business_forwarding_enabled:
+                    target_record.business_forwarding_confirmed_at = now
+                    state_changes["business_forwarding_confirmed_at"] = now.isoformat()
+                if target_record.after_hours_enabled:
+                    target_record.after_hours_last_enabled_at = now
+                    state_changes["after_hours_last_enabled_at"] = now.isoformat()
+                sms_message = (
+                    f"✅ Forwarding success for {target_type} "
+                    f"{getattr(target_record, 'name', target_id)} at {now.isoformat()}."
+                )
+            elif confirmation_status == "failure":
+                failure_reason = payload.failure_reason or "Carrier did not confirm forwarding."
+                target_record.forwarding_failure_reason = failure_reason
+                state_changes["forwarding_failure_reason"] = failure_reason
+                sms_message = (
+                    f"⚠️ Forwarding failure for {target_type} "
+                    f"{getattr(target_record, 'name', target_id)}: {failure_reason}"
+                )
+                _log_forwarding_event(
+                    session,
+                    target_user_type=target_type,
+                    target_user_id=target_id,
+                    action="forwarding_state_error",
+                    initiated_by_user_type=requester_type,
+                    initiated_by_user_id=requester_id,
+                    metadata={
+                        "notes": payload.notes,
+                        "failure_reason": failure_reason,
+                        "for_realtor_id": payload.realtor_id,
+                    },
+                )
+            else:
+                # Pending state keeps previous confirmation timestamps but notes the new intent
+                if payload.failure_reason:
+                    target_record.forwarding_failure_reason = payload.failure_reason
+                    state_changes["forwarding_failure_reason"] = payload.failure_reason
+
+        if not state_changes:
+            return JSONResponse(content={
+                "message": "No changes applied",
+                "user_type": target_type,
+                "user_id": target_id,
+                "forwarding_state": _serialize_forwarding_state(target_record),
+            })
+
+        target_record.last_forwarding_update = now
+        state_changes["last_forwarding_update"] = now.isoformat()
+
+        session.add(target_record)
+        _log_forwarding_event(
+            session,
+            target_user_type=target_type,
+            target_user_id=target_id,
+            action="forwarding_state_update",
+            initiated_by_user_type=requester_type,
+            initiated_by_user_id=requester_id,
+            metadata={
+                "changes": state_changes,
+                "notes": payload.notes,
+                "for_realtor_id": payload.realtor_id,
+            },
+        )
+
+        session.commit()
+        session.refresh(target_record)
+
+        if sms_message:
+            _notify_forwarding_status_via_sms(sms_message)
+
+        return JSONResponse(content={
+            "message": "Forwarding state updated",
+            "user_type": target_type,
+            "user_id": target_id,
+            "forwarding_state": _serialize_forwarding_state(target_record),
         })
 
 
