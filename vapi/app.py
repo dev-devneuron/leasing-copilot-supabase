@@ -47,7 +47,7 @@ from google_auth_oauthlib.flow import Flow
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from sqlmodel import select, Session
-from sqlalchemy import update, func
+from sqlalchemy import update, func, or_
 from sqlalchemy.orm.attributes import flag_modified
 
 # Local imports
@@ -281,31 +281,50 @@ def _normalize_bot_number(number: Optional[str]) -> Optional[str]:
 
 def _get_or_sync_twilio_number(session: Session, user_record):
     """Ensure user record has a valid Twilio number, falling back to assigned purchased numbers."""
-    current_number = _normalize_bot_number(getattr(user_record, "twilio_contact", None))
-    if current_number and BOT_NUMBER_REGEX.match(current_number):
-        return current_number
-
     purchased_id = getattr(user_record, "purchased_phone_number_id", None)
     purchased = session.get(PurchasedPhoneNumber, purchased_id) if purchased_id else None
 
-    # For legacy data, fall back to the purchased number that is assigned via assigned_to_type/id
-    if not purchased:
-        if isinstance(user_record, PropertyManager):
-            assigned_type = "property_manager"
-            target_id = user_record.property_manager_id
-        else:
-            assigned_type = "realtor"
-            target_id = user_record.realtor_id
+    if isinstance(user_record, PropertyManager):
+        assigned_type = "property_manager"
+        target_id = user_record.property_manager_id
+    else:
+        assigned_type = "realtor"
+        target_id = user_record.realtor_id
 
-        purchased = session.exec(
+    def _lookup_assigned_number():
+        return session.exec(
             select(PurchasedPhoneNumber)
             .where(PurchasedPhoneNumber.assigned_to_type == assigned_type)
             .where(PurchasedPhoneNumber.assigned_to_id == target_id)
             .order_by(PurchasedPhoneNumber.assigned_at.desc())
         ).first()
 
-        if purchased and not purchased_id:
-            user_record.purchased_phone_number_id = purchased.purchased_phone_number_id
+    if not purchased:
+        purchased = _lookup_assigned_number()
+
+    # If the PM never explicitly assigned the bot number to themselves,
+    # auto-promote the oldest number they own so the dashboard always has a callbot DID.
+    if not purchased and isinstance(user_record, PropertyManager):
+        purchased = session.exec(
+            select(PurchasedPhoneNumber)
+            .where(PurchasedPhoneNumber.property_manager_id == user_record.property_manager_id)
+            .where(
+                or_(
+                    PurchasedPhoneNumber.assigned_to_type.is_(None),
+                    PurchasedPhoneNumber.assigned_to_type == "property_manager",
+                )
+            )
+            .order_by(
+                PurchasedPhoneNumber.assigned_at.asc().nulls_last(),
+                PurchasedPhoneNumber.purchased_at.asc(),
+            )
+        ).first()
+
+        if purchased:
+            purchased.assigned_to_type = "property_manager"
+            purchased.assigned_to_id = user_record.property_manager_id
+            purchased.status = "assigned"
+            purchased.assigned_at = datetime.utcnow()
 
     if not purchased:
         return None
@@ -314,13 +333,33 @@ def _get_or_sync_twilio_number(session: Session, user_record):
     if not fallback_number or not BOT_NUMBER_REGEX.match(fallback_number):
         return None
 
-    # Sync the record so future reads return the normalized number
-    user_record.twilio_contact = fallback_number
-    if not getattr(user_record, "twilio_sid", None):
+    updated = False
+
+    if user_record.purchased_phone_number_id != purchased.purchased_phone_number_id:
+        user_record.purchased_phone_number_id = purchased.purchased_phone_number_id
+        updated = True
+
+    if user_record.twilio_contact != fallback_number:
+        user_record.twilio_contact = fallback_number
+        updated = True
+
+    if not getattr(user_record, "twilio_sid", None) or user_record.twilio_sid != purchased.twilio_sid:
         user_record.twilio_sid = purchased.twilio_sid
-    session.add(user_record)
-    session.commit()
-    session.refresh(user_record)
+        updated = True
+
+    if purchased.assigned_to_type != assigned_type or purchased.assigned_to_id != target_id:
+        purchased.assigned_to_type = assigned_type
+        purchased.assigned_to_id = target_id
+        purchased.status = "assigned"
+        purchased.assigned_at = datetime.utcnow()
+        updated = True
+
+    if updated:
+        session.add(user_record)
+        session.add(purchased)
+        session.commit()
+        session.refresh(user_record)
+
     return fallback_number
 
 

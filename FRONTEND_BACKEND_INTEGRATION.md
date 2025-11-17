@@ -592,13 +592,15 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
 
 Behind the scenes, the backend also scans the `purchased_phone_numbers` table for entries whose `assigned_to_type/assigned_to_id` match the user (even if `purchased_phone_number_id` on the profile is `NULL`) and automatically links it. That means any PM who was assigned a number prior to this release will be brought up-to-date the first time the dashboard hits `GET /my-number` or `GET /call-forwarding-state`.
 
+> **Property Manager fallback:** If tech has added at least one purchased number for a PM but never explicitly assigned it (i.e., it just lives in the PM’s inventory), the backend now auto-promotes the oldest available number to the PM on first load. It updates both the PM record (`purchased_phone_number_id`, `twilio_contact`) and the `PurchasedPhoneNumber` row (`assigned_to_type = property_manager`). So the dashboard only needs to call `GET /my-number`; there’s no extra “assign to myself” step for existing customers.
+
 ---
 
 ## 📲 Call Forwarding Controls (PM & Realtor)
 
 Property managers and their realtors keep their SIM-based carrier numbers, but we still need to drive calls into VAPI (Twilio bot) when certain conditions are met. Since carriers expose forwarding only via GSM/USSD dial codes, the frontend simply opens the dialer with pre-filled codes. Your backend responsibilities are:
 
-1. **Expose each PM/realtor’s `bot_number` (Twilio DID)** via `GET /my-number` (self) and existing management endpoints (for realtors that a PM manages). The frontend uses that value to build carrier codes dynamically.
+1. **Expose each PM/realtor’s `bot_number` (Twilio DID)** via `GET /my-number` (self) and existing management endpoints (for realtors that a PM manages). The backend derives this strictly from `purchased_phone_numbers` (the official callbot pool)—it never falls back to whatever Twilio number was stored historically on the profile—so you can trust it’s the bot we provisioned.
 2. **Persist forwarding state** per user so the UI can show which modes are “enabled.” Suggested schema additions:
    - `business_forwarding_enabled` (boolean, default `false`, set to `true` after the PM confirms one-time setup)
    - `after_hours_enabled` (boolean, toggled daily)
