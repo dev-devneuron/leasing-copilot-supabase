@@ -279,6 +279,34 @@ def _normalize_bot_number(number: Optional[str]) -> Optional[str]:
     return stripped
 
 
+def _get_or_sync_twilio_number(session: Session, user_record):
+    """Ensure user record has a valid Twilio number, falling back to assigned purchased numbers."""
+    current_number = _normalize_bot_number(getattr(user_record, "twilio_contact", None))
+    if current_number and BOT_NUMBER_REGEX.match(current_number):
+        return current_number
+
+    purchased_id = getattr(user_record, "purchased_phone_number_id", None)
+    if not purchased_id:
+        return None
+
+    purchased = session.get(PurchasedPhoneNumber, purchased_id)
+    if not purchased:
+        return None
+
+    fallback_number = _normalize_bot_number(purchased.phone_number)
+    if not fallback_number or not BOT_NUMBER_REGEX.match(fallback_number):
+        return None
+
+    # Sync the record so future reads return the normalized number
+    user_record.twilio_contact = fallback_number
+    if not getattr(user_record, "twilio_sid", None):
+        user_record.twilio_sid = purchased.twilio_sid
+    session.add(user_record)
+    session.commit()
+    session.refresh(user_record)
+    return fallback_number
+
+
 def _validate_bot_number_or_422(number: Optional[str], *, field_name: str = "bot number") -> str:
     normalized = _normalize_bot_number(number)
     if not normalized:
@@ -4199,18 +4227,12 @@ def get_my_number(user_data: dict = Depends(get_current_user_data)):
         if not user_record:
             raise HTTPException(status_code=404, detail=f"{user_type.title()} not found")
         
-        try:
-            bot_number = _validate_bot_number_or_422(
-                getattr(user_record, "twilio_contact", None),
-                field_name="Twilio number",
+        bot_number = _get_or_sync_twilio_number(session, user_record)
+        if not bot_number:
+            raise HTTPException(
+                status_code=404,
+                detail="You haven't purchased a phone number yet! Use the /buy-number endpoint to purchase one."
             )
-        except HTTPException as exc:
-            if exc.status_code == 422:
-                raise HTTPException(
-                    status_code=404,
-                    detail="You haven't purchased a phone number yet! Use the /buy-number endpoint to purchase one."
-                ) from exc
-            raise
 
         return JSONResponse(content={
             "twilio_number": bot_number,
@@ -4235,8 +4257,7 @@ def get_call_forwarding_state(
             else target_record.realtor_id
         )
 
-        raw_number = getattr(target_record, "twilio_contact", None)
-        bot_number = _normalize_bot_number(raw_number)
+        bot_number = _get_or_sync_twilio_number(session, target_record)
         if bot_number and not BOT_NUMBER_REGEX.match(bot_number):
             raise HTTPException(
                 status_code=422,

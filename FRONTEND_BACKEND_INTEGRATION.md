@@ -588,6 +588,8 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
 }
 ```
 
+> **Heads-up:** If a legacy PM/realtor already has a purchased number but their profile still shows the “Assign a phone number to unlock forwarding controls” banner, simply call `GET /my-number` once after assignment. The backend now auto-synchronizes the stored Twilio DID from the assigned `purchased_phone_number_id`, so existing users don’t need to be re-saved manually.
+
 ---
 
 ## 📲 Call Forwarding Controls (PM & Realtor)
@@ -732,6 +734,7 @@ At least one of `after_hours_enabled`, `business_forwarding_enabled`, or `confir
 - Frontend should display clear success instructions (e.g., “Tap call, wait for carrier confirmation tone, then return to the app”). Backend can return these copy strings as part of `/call-forwarding-state` if you want server-driven UX.
 - **Security guardrails:** The backend validates Twilio numbers (E.164 format) before responding, so disable the three dialer buttons if `twilio_number` is missing. Rate limit errors (HTTP 429) indicate the PM toggled more than the configured hourly allowance—surface a non-blocking alert and retry later.
 - **User feedback:** After the dial code completes, call `PATCH /call-forwarding-state` with `confirmation_status`. For failures, pass `failure_reason` and show `forwarding_state.forwarding_failure_reason` in the UI until the next success. Success responses may trigger an internal SMS alert for Support, so you don’t need to page them manually.
+- **Legacy data:** When an assigned number exists but `twilio_number` is still null (older records), the backend auto-fills it by reading the linked `purchased_phone_number`. Triggering `GET /my-number` (or any forwarding endpoint) will hydrate the value, so the “Assign a phone number” prompt should disappear without manual DB edits.
 
 ---
 
