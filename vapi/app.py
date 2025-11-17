@@ -299,7 +299,7 @@ def _log_forwarding_event(
     action: str,
     initiated_by_user_type: str,
     initiated_by_user_id: int,
-    metadata: Optional[Dict[str, Any]] = None,
+    event_metadata: Optional[Dict[str, Any]] = None,
 ):
     """Persist a CallForwardingEvent record."""
     event = CallForwardingEvent(
@@ -308,7 +308,7 @@ def _log_forwarding_event(
         action=action,
         initiated_by_user_type=initiated_by_user_type,
         initiated_by_user_id=initiated_by_user_id,
-        metadata=metadata or {},
+        event_metadata=event_metadata or {},
     )
     session.add(event)
 
@@ -4348,7 +4348,7 @@ def update_call_forwarding_state(
                     action="forwarding_state_error",
                     initiated_by_user_type=requester_type,
                     initiated_by_user_id=requester_id,
-                    metadata={
+                    event_metadata={
                         "notes": payload.notes,
                         "failure_reason": failure_reason,
                         "for_realtor_id": payload.realtor_id,
@@ -4379,7 +4379,7 @@ def update_call_forwarding_state(
             action="forwarding_state_update",
             initiated_by_user_type=requester_type,
             initiated_by_user_id=requester_id,
-            metadata={
+            event_metadata={
                 "changes": state_changes,
                 "notes": payload.notes,
                 "for_realtor_id": payload.realtor_id,

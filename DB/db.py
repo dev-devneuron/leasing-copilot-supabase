@@ -376,7 +376,7 @@ class CallForwardingEvent(SQLModel, table=True):
     action: str  # e.g., business_enable, after_hours_on, after_hours_off, state_update
     initiated_by_user_type: str
     initiated_by_user_id: int
-    metadata: Optional[Dict[str, Any]] = Field(
+    event_metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         sa_column=Column(JSONB)  # Allows storing dial codes, frontend context, etc.
     )
