@@ -590,6 +590,8 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
 
 > **Heads-up:** If a legacy PM/realtor already has a purchased number but their profile still shows the “Assign a phone number to unlock forwarding controls” banner, simply call `GET /my-number` once after assignment. The backend now auto-synchronizes the stored Twilio DID from the assigned `purchased_phone_number_id`, so existing users don’t need to be re-saved manually.
 
+Behind the scenes, the backend also scans the `purchased_phone_numbers` table for entries whose `assigned_to_type/assigned_to_id` match the user (even if `purchased_phone_number_id` on the profile is `NULL`) and automatically links it. That means any PM who was assigned a number prior to this release will be brought up-to-date the first time the dashboard hits `GET /my-number` or `GET /call-forwarding-state`.
+
 ---
 
 ## 📲 Call Forwarding Controls (PM & Realtor)

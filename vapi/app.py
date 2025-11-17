@@ -286,10 +286,27 @@ def _get_or_sync_twilio_number(session: Session, user_record):
         return current_number
 
     purchased_id = getattr(user_record, "purchased_phone_number_id", None)
-    if not purchased_id:
-        return None
+    purchased = session.get(PurchasedPhoneNumber, purchased_id) if purchased_id else None
 
-    purchased = session.get(PurchasedPhoneNumber, purchased_id)
+    # For legacy data, fall back to the purchased number that is assigned via assigned_to_type/id
+    if not purchased:
+        if isinstance(user_record, PropertyManager):
+            assigned_type = "property_manager"
+            target_id = user_record.property_manager_id
+        else:
+            assigned_type = "realtor"
+            target_id = user_record.realtor_id
+
+        purchased = session.exec(
+            select(PurchasedPhoneNumber)
+            .where(PurchasedPhoneNumber.assigned_to_type == assigned_type)
+            .where(PurchasedPhoneNumber.assigned_to_id == target_id)
+            .order_by(PurchasedPhoneNumber.assigned_at.desc())
+        ).first()
+
+        if purchased and not purchased_id:
+            user_record.purchased_phone_number_id = purchased.purchased_phone_number_id
+
     if not purchased:
         return None
 
