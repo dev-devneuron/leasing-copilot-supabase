@@ -294,7 +294,7 @@ def _get_or_sync_twilio_number(session: Session, user_record):
     def _lookup_assigned_number():
         return session.exec(
             select(PurchasedPhoneNumber)
-            .where(PurchasedPhoneNumber.assigned_to_type == assigned_type)
+            .where(func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")) == assigned_type)
             .where(PurchasedPhoneNumber.assigned_to_id == target_id)
             .order_by(PurchasedPhoneNumber.assigned_at.desc())
         ).first()
