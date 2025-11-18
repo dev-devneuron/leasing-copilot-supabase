@@ -4876,7 +4876,9 @@ async def vapi_webhook_hyphen(request: Request):
     """
     try:
         payload = await request.json()
-        print(f"📞 Received VAPI webhook: {json.dumps(payload, indent=2)[:500]}...")
+        
+        # Extract call ID from headers first (VAPI sends it in x-call-id header)
+        call_id = request.headers.get("x-call-id") or request.headers.get("X-Call-Id")
         
         # Extract message object (VAPI wraps in "message")
         message = payload.get("message", {})
@@ -4885,18 +4887,18 @@ async def vapi_webhook_hyphen(request: Request):
             message = payload
         
         message_type = message.get("type", "")
-        if message_type != "end-of-call-report":
-            print(f"⚠️  Received non end-of-call-report message type: {message_type}")
+        print(f"📞 VAPI webhook received - Event type: {message_type or 'unknown'}, Call ID: {call_id or 'not found'}")
         
-        # Extract call ID - try multiple locations
-        call_id = (
-            payload.get("id") or 
-            payload.get("callId") or 
-            message.get("id") or 
-            message.get("callId") or
-            payload.get("call_id") or
-            message.get("call_id")
-        )
+        # Extract call ID from payload if not in headers
+        if not call_id:
+            call_id = (
+                payload.get("id") or 
+                payload.get("callId") or 
+                message.get("id") or 
+                message.get("callId") or
+                payload.get("call_id") or
+                message.get("call_id")
+            )
         
         # If no call_id, try to extract from artifact or fetch from VAPI
         if not call_id:
@@ -4924,18 +4926,25 @@ async def vapi_webhook_hyphen(request: Request):
         artifact = message.get("artifact", {})
         if artifact:
             messages = artifact.get("messages", [])
+            print(f"📋 Found artifact with {len(messages)} messages")
             if messages:
                 # Build transcript from messages array
                 for msg in messages:
                     role = msg.get("role", "")
                     msg_text = msg.get("message", "")
-                    if msg_text and role in ["user", "bot", "assistant"]:
+                    if msg_text and role in ["user", "bot", "assistant", "system"]:
                         # Format: "Role: message"
                         transcript_parts.append(f"{role.capitalize()}: {msg_text}")
                 
                 if transcript_parts:
                     transcript = "\n\n".join(transcript_parts)
                     print(f"📄 Extracted transcript from {len(messages)} messages: {len(transcript)} chars")
+                else:
+                    print(f"⚠️  No transcript parts extracted from {len(messages)} messages")
+            else:
+                print(f"⚠️  Artifact found but messages array is empty")
+        else:
+            print(f"⚠️  No artifact found in message object")
         
         # Extract summary from analysis
         analysis = message.get("analysis", {})
@@ -4943,6 +4952,10 @@ async def vapi_webhook_hyphen(request: Request):
             summary = analysis.get("summary", "")
             if summary:
                 print(f"📋 Extracted summary: {len(summary)} chars")
+            else:
+                print(f"⚠️  Analysis found but no summary")
+        else:
+            print(f"⚠️  No analysis found in message object")
         
         # Combine transcript and summary
         if transcript and summary:

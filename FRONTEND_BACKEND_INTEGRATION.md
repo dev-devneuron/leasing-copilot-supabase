@@ -1117,7 +1117,7 @@ This endpoint returns:
 To enable call records functionality, run this SQL migration:
 
 ```sql
--- Create call_records table
+-- Create call_records table (if it doesn't exist)
 CREATE TABLE IF NOT EXISTS callrecord (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     call_id TEXT NOT NULL UNIQUE,
@@ -1133,6 +1133,10 @@ CREATE TABLE IF NOT EXISTS callrecord (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- IMPORTANT: If table already exists, add missing call_metadata column
+ALTER TABLE callrecord 
+ADD COLUMN IF NOT EXISTS call_metadata JSONB;
+
 -- Create indexes for performance
 CREATE UNIQUE INDEX IF NOT EXISTS idx_callrecord_call_id_unique ON callrecord(call_id);
 CREATE INDEX IF NOT EXISTS idx_callrecord_realtor_number ON callrecord(realtor_number);
@@ -1142,6 +1146,7 @@ CREATE INDEX IF NOT EXISTS idx_callrecord_created_at ON callrecord(created_at DE
 
 **Note:** 
 - The `call_id` field has a UNIQUE constraint to prevent duplicate imports
+- **If you're getting "column call_metadata does not exist" error, run the `ALTER TABLE` statement above**
 - The backend will automatically create this table on startup if using SQLModel's `create_all()`, but running the migration manually ensures proper indexes are in place
 - The schema includes indexes on `realtor_number`, `caller_number`, and `created_at` for efficient queries
 
