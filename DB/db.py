@@ -397,7 +397,7 @@ class CallRecord(SQLModel, table=True):
     call_duration: Optional[int] = None  # Duration in seconds
     call_status: Optional[str] = None  # e.g., "ended", "failed", "no-answer"
     caller_number: Optional[str] = None  # Phone number of the caller
-    metadata: Optional[Dict[str, Any]] = Field(
+    call_metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         sa_column=Column(JSONB)  # Store additional VAPI event data
     )

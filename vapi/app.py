@@ -4671,9 +4671,9 @@ async def vapi_webhook(request: Request):
             
             # Store any additional metadata
             if data:
-                if call_record.metadata is None:
-                    call_record.metadata = {}
-                call_record.metadata.update({
+                if call_record.call_metadata is None:
+                    call_record.call_metadata = {}
+                call_record.call_metadata.update({
                     "last_event_type": event_type,
                     "last_event_at": now.isoformat(),
                     **{k: v for k, v in data.items() if k not in ["callId", "id", "to", "from", "transcript", "url", "recordingUrl"]}
@@ -4864,7 +4864,7 @@ def get_call_record_detail(
             "call_duration": call_record.call_duration,
             "call_status": call_record.call_status,
             "caller_number": call_record.caller_number,
-            "metadata": call_record.metadata,
+            "metadata": call_record.call_metadata,
             "created_at": call_record.created_at.isoformat() if call_record.created_at else None,
             "updated_at": call_record.updated_at.isoformat() if call_record.updated_at else None,
         })
