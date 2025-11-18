@@ -4574,27 +4574,447 @@ def update_call_forwarding_state(
         })
 
 
-@app.post("/vapi/webhook")
-async def vapi_webhook(request: Request):
+def _fetch_phone_number_from_vapi(phone_number_id: str) -> Optional[str]:
+    """Fetch phone number from VAPI API using phoneNumberId."""
+    if not VAPI_API_KEY or not phone_number_id:
+        return None
+    
+    try:
+        response = requests.get(
+            f"{VAPI_BASE_URL}/phone-number/{phone_number_id}",
+            headers={"Authorization": f"Bearer {VAPI_API_KEY}"},
+            timeout=10.0
+        )
+        if response.status_code == 200:
+            phone_data = response.json()
+            number = phone_data.get("number") or phone_data.get("phoneNumber")
+            return _normalize_bot_number(number) if number else None
+    except Exception as e:
+        print(f"⚠️  Failed to fetch phone number {phone_number_id} from VAPI: {e}")
+    return None
+
+
+def _fetch_call_details_from_vapi(call_id: str) -> Optional[dict]:
     """
-    VAPI webhook endpoint to receive call events (transcripts, recordings, call status).
-    This endpoint is called by VAPI when events occur during a call.
+    Fetch full call details from VAPI API including recording URL and transcript.
+    This is needed because recordings are NOT sent in webhooks.
+    """
+    if not VAPI_API_KEY or not call_id:
+        return None
+    
+    try:
+        # Try /calls/{callId} first (as per user specification), then other variations as fallback
+        endpoints = [
+            f"{VAPI_BASE_URL}/calls/{call_id}",  # Primary: GET https://api.vapi.ai/calls/{callId}
+            f"{VAPI_BASE_URL}/v1/call/{call_id}",
+            f"{VAPI_BASE_URL}/call/{call_id}",
+        ]
+        
+        for url in endpoints:
+            try:
+                response = requests.get(
+                    url,
+                    headers={"Authorization": f"Bearer {VAPI_API_KEY}"},
+                    timeout=10.0
+                )
+                if response.status_code == 200:
+                    return response.json()
+            except Exception as e:
+                print(f"⚠️  Failed to fetch from {url}: {e}")
+                continue
+        
+        print(f"⚠️  Could not fetch call {call_id} from any VAPI endpoint")
+        return None
+    except Exception as e:
+        print(f"⚠️  Error fetching call details for {call_id}: {e}")
+        return None
+
+
+def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[CallRecord]:
+    """Import a single call from VAPI API response into database."""
+    call_id = call_data.get("id") or call_data.get("callId")
+    if not call_id:
+        print("⚠️  Skipping call without ID")
+        return None
+    
+    # Check if already exists
+    existing = session.exec(
+        select(CallRecord).where(CallRecord.call_id == call_id)
+    ).first()
+    
+    if existing:
+        # Update existing record with any new data
+        updated = False
+        
+        # Update transcript if available and not already set
+        transcript = call_data.get("transcript")
+        if transcript and not existing.transcript:
+            existing.transcript = transcript
+            updated = True
+        
+        # Update recording URL if available and not already set
+        recording_url = call_data.get("recordingUrl") or call_data.get("recording")
+        if recording_url and not existing.recording_url:
+            existing.recording_url = recording_url
+            updated = True
+        
+        # Update other fields
+        if call_data.get("status") and call_data["status"] != existing.call_status:
+            existing.call_status = call_data["status"]
+            updated = True
+        
+        if call_data.get("duration") and call_data["duration"] != existing.call_duration:
+            existing.call_duration = call_data["duration"]
+            updated = True
+        
+        if updated:
+            existing.updated_at = datetime.utcnow()
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+        
+        return existing
+    
+    # Extract phone number
+    realtor_number = None
+    
+    # Try direct fields
+    realtor_number = call_data.get("toNumber") or call_data.get("to") or call_data.get("phoneNumber")
+    
+    # Try phoneNumberId lookup
+    if not realtor_number:
+        phone_number_id = call_data.get("phoneNumberId")
+        if phone_number_id:
+            realtor_number = _fetch_phone_number_from_vapi(phone_number_id)
+    
+    # Try nested phoneNumber object
+    if not realtor_number:
+        phone_number_obj = call_data.get("phoneNumber")
+        if isinstance(phone_number_obj, dict):
+            realtor_number = phone_number_obj.get("number") or phone_number_obj.get("phoneNumber")
+        elif isinstance(phone_number_obj, str):
+            realtor_number = phone_number_obj
+    
+    # Normalize
+    realtor_number = _normalize_bot_number(realtor_number) if realtor_number else "unknown"
+    
+    # Extract other data
+    transcript = call_data.get("transcript")
+    recording_url = call_data.get("recordingUrl") or call_data.get("recording")
+    call_status = call_data.get("status", "ended")
+    call_duration = call_data.get("duration")
+    caller_number = call_data.get("fromNumber") or call_data.get("from")
+    
+    # If recording URL is missing, try to fetch from VAPI API
+    if not recording_url and call_id:
+        print(f"📞 Fetching recording URL for call {call_id} from VAPI API...")
+        call_details = _fetch_call_details_from_vapi(call_id)
+        if call_details:
+            recording_url = call_details.get("recordingUrl") or call_details.get("recording")
+            # Also update transcript if missing
+            if not transcript:
+                transcript = call_details.get("transcript")
+            # Update other fields if missing
+            if not call_duration:
+                call_duration = call_details.get("duration")
+            if not caller_number:
+                caller_number = call_details.get("fromNumber") or call_details.get("from")
+    
+    # Parse created_at if available
+    created_at = datetime.utcnow()
+    if call_data.get("createdAt"):
+        try:
+            created_at_str = str(call_data["createdAt"])
+            # Handle ISO format: "2024-01-15T10:30:00Z" or "2024-01-15T10:30:00.000Z"
+            if "Z" in created_at_str:
+                created_at_str = created_at_str.replace("Z", "+00:00")
+            elif "+" not in created_at_str and "-" in created_at_str[-6:]:
+                # Already has timezone
+                pass
+            created_at = datetime.fromisoformat(created_at_str)
+        except Exception as e:
+            print(f"⚠️  Could not parse createdAt '{call_data.get('createdAt')}': {e}")
+            # Keep default datetime.utcnow()
+    
+    # Create new record
+    call_record = CallRecord(
+        id=uuid.uuid4(),
+        call_id=call_id,
+        realtor_number=realtor_number,
+        transcript=transcript,
+        recording_url=recording_url,
+        call_status=call_status,
+        call_duration=call_duration,
+        caller_number=_normalize_bot_number(caller_number) if caller_number else None,
+        call_metadata={
+            "imported_from_vapi": True,
+            "imported_at": datetime.utcnow().isoformat(),
+            "vapi_data": {k: v for k, v in call_data.items() if k not in ["id", "callId", "transcript", "recordingUrl", "recording"]}
+        },
+        created_at=created_at,
+    )
+    
+    session.add(call_record)
+    session.commit()
+    session.refresh(call_record)
+    
+    return call_record
+
+
+@app.post("/admin/import-vapi-calls")
+def import_vapi_calls(
+    limit: Optional[int] = 100,
+    offset: Optional[int] = 0,
+    # In production, add admin authentication here
+):
+    """
+    Admin endpoint to import historical calls from VAPI API.
+    Fetches calls from VAPI and imports them into the database.
+    """
+    if not VAPI_API_KEY:
+        raise HTTPException(status_code=500, detail="VAPI_API_KEY not configured")
+    
+    try:
+        # Fetch calls from VAPI API
+        # Try /v1/calls first (as per user example), fallback to /v1/call if needed
+        url = f"{VAPI_BASE_URL}/v1/calls"
+        params = {"limit": min(limit, 100), "offset": offset}
+        headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+        
+        print(f"📞 Fetching calls from VAPI (limit={params['limit']}, offset={params['offset']})...")
+        response = requests.get(url, headers=headers, params=params, timeout=30.0)
+        
+        if response.status_code != 200:
+            # Try alternative endpoint if /v1/calls fails
+            if response.status_code == 404 and "/v1/calls" in url:
+                print("⚠️  /v1/calls not found, trying /v1/call...")
+                url = f"{VAPI_BASE_URL}/v1/call"
+                response = requests.get(url, headers=headers, params=params, timeout=30.0)
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"VAPI API error: {response.text}"
+                )
+        
+        calls_data = response.json()
+        
+        # Handle both array and object responses
+        if isinstance(calls_data, dict):
+            calls = calls_data.get("calls", []) or calls_data.get("data", [])
+            total = calls_data.get("total") or len(calls)
+        else:
+            calls = calls_data if isinstance(calls_data, list) else []
+            total = len(calls)
+        
+        imported_count = 0
+        updated_count = 0
+        skipped_count = 0
+        errors = []
+        
+        with Session(engine) as session:
+            for call_data in calls:
+                try:
+                    existing = session.exec(
+                        select(CallRecord).where(CallRecord.call_id == (call_data.get("id") or call_data.get("callId")))
+                    ).first()
+                    
+                    result = _import_call_from_vapi_data(call_data, session)
+                    if result:
+                        if existing:
+                            updated_count += 1
+                        else:
+                            imported_count += 1
+                    else:
+                        skipped_count += 1
+                except Exception as e:
+                    error_msg = f"Error importing call {call_data.get('id', 'unknown')}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    errors.append(error_msg)
+                    skipped_count += 1
+        
+        return JSONResponse(content={
+            "message": "Import completed",
+            "total_fetched": len(calls),
+            "total_available": total,
+            "imported": imported_count,
+            "updated": updated_count,
+            "skipped": skipped_count,
+            "errors": errors[:10],  # Limit error messages
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error importing VAPI calls: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
+
+@app.post("/vapi-webhook")
+async def vapi_webhook_hyphen(request: Request):
+    """
+    VAPI webhook endpoint (with hyphen) - receives end-of-call-report with transcript.
+    This is the actual endpoint VAPI calls: https://leasing-copilot-mvp.onrender.com/vapi-webhook
+    
+    VAPI sends transcripts in end-of-call-report webhooks.
+    Audio recordings are NOT sent in webhooks - must be fetched from VAPI API.
     """
     try:
         payload = await request.json()
-        event_type = payload.get("type")
-        data = payload.get("data", {})
-        call_id = data.get("callId") or data.get("id")
-        realtor_number = data.get("to") or data.get("phoneNumberId")
+        print(f"📞 Received VAPI webhook (end-of-call-report): {payload.get('type', 'unknown')}")
         
-        # Extract phone number from various possible fields
+        # Handle end-of-call-report - this contains the transcript
+        call_id = payload.get("id") or payload.get("callId")
+        if not call_id:
+            print("⚠️  VAPI webhook received without call_id")
+            return {"status": "ok", "message": "No call_id provided"}
+        
+        # Extract transcript from end-of-call-report
+        transcript = payload.get("transcript")
+        
+        # Extract phone number
+        realtor_number = None
+        realtor_number = payload.get("toNumber") or payload.get("to") or payload.get("phoneNumber")
+        
         if not realtor_number:
-            # Try to get from phoneNumber object
-            phone_number_obj = data.get("phoneNumber", {})
+            phone_number_id = payload.get("phoneNumberId")
+            if phone_number_id:
+                phone_number_obj = payload.get("phoneNumber")
+                if isinstance(phone_number_obj, dict):
+                    realtor_number = phone_number_obj.get("number") or phone_number_obj.get("phoneNumber")
+                elif isinstance(phone_number_obj, str):
+                    realtor_number = phone_number_obj
+                else:
+                    realtor_number = _fetch_phone_number_from_vapi(phone_number_id)
+        
+        realtor_number = _normalize_bot_number(realtor_number) if realtor_number else "unknown"
+        
+        with Session(engine) as session:
+            # Find or create call record
+            call_record = session.exec(
+                select(CallRecord).where(CallRecord.call_id == call_id)
+            ).first()
+            
+            if not call_record:
+                call_record = CallRecord(
+                    id=uuid.uuid4(),
+                    call_id=call_id,
+                    realtor_number=realtor_number,
+                    live_transcript_chunks=[],
+                )
+                session.add(call_record)
+            
+            now = datetime.utcnow()
+            updated = False
+            
+            # Store transcript from end-of-call-report
+            if transcript:
+                print(f"📄 Storing transcript for call {call_id}: {len(transcript)} chars")
+                call_record.transcript = transcript
+                updated = True
+            
+            # Store call status and other metadata
+            call_record.call_status = payload.get("status", "ended")
+            call_record.call_duration = payload.get("duration")
+            caller_number = payload.get("fromNumber") or payload.get("from")
+            if caller_number:
+                call_record.caller_number = _normalize_bot_number(caller_number)
+            
+            # Fetch recording URL from VAPI API (recordings are NOT in webhook)
+            if not call_record.recording_url:
+                print(f"🎙️  Fetching recording URL for call {call_id} from VAPI API...")
+                call_details = _fetch_call_details_from_vapi(call_id)
+                if call_details:
+                    recording_url = call_details.get("recordingUrl") or call_details.get("recording")
+                    if recording_url:
+                        call_record.recording_url = recording_url
+                        print(f"✅ Recording URL fetched: {recording_url}")
+                        updated = True
+                    # Also update transcript if it wasn't in webhook
+                    if not call_record.transcript:
+                        call_record.transcript = call_details.get("transcript")
+                        updated = True
+            
+            # Store metadata
+            if call_record.call_metadata is None:
+                call_record.call_metadata = {}
+            call_record.call_metadata.update({
+                "webhook_type": "end-of-call-report",
+                "last_webhook_at": now.isoformat(),
+                **{k: v for k, v in payload.items() if k not in ["id", "callId", "transcript", "recordingUrl", "recording", "toNumber", "fromNumber"]}
+            })
+            
+            call_record.updated_at = now
+            updated = True
+            
+            if updated:
+                session.commit()
+                session.refresh(call_record)
+        
+        return {"status": "ok", "call_id": call_id}
+    
+    except Exception as e:
+        print(f"❌ Error processing VAPI webhook: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/vapi/webhook")
+async def vapi_webhook(request: Request):
+    """
+    VAPI webhook endpoint (alternative path) to receive call events.
+    This endpoint handles various event types including real-time transcripts.
+    
+    VAPI webhook payload structure:
+    - Top-level: {"type": "event.type", "data": {...}}
+    - Or direct call object: {"id": "...", "phoneNumberId": "...", ...}
+    
+    Note: End-of-call-report with transcript is sent to /vapi-webhook (with hyphen).
+    """
+    try:
+        payload = await request.json()
+        
+        # Handle two possible payload structures
+        if "type" in payload and "data" in payload:
+            # Standard webhook event format
+            event_type = payload.get("type")
+            data = payload.get("data", {})
+            call_id = data.get("callId") or data.get("id") or payload.get("callId")
+        else:
+            # Direct call object (might be sent directly)
+            event_type = payload.get("type", "call.updated")
+            data = payload
+            call_id = data.get("callId") or data.get("id")
+        
+        # Extract phone number - VAPI uses phoneNumberId or phoneNumber object
+        realtor_number = None
+        
+        # Try direct number fields first
+        realtor_number = data.get("toNumber") or data.get("to") or data.get("phoneNumber")
+        
+        # Try phoneNumberId - if it's an ID, look it up from VAPI or extract from phoneNumber object
+        if not realtor_number:
+            phone_number_id = data.get("phoneNumberId") or payload.get("phoneNumberId")
+            if phone_number_id:
+                # Try to extract from phoneNumber object first
+                phone_number_obj = data.get("phoneNumber") or payload.get("phoneNumber")
+                if isinstance(phone_number_obj, dict):
+                    realtor_number = phone_number_obj.get("number") or phone_number_obj.get("phoneNumber")
+                elif isinstance(phone_number_obj, str):
+                    realtor_number = phone_number_obj
+                
+                # If still no number, fetch from VAPI API
+                if not realtor_number:
+                    realtor_number = _fetch_phone_number_from_vapi(phone_number_id)
+        
+        # Try from nested objects
+        if not realtor_number:
+            phone_number_obj = data.get("phoneNumber")
             if isinstance(phone_number_obj, dict):
-                realtor_number = phone_number_obj.get("number") or phone_number_obj.get("id")
-            elif isinstance(phone_number_obj, str):
-                realtor_number = phone_number_obj
+                realtor_number = phone_number_obj.get("number") or phone_number_obj.get("phoneNumber")
         
         # Normalize the phone number
         realtor_number = _normalize_bot_number(realtor_number) if realtor_number else None
@@ -4652,6 +5072,21 @@ async def vapi_webhook(request: Request):
                 call_record.caller_number = data.get("from") or data.get("callerNumber")
                 call_record.updated_at = now
                 updated = True
+                
+                # Fetch recording URL from VAPI API (recordings are NOT in webhooks)
+                if not call_record.recording_url:
+                    print(f"🎙️  Fetching recording URL for call {call_id} from VAPI API...")
+                    call_details = _fetch_call_details_from_vapi(call_id)
+                    if call_details:
+                        recording_url = call_details.get("recordingUrl") or call_details.get("recording")
+                        if recording_url:
+                            call_record.recording_url = recording_url
+                            print(f"✅ Recording URL fetched: {recording_url}")
+                            updated = True
+                        # Also update transcript if it wasn't in webhook
+                        if not call_record.transcript:
+                            call_record.transcript = call_details.get("transcript")
+                            updated = True
             
             elif event_type == "recording.ready":
                 # Audio recording URL

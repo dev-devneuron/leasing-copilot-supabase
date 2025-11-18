@@ -386,7 +386,11 @@ class CallForwardingEvent(SQLModel, table=True):
 class CallRecord(SQLModel, table=True):
     """Stores call records from VAPI including transcripts and recordings."""
     id: Optional[UUID] = Field(default=None, primary_key=True)
-    call_id: str = Field(index=True)  # VAPI call ID
+    call_id: str = Field(
+        index=True,
+        unique=True,
+        sa_column_kwargs={"unique": True}  # Ensure call_id is unique to prevent duplicates
+    )  # VAPI call ID (unique)
     realtor_number: str = Field(index=True)  # Twilio DID that received the call
     recording_url: Optional[str] = None  # MP3 file URL from VAPI
     transcript: Optional[str] = None  # Final transcript text
@@ -396,7 +400,7 @@ class CallRecord(SQLModel, table=True):
     )
     call_duration: Optional[int] = None  # Duration in seconds
     call_status: Optional[str] = None  # e.g., "ended", "failed", "no-answer"
-    caller_number: Optional[str] = None  # Phone number of the caller
+    caller_number: Optional[str] = Field(default=None, index=True)  # Phone number of the caller (indexed for search)
     call_metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         sa_column=Column(JSONB)  # Store additional VAPI event data

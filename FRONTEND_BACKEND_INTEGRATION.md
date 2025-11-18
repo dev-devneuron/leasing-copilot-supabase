@@ -839,23 +839,32 @@ curl -X POST https://your-backend-url.com/admin/add-purchased-number \
 
 VAPI automatically sends call events (transcripts, recordings, call status) to our webhook endpoint. The backend stores these in the database and provides endpoints for PMs and Realtors to view their call history.
 
-### Webhook Endpoint (VAPI → Backend)
+### Webhook Endpoints (VAPI → Backend)
 
-**Endpoint:** `POST /vapi/webhook`  
-**Auth:** None (Public endpoint, called by VAPI)
+**Primary Endpoint:** `POST /vapi-webhook` (with hyphen)  
+**Alternative Endpoint:** `POST /vapi/webhook` (with slash)  
+**Auth:** None (Public endpoints, called by VAPI)
 
-This endpoint receives events from VAPI:
+**Important Notes:**
+- VAPI sends **end-of-call-report** with transcripts to `/vapi-webhook` (with hyphen)
+- **Audio recordings are NOT sent in webhooks** - the backend automatically fetches them from VAPI API
+- The backend fetches recording URLs from VAPI API when a call ends
+
+**Event Types Handled:**
+- `end-of-call-report` - Final transcript when call ends (sent to `/vapi-webhook`)
 - `transcript.created` - Real-time transcript chunks during the call
-- `call.ended` - Final transcript when call ends
-- `recording.ready` - Audio recording URL (MP3)
+- `call.ended` - Call completion event
+- `recording.ready` - Audio recording ready (if sent, though typically not)
 - `call.started` - Call initiation event
 
-The backend automatically:
+**Backend Behavior:**
 - Creates/updates call records in the database
 - Links calls to the correct PM/Realtor based on the Twilio DID
-- Stores transcripts, recordings, and call metadata
+- Stores transcripts from webhooks
+- **Automatically fetches recording URLs from VAPI API** when call ends (recordings not in webhooks)
+- Handles phone number resolution from `phoneNumberId` if needed
 
-**Note:** Configure this URL in your VAPI dashboard webhook settings.
+**Note:** Configure the webhook URL `https://leasing-copilot-mvp.onrender.com/vapi-webhook` in your VAPI dashboard settings.
 
 ### Get Call Records
 
@@ -1003,4 +1012,110 @@ function downloadRecording(recordingUrl, callId) {
 ---
 
 For detailed tech team instructions, see `TECH_TEAM_PHONE_NUMBER_GUIDE.md`
+
+---
+
+## 📥 Import Historical Calls from VAPI
+
+**Endpoint:** `POST /admin/import-vapi-calls?limit=100&offset=0`  
+**Auth:** Admin only (add authentication in production)
+
+This endpoint fetches historical calls from VAPI API and imports them into the database. Useful for backfilling call history.
+
+**Query Parameters:**
+- `limit` (optional): Number of calls to fetch per request (default: 100, max: 100)
+- `offset` (optional): Pagination offset (default: 0)
+
+**Response:**
+```json
+{
+  "message": "Import completed",
+  "total_fetched": 50,
+  "total_available": 150,
+  "imported": 45,
+  "updated": 5,
+  "skipped": 0,
+  "errors": []
+}
+```
+
+**Usage:**
+```javascript
+// Import calls in batches
+async function importAllCalls() {
+  let offset = 0;
+  const limit = 100;
+  let hasMore = true;
+  
+  while (hasMore) {
+    const response = await fetch(`/admin/import-vapi-calls?limit=${limit}&offset=${offset}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${adminToken}`
+      }
+    });
+    
+    const data = await response.json();
+    console.log(`Imported ${data.imported}, Updated ${data.updated}, Skipped ${data.skipped}`);
+    
+    hasMore = data.total_fetched === limit;
+    offset += limit;
+  }
+}
+```
+
+**Features:**
+- Automatically skips duplicate calls (based on `call_id`)
+- Updates existing records with new data (transcripts, recordings)
+- **Fetches recording URLs from VAPI API** (recordings are not in list endpoint, must fetch per call)
+- Fetches phone numbers from VAPI if only `phoneNumberId` is provided
+- Handles pagination for large call histories
+- Preserves original call timestamps from VAPI
+
+**How Recordings Are Fetched:**
+The import function automatically fetches recording URLs from VAPI API using:
+```
+GET https://api.vapi.ai/calls/{callId}
+Authorization: Bearer YOUR_VAPI_API_KEY
+```
+
+This endpoint returns:
+- `recordingUrl` - The audio recording URL (if recording is enabled)
+- `transcript` - The call transcript
+- Call metadata (duration, status, etc.)
+
+---
+
+## 🗄️ Database Migration Required
+
+To enable call records functionality, run this SQL migration:
+
+```sql
+-- Create call_records table
+CREATE TABLE IF NOT EXISTS callrecord (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    call_id TEXT NOT NULL UNIQUE,
+    realtor_number TEXT NOT NULL,
+    recording_url TEXT,
+    transcript TEXT,
+    live_transcript_chunks JSONB,
+    call_duration INTEGER,
+    call_status TEXT,
+    caller_number TEXT,
+    call_metadata JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Create indexes for performance
+CREATE UNIQUE INDEX IF NOT EXISTS idx_callrecord_call_id_unique ON callrecord(call_id);
+CREATE INDEX IF NOT EXISTS idx_callrecord_realtor_number ON callrecord(realtor_number);
+CREATE INDEX IF NOT EXISTS idx_callrecord_caller_number ON callrecord(caller_number);
+CREATE INDEX IF NOT EXISTS idx_callrecord_created_at ON callrecord(created_at DESC);
+```
+
+**Note:** 
+- The `call_id` field has a UNIQUE constraint to prevent duplicate imports
+- The backend will automatically create this table on startup if using SQLModel's `create_all()`, but running the migration manually ensures proper indexes are in place
+- The schema includes indexes on `realtor_number`, `caller_number`, and `created_at` for efficient queries
 
