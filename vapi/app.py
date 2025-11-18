@@ -4860,28 +4860,115 @@ async def vapi_webhook_hyphen(request: Request):
     
     VAPI sends transcripts in end-of-call-report webhooks.
     Audio recordings are NOT sent in webhooks - must be fetched from VAPI API.
+    
+    Payload structure:
+    {
+      "message": {
+        "type": "end-of-call-report",
+        "artifact": {
+          "messages": [...]  // Array of conversation messages
+        },
+        "analysis": {
+          "summary": "..."
+        }
+      }
+    }
     """
     try:
         payload = await request.json()
-        print(f"📞 Received VAPI webhook (end-of-call-report): {payload.get('type', 'unknown')}")
+        print(f"📞 Received VAPI webhook: {json.dumps(payload, indent=2)[:500]}...")
         
-        # Handle end-of-call-report - this contains the transcript
-        call_id = payload.get("id") or payload.get("callId")
+        # Extract message object (VAPI wraps in "message")
+        message = payload.get("message", {})
+        if not message:
+            # Fallback: maybe payload is the message itself
+            message = payload
+        
+        message_type = message.get("type", "")
+        if message_type != "end-of-call-report":
+            print(f"⚠️  Received non end-of-call-report message type: {message_type}")
+        
+        # Extract call ID - try multiple locations
+        call_id = (
+            payload.get("id") or 
+            payload.get("callId") or 
+            message.get("id") or 
+            message.get("callId") or
+            payload.get("call_id") or
+            message.get("call_id")
+        )
+        
+        # If no call_id, try to extract from artifact or fetch from VAPI
         if not call_id:
-            print("⚠️  VAPI webhook received without call_id")
-            return {"status": "ok", "message": "No call_id provided"}
+            # Check if we can get it from the messages or metadata
+            artifact = message.get("artifact", {})
+            if artifact:
+                # Try to get from first message metadata or other fields
+                messages = artifact.get("messages", [])
+                if messages:
+                    # Check if any message has call_id
+                    for msg in messages:
+                        if msg.get("callId") or msg.get("call_id"):
+                            call_id = msg.get("callId") or msg.get("call_id")
+                            break
         
-        # Extract transcript from end-of-call-report
-        transcript = payload.get("transcript")
+        if not call_id:
+            print("⚠️  VAPI webhook received without call_id - will try to match by phone number")
+            # We'll try to match by phone number and timestamp later
         
-        # Extract phone number
+        # Extract transcript from message.artifact.messages
+        transcript = None
+        transcript_parts = []
+        summary = None
+        
+        artifact = message.get("artifact", {})
+        if artifact:
+            messages = artifact.get("messages", [])
+            if messages:
+                # Build transcript from messages array
+                for msg in messages:
+                    role = msg.get("role", "")
+                    msg_text = msg.get("message", "")
+                    if msg_text and role in ["user", "bot", "assistant"]:
+                        # Format: "Role: message"
+                        transcript_parts.append(f"{role.capitalize()}: {msg_text}")
+                
+                if transcript_parts:
+                    transcript = "\n\n".join(transcript_parts)
+                    print(f"📄 Extracted transcript from {len(messages)} messages: {len(transcript)} chars")
+        
+        # Extract summary from analysis
+        analysis = message.get("analysis", {})
+        if analysis:
+            summary = analysis.get("summary", "")
+            if summary:
+                print(f"📋 Extracted summary: {len(summary)} chars")
+        
+        # Combine transcript and summary
+        if transcript and summary:
+            full_transcript = f"{transcript}\n\n---\n\nSummary: {summary}"
+        elif transcript:
+            full_transcript = transcript
+        elif summary:
+            full_transcript = f"Summary: {summary}"
+        else:
+            full_transcript = None
+        
+        # Extract phone number - try multiple locations
         realtor_number = None
-        realtor_number = payload.get("toNumber") or payload.get("to") or payload.get("phoneNumber")
+        realtor_number = (
+            payload.get("toNumber") or 
+            payload.get("to") or 
+            payload.get("phoneNumber") or
+            message.get("toNumber") or
+            message.get("to") or
+            message.get("phoneNumber")
+        )
         
         if not realtor_number:
-            phone_number_id = payload.get("phoneNumberId")
+            phone_number_id = payload.get("phoneNumberId") or message.get("phoneNumberId")
             if phone_number_id:
-                phone_number_obj = payload.get("phoneNumber")
+                phone_number_obj = payload.get("phoneNumber") or message.get("phoneNumber")
                 if isinstance(phone_number_obj, dict):
                     realtor_number = phone_number_obj.get("number") or phone_number_obj.get("phoneNumber")
                 elif isinstance(phone_number_obj, str):
@@ -4891,12 +4978,42 @@ async def vapi_webhook_hyphen(request: Request):
         
         realtor_number = _normalize_bot_number(realtor_number) if realtor_number else "unknown"
         
+        # If we don't have call_id, try to find recent call by phone number and timestamp
+        # or fetch from VAPI API
+        if not call_id and realtor_number != "unknown":
+            # Try to find most recent call for this number without a transcript
+            # This is a fallback - ideally VAPI should send call_id
+            print(f"⚠️  No call_id provided, attempting to match by phone number: {realtor_number}")
+            # We'll create a temporary call_id or try to fetch from VAPI
+            # For now, we'll use a timestamp-based ID as fallback
+            call_id = f"webhook_{int(datetime.utcnow().timestamp() * 1000)}"
+        
         with Session(engine) as session:
-            # Find or create call record
-            call_record = session.exec(
-                select(CallRecord).where(CallRecord.call_id == call_id)
-            ).first()
+            # Try to find existing call record
+            call_record = None
+            if call_id and not call_id.startswith("webhook_"):
+                call_record = session.exec(
+                    select(CallRecord).where(CallRecord.call_id == call_id)
+                ).first()
             
+            # If not found and we have phone number, try to find by phone number and recent timestamp
+            if not call_record and realtor_number != "unknown":
+                # Find most recent call for this number without transcript (within last hour)
+                recent_cutoff = datetime.utcnow() - timedelta(hours=1)
+                recent_call = session.exec(
+                    select(CallRecord)
+                    .where(CallRecord.realtor_number == realtor_number)
+                    .where(CallRecord.created_at >= recent_cutoff)
+                    .where(CallRecord.transcript.is_(None))
+                    .order_by(CallRecord.created_at.desc())
+                    .limit(1)
+                ).first()
+                if recent_call:
+                    call_record = recent_call
+                    call_id = call_record.call_id
+                    print(f"✅ Matched call by phone number: {call_id}")
+            
+            # Create new record if still not found
             if not call_record:
                 call_record = CallRecord(
                     id=uuid.uuid4(),
@@ -4910,32 +5027,62 @@ async def vapi_webhook_hyphen(request: Request):
             updated = False
             
             # Store transcript from end-of-call-report
-            if transcript:
-                print(f"📄 Storing transcript for call {call_id}: {len(transcript)} chars")
-                call_record.transcript = transcript
+            if full_transcript:
+                print(f"📄 Storing transcript for call {call_id}: {len(full_transcript)} chars")
+                call_record.transcript = full_transcript
                 updated = True
             
             # Store call status and other metadata
-            call_record.call_status = payload.get("status", "ended")
-            call_record.call_duration = payload.get("duration")
-            caller_number = payload.get("fromNumber") or payload.get("from")
+            call_record.call_status = message.get("status") or payload.get("status", "ended")
+            
+            # Extract duration from message timestamp if available
+            timestamp = message.get("timestamp")
+            if timestamp:
+                # Convert milliseconds to seconds if needed
+                if timestamp > 1e12:  # Likely milliseconds
+                    timestamp = timestamp / 1000
+                # Store in metadata
+                if call_record.call_metadata is None:
+                    call_record.call_metadata = {}
+                call_record.call_metadata["webhook_timestamp"] = timestamp
+            
+            # Extract caller number if available
+            caller_number = (
+                payload.get("fromNumber") or 
+                payload.get("from") or
+                message.get("fromNumber") or
+                message.get("from")
+            )
             if caller_number:
                 call_record.caller_number = _normalize_bot_number(caller_number)
             
-            # Fetch recording URL from VAPI API (recordings are NOT in webhook)
-            if not call_record.recording_url:
-                print(f"🎙️  Fetching recording URL for call {call_id} from VAPI API...")
-                call_details = _fetch_call_details_from_vapi(call_id)
-                if call_details:
-                    recording_url = call_details.get("recordingUrl") or call_details.get("recording")
-                    if recording_url:
-                        call_record.recording_url = recording_url
-                        print(f"✅ Recording URL fetched: {recording_url}")
-                        updated = True
-                    # Also update transcript if it wasn't in webhook
-                    if not call_record.transcript:
-                        call_record.transcript = call_details.get("transcript")
-                        updated = True
+            # Fetch recording URL and call_id from VAPI API if we don't have it
+            if not call_record.recording_url or (call_id and call_id.startswith("webhook_")):
+                # Try to fetch call details from VAPI
+                # If we have phone number, we might be able to find the call
+                if realtor_number != "unknown":
+                    print(f"🎙️  Fetching call details from VAPI API for number {realtor_number}...")
+                    # Note: We'd need to list calls and match, but for now we'll try with call_id if we have it
+                    if call_id and not call_id.startswith("webhook_"):
+                        call_details = _fetch_call_details_from_vapi(call_id)
+                        if call_details:
+                            recording_url = call_details.get("recordingUrl") or call_details.get("recording")
+                            if recording_url:
+                                call_record.recording_url = recording_url
+                                print(f"✅ Recording URL fetched: {recording_url}")
+                                updated = True
+                            # Update call_id if we got a real one
+                            real_call_id = call_details.get("id") or call_details.get("callId")
+                            if real_call_id and call_id.startswith("webhook_"):
+                                call_record.call_id = real_call_id
+                                call_id = real_call_id
+                                updated = True
+                            # Also update transcript if it wasn't in webhook
+                            if not call_record.transcript:
+                                api_transcript = call_details.get("transcript")
+                                if api_transcript:
+                                    call_record.transcript = api_transcript
+                                    updated = True
             
             # Store metadata
             if call_record.call_metadata is None:
@@ -4943,8 +5090,14 @@ async def vapi_webhook_hyphen(request: Request):
             call_record.call_metadata.update({
                 "webhook_type": "end-of-call-report",
                 "last_webhook_at": now.isoformat(),
-                **{k: v for k, v in payload.items() if k not in ["id", "callId", "transcript", "recordingUrl", "recording", "toNumber", "fromNumber"]}
+                "message_type": message_type,
+                "has_summary": bool(summary),
+                "message_count": len(artifact.get("messages", [])) if artifact else 0,
             })
+            # Store full payload for debugging (limit size)
+            payload_str = json.dumps(payload)
+            if len(payload_str) < 10000:  # Only store if reasonable size
+                call_record.call_metadata["webhook_payload"] = payload
             
             call_record.updated_at = now
             updated = True
@@ -4953,7 +5106,7 @@ async def vapi_webhook_hyphen(request: Request):
                 session.commit()
                 session.refresh(call_record)
         
-        return {"status": "ok", "call_id": call_id}
+        return {"status": "ok", "call_id": call_id, "transcript_stored": bool(full_transcript)}
     
     except Exception as e:
         print(f"❌ Error processing VAPI webhook: {e}")

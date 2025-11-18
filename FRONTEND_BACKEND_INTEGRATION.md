@@ -863,6 +863,32 @@ VAPI automatically sends call events (transcripts, recordings, call status) to o
 - Stores transcripts from webhooks
 - **Automatically fetches recording URLs from VAPI API** when call ends (recordings not in webhooks)
 - Handles phone number resolution from `phoneNumberId` if needed
+- Extracts transcript from `message.artifact.messages` array
+- Combines transcript with summary from `message.analysis.summary`
+
+**End-of-Call-Report Payload Structure:**
+```json
+{
+  "message": {
+    "type": "end-of-call-report",
+    "timestamp": 1763495432536,
+    "artifact": {
+      "messages": [
+        {
+          "role": "user" | "bot" | "assistant",
+          "message": "Message text",
+          "time": 1763495278084,
+          "secondsFromStart": 0
+        }
+      ]
+    },
+    "analysis": {
+      "summary": "Call summary text",
+      "successEvaluation": "true"
+    }
+  }
+}
+```
 
 **Note:** Configure the webhook URL `https://leasing-copilot-mvp.onrender.com/vapi-webhook` in your VAPI dashboard settings.
 
