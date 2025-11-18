@@ -14,7 +14,8 @@ Complete API documentation for integrating the frontend with the Leasap Backend 
 6. [Listing Uploads](#-listing-uploads)
 7. [Phone Number System](#-phone-number-request--assignment-system)
 8. [Call Forwarding Controls](#-call-forwarding-controls-pm--realtor)
-9. [Admin Endpoints](#-admin-endpoints-tech-team)
+9. [Call Records & Transcripts](#-call-records--transcripts)
+10. [Admin Endpoints](#-admin-endpoints-tech-team)
 
 ---
 
@@ -834,21 +835,172 @@ curl -X POST https://your-backend-url.com/admin/add-purchased-number \
 
 ---
 
+## 📞 Call Records & Transcripts
+
+VAPI automatically sends call events (transcripts, recordings, call status) to our webhook endpoint. The backend stores these in the database and provides endpoints for PMs and Realtors to view their call history.
+
+### Webhook Endpoint (VAPI → Backend)
+
+**Endpoint:** `POST /vapi/webhook`  
+**Auth:** None (Public endpoint, called by VAPI)
+
+This endpoint receives events from VAPI:
+- `transcript.created` - Real-time transcript chunks during the call
+- `call.ended` - Final transcript when call ends
+- `recording.ready` - Audio recording URL (MP3)
+- `call.started` - Call initiation event
+
+The backend automatically:
+- Creates/updates call records in the database
+- Links calls to the correct PM/Realtor based on the Twilio DID
+- Stores transcripts, recordings, and call metadata
+
+**Note:** Configure this URL in your VAPI dashboard webhook settings.
+
+### Get Call Records
+
+**Endpoint:** `GET /call-records?limit=50&offset=0`  
+**Auth:** Required
+
+**Query Parameters:**
+- `limit` (optional): Number of records to return (default: 50, max: 100)
+- `offset` (optional): Pagination offset (default: 0)
+
+**Response:**
+```json
+{
+  "call_records": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "call_id": "vapi_call_123",
+      "realtor_number": "+14125551234",
+      "recording_url": "https://storage.vapi.ai/recordings/abc123.mp3",
+      "transcript": "Full conversation transcript...",
+      "call_duration": 180,
+      "call_status": "ended",
+      "caller_number": "+15551234567",
+      "created_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-15T10:33:00Z"
+    }
+  ],
+  "total": 25,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Data Isolation:**
+- **Property Managers:** See all calls for their own number AND all their realtors' numbers
+- **Realtors:** See only calls for their assigned number
+
+### Get Call Record Details
+
+**Endpoint:** `GET /call-records/{call_id}`  
+**Auth:** Required
+
+**Response:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "call_id": "vapi_call_123",
+  "realtor_number": "+14125551234",
+  "recording_url": "https://storage.vapi.ai/recordings/abc123.mp3",
+  "transcript": "Full conversation transcript...",
+  "live_transcript_chunks": [
+    "Hello, I'm interested in...",
+    "Can you tell me about...",
+    "What's the rent for..."
+  ],
+  "call_duration": 180,
+  "call_status": "ended",
+  "caller_number": "+15551234567",
+  "metadata": {
+    "last_event_type": "call.ended",
+    "last_event_at": "2024-01-15T10:33:00Z"
+  },
+  "created_at": "2024-01-15T10:30:00Z",
+  "updated_at": "2024-01-15T10:33:00Z"
+}
+```
+
+**Frontend Implementation:**
+```javascript
+// Get call records list
+async function getCallRecords(limit = 50, offset = 0) {
+  const response = await fetch(`/call-records?limit=${limit}&offset=${offset}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    return data;
+  }
+  throw new Error('Failed to fetch call records');
+}
+
+// Get specific call details
+async function getCallRecordDetail(callId) {
+  const response = await fetch(`/call-records/${callId}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    return data;
+  }
+  throw new Error('Failed to fetch call record');
+}
+
+// Play recording
+function playRecording(recordingUrl) {
+  // Use HTML5 audio player or download link
+  const audio = new Audio(recordingUrl);
+  audio.play();
+}
+
+// Download recording
+function downloadRecording(recordingUrl, callId) {
+  const link = document.createElement('a');
+  link.href = recordingUrl;
+  link.download = `call-${callId}.mp3`;
+  link.click();
+}
+```
+
+**UI Requirements:**
+- Display call records in a table/list with:
+  - Caller number
+  - Date/time
+  - Duration
+  - Status (ended, started, failed)
+  - Actions: View transcript, Play recording, Download recording
+- For PMs: Show which realtor's number received the call
+- Pagination controls for large call histories
+- Search/filter by date range, caller number, or realtor
+
+---
+
 ## 📝 Key Points
 
-- ✅ **Authentication:** All endpoints (except `/book-demo`) require JWT token
+- ✅ **Authentication:** All endpoints (except `/book-demo` and `/vapi/webhook`) require JWT token
 - ✅ **Data Isolation:** PMs only see their data, Realtors only see assigned data
 - ✅ **AI-Powered Uploads:** Supports JSON, CSV, TXT with intelligent parsing
 - ✅ **Phone Number System:** PM requests → Tech adds → PM assigns
 - ✅ **Demo System:** Public booking, admin manages, converts to PM accounts
+- ✅ **Call Records:** Automatic storage of transcripts and recordings from VAPI webhooks
 
 ---
 
 ## 🔗 Base URL
 
-**Production:** `https://your-backend-url.com`  
+**Production:** `https://leasing-copilot-mvp.onrender.com`  
 **Development:** `http://localhost:8000`
 
 ---
 
 For detailed tech team instructions, see `TECH_TEAM_PHONE_NUMBER_GUIDE.md`
+

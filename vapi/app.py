@@ -33,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 import re
+import uuid
 from typing import Union, Optional, Dict, Any
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
@@ -4570,6 +4571,302 @@ def update_call_forwarding_state(
             "user_type": target_type,
             "user_id": target_id,
             "forwarding_state": _serialize_forwarding_state(target_record),
+        })
+
+
+@app.post("/vapi/webhook")
+async def vapi_webhook(request: Request):
+    """
+    VAPI webhook endpoint to receive call events (transcripts, recordings, call status).
+    This endpoint is called by VAPI when events occur during a call.
+    """
+    try:
+        payload = await request.json()
+        event_type = payload.get("type")
+        data = payload.get("data", {})
+        call_id = data.get("callId") or data.get("id")
+        realtor_number = data.get("to") or data.get("phoneNumberId")
+        
+        # Extract phone number from various possible fields
+        if not realtor_number:
+            # Try to get from phoneNumber object
+            phone_number_obj = data.get("phoneNumber", {})
+            if isinstance(phone_number_obj, dict):
+                realtor_number = phone_number_obj.get("number") or phone_number_obj.get("id")
+            elif isinstance(phone_number_obj, str):
+                realtor_number = phone_number_obj
+        
+        # Normalize the phone number
+        realtor_number = _normalize_bot_number(realtor_number) if realtor_number else None
+        
+        if not call_id:
+            print("⚠️  VAPI webhook received without call_id, ignoring")
+            return {"status": "ok", "message": "No call_id provided"}
+        
+        if not realtor_number:
+            print(f"⚠️  VAPI webhook for call {call_id} received without realtor_number, storing with unknown")
+            realtor_number = "unknown"
+        
+        with Session(engine) as session:
+            # Find or create call record
+            call_record = session.exec(
+                select(CallRecord).where(CallRecord.call_id == call_id)
+            ).first()
+            
+            if not call_record:
+                call_record = CallRecord(
+                    id=uuid.uuid4(),
+                    call_id=call_id,
+                    realtor_number=realtor_number,
+                    live_transcript_chunks=[],
+                )
+                session.add(call_record)
+            
+            now = datetime.utcnow()
+            updated = False
+            
+            # Handle different event types
+            if event_type == "transcript.created":
+                # Real-time transcript chunk
+                text = data.get("text") or data.get("transcript")
+                if text:
+                    print(f"📝 Live Transcript for call {call_id}: {text[:100]}...")
+                    if call_record.live_transcript_chunks is None:
+                        call_record.live_transcript_chunks = []
+                    call_record.live_transcript_chunks.append(text)
+                    call_record.updated_at = now
+                    updated = True
+            
+            elif event_type == "call.ended":
+                # Final transcript when call ends
+                final_transcript = data.get("transcript") or data.get("finalTranscript")
+                if final_transcript:
+                    print(f"📄 Final Transcript for call {call_id}: {len(final_transcript)} chars")
+                    call_record.transcript = final_transcript
+                    call_record.updated_at = now
+                    updated = True
+                
+                # Store call status and duration
+                call_record.call_status = "ended"
+                call_record.call_duration = data.get("duration") or data.get("callDuration")
+                call_record.caller_number = data.get("from") or data.get("callerNumber")
+                call_record.updated_at = now
+                updated = True
+            
+            elif event_type == "recording.ready":
+                # Audio recording URL
+                recording_url = data.get("url") or data.get("recordingUrl")
+                if recording_url:
+                    print(f"🎙️  Recording ready for call {call_id}: {recording_url}")
+                    call_record.recording_url = recording_url
+                    call_record.updated_at = now
+                    updated = True
+            
+            elif event_type == "call.started":
+                # Call started
+                call_record.call_status = "started"
+                call_record.caller_number = data.get("from") or data.get("callerNumber")
+                call_record.updated_at = now
+                updated = True
+            
+            # Store any additional metadata
+            if data:
+                if call_record.metadata is None:
+                    call_record.metadata = {}
+                call_record.metadata.update({
+                    "last_event_type": event_type,
+                    "last_event_at": now.isoformat(),
+                    **{k: v for k, v in data.items() if k not in ["callId", "id", "to", "from", "transcript", "url", "recordingUrl"]}
+                })
+                updated = True
+            
+            if updated:
+                session.commit()
+                session.refresh(call_record)
+        
+        return {"status": "ok", "event_type": event_type, "call_id": call_id}
+    
+    except Exception as e:
+        print(f"❌ Error processing VAPI webhook: {e}")
+        import traceback
+        traceback.print_exc()
+        # Still return 200 to prevent VAPI from retrying
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/call-records")
+def get_call_records(
+    user_data: dict = Depends(get_current_user_data),
+    limit: Optional[int] = 50,
+    offset: Optional[int] = 0,
+):
+    """
+    Get call records for the current user (PM or Realtor).
+    - PMs see all calls for themselves AND their realtors
+    - Realtors see only calls for their assigned number
+    """
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if not user_type or not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user data")
+    
+    with Session(engine) as session:
+        # Get the user's bot number(s)
+        accessible_numbers = []
+        
+        if user_type == "property_manager":
+            # PM can see calls for their own number and all their realtors' numbers
+            pm = session.get(PropertyManager, user_id)
+            if not pm:
+                raise HTTPException(status_code=404, detail="Property Manager not found")
+            
+            # Get PM's bot number
+            pm_bot = _get_or_sync_twilio_number(session, pm)
+            if pm_bot:
+                accessible_numbers.append(pm_bot)
+            
+            # Get all realtors' bot numbers
+            realtors = session.exec(
+                select(Realtor).where(Realtor.property_manager_id == user_id)
+            ).all()
+            
+            for realtor in realtors:
+                realtor_bot = _get_or_sync_twilio_number(session, realtor)
+                if realtor_bot:
+                    accessible_numbers.append(realtor_bot)
+        
+        elif user_type == "realtor":
+            # Realtor can only see calls for their own number
+            realtor = session.get(Realtor, user_id)
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            
+            realtor_bot = _get_or_sync_twilio_number(session, realtor)
+            if not realtor_bot:
+                # No number assigned, return empty list
+                return JSONResponse(content={
+                    "call_records": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                })
+            
+            accessible_numbers.append(realtor_bot)
+        
+        if not accessible_numbers:
+            # No numbers assigned, return empty list
+            return JSONResponse(content={
+                "call_records": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+            })
+        
+        # Query call records for accessible numbers
+        base_query = select(CallRecord).where(
+            CallRecord.realtor_number.in_(accessible_numbers)
+        )
+        
+        # Get total count (efficient)
+        from sqlalchemy import func
+        total_query = select(func.count(CallRecord.id)).where(
+            CallRecord.realtor_number.in_(accessible_numbers)
+        )
+        total = session.exec(total_query).one()
+        
+        # Apply pagination and ordering
+        call_records = session.exec(
+            base_query.order_by(CallRecord.created_at.desc()).limit(limit).offset(offset)
+        ).all()
+        
+        return JSONResponse(content={
+            "call_records": [
+                {
+                    "id": str(cr.id),
+                    "call_id": cr.call_id,
+                    "realtor_number": cr.realtor_number,
+                    "recording_url": cr.recording_url,
+                    "transcript": cr.transcript,
+                    "call_duration": cr.call_duration,
+                    "call_status": cr.call_status,
+                    "caller_number": cr.caller_number,
+                    "created_at": cr.created_at.isoformat() if cr.created_at else None,
+                    "updated_at": cr.updated_at.isoformat() if cr.updated_at else None,
+                }
+                for cr in call_records
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })
+
+
+@app.get("/call-records/{call_id}")
+def get_call_record_detail(
+    call_id: str,
+    user_data: dict = Depends(get_current_user_data),
+):
+    """
+    Get detailed information about a specific call record.
+    Includes full transcript and live transcript chunks.
+    """
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if not user_type or not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user data")
+    
+    with Session(engine) as session:
+        # Get the call record
+        call_record = session.exec(
+            select(CallRecord).where(CallRecord.call_id == call_id)
+        ).first()
+        
+        if not call_record:
+            raise HTTPException(status_code=404, detail="Call record not found")
+        
+        # Verify user has access to this call
+        accessible_numbers = []
+        
+        if user_type == "property_manager":
+            pm = session.get(PropertyManager, user_id)
+            if pm:
+                pm_bot = _get_or_sync_twilio_number(session, pm)
+                if pm_bot:
+                    accessible_numbers.append(pm_bot)
+                
+                realtors = session.exec(
+                    select(Realtor).where(Realtor.property_manager_id == user_id)
+                ).all()
+                for realtor in realtors:
+                    realtor_bot = _get_or_sync_twilio_number(session, realtor)
+                    if realtor_bot:
+                        accessible_numbers.append(realtor_bot)
+        
+        elif user_type == "realtor":
+            realtor = session.get(Realtor, user_id)
+            if realtor:
+                realtor_bot = _get_or_sync_twilio_number(session, realtor)
+                if realtor_bot:
+                    accessible_numbers.append(realtor_bot)
+        
+        if call_record.realtor_number not in accessible_numbers:
+            raise HTTPException(status_code=403, detail="Access denied to this call record")
+        
+        return JSONResponse(content={
+            "id": str(call_record.id),
+            "call_id": call_record.call_id,
+            "realtor_number": call_record.realtor_number,
+            "recording_url": call_record.recording_url,
+            "transcript": call_record.transcript,
+            "live_transcript_chunks": call_record.live_transcript_chunks or [],
+            "call_duration": call_record.call_duration,
+            "call_status": call_record.call_status,
+            "caller_number": call_record.caller_number,
+            "metadata": call_record.metadata,
+            "created_at": call_record.created_at.isoformat() if call_record.created_at else None,
+            "updated_at": call_record.updated_at.isoformat() if call_record.updated_at else None,
         })
 
 

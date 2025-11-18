@@ -382,6 +382,28 @@ class CallForwardingEvent(SQLModel, table=True):
     )
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+
+class CallRecord(SQLModel, table=True):
+    """Stores call records from VAPI including transcripts and recordings."""
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    call_id: str = Field(index=True)  # VAPI call ID
+    realtor_number: str = Field(index=True)  # Twilio DID that received the call
+    recording_url: Optional[str] = None  # MP3 file URL from VAPI
+    transcript: Optional[str] = None  # Final transcript text
+    live_transcript_chunks: Optional[List[str]] = Field(
+        default=None,
+        sa_column=Column(JSON)  # Store real-time transcript chunks as array
+    )
+    call_duration: Optional[int] = None  # Duration in seconds
+    call_status: Optional[str] = None  # e.g., "ended", "failed", "no-answer"
+    caller_number: Optional[str] = None  # Phone number of the caller
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)  # Store additional VAPI event data
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:
     """
