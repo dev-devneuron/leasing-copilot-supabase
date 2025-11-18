@@ -846,16 +846,21 @@ VAPI automatically sends call events (transcripts, recordings, call status) to o
 **Auth:** None (Public endpoints, called by VAPI)
 
 **Important Notes:**
-- VAPI sends **end-of-call-report** with transcripts to `/vapi-webhook` (with hyphen)
+- VAPI sends **multiple webhook events** during a call (status updates, function calls, etc.)
+- **Only the final `end-of-call-report` event contains the transcript** in `message.artifact.messages`
+- The backend automatically skips non-transcript events and only processes end-of-call-report
 - **Audio recordings are NOT sent in webhooks** - the backend automatically fetches them from VAPI API
 - The backend fetches recording URLs from VAPI API when a call ends
 
 **Event Types Handled:**
-- `end-of-call-report` - Final transcript when call ends (sent to `/vapi-webhook`)
-- `transcript.created` - Real-time transcript chunks during the call
+- `End Of Call Report` - **Final transcript when call ends** (sent to `/vapi-webhook`, contains transcript in `artifact.messages`)
+- `Status Update`, `Conversation Update`, `Speech Update` - Intermediate events (skipped, no transcript)
+- `transcript.created` - Real-time transcript chunks during the call (if sent to alternative endpoint)
 - `call.ended` - Call completion event
 - `recording.ready` - Audio recording ready (if sent, though typically not)
 - `call.started` - Call initiation event
+
+**Note:** VAPI uses "End Of Call Report" (with spaces and capitals) as the event type name. The backend detects this by checking if the type contains "end", "call", and "report" (case-insensitive).
 
 **Backend Behavior:**
 - Creates/updates call records in the database

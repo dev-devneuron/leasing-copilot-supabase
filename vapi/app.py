@@ -4886,8 +4886,42 @@ async def vapi_webhook_hyphen(request: Request):
             # Fallback: maybe payload is the message itself
             message = payload
         
-        message_type = message.get("type", "")
+        # Debug: Log message structure
+        print(f"🔍 Message object keys: {list(message.keys()) if isinstance(message, dict) else 'not a dict'}")
+        if isinstance(message, dict) and "type" in message:
+            print(f"✅ Found type in message: {message.get('type')}")
+        else:
+            print(f"⚠️  Type not found in message. Top-level payload keys: {list(payload.keys())}")
+            # Try to find type in payload
+            if "type" in payload:
+                print(f"✅ Found type in payload: {payload.get('type')}")
+        
+        message_type = message.get("type", "") or payload.get("type", "")
         print(f"📞 VAPI webhook received - Event type: {message_type or 'unknown'}, Call ID: {call_id or 'not found'}")
+        
+        # Only process end-of-call-report for transcript extraction
+        # VAPI sends multiple webhook events during a call:
+        # - Status Update, Conversation Update, Speech Update (no transcripts)
+        # - End Of Call Report (contains transcript in artifact.messages)
+        # VAPI uses "End Of Call Report" (with spaces and capitals) in the type field
+        # We identify end-of-call-report by: type contains "end" and "call" and "report" OR presence of artifact
+        message_type_lower = message_type.lower() if message_type else ""
+        is_end_of_call = (
+            ("end" in message_type_lower and "call" in message_type_lower and "report" in message_type_lower) or
+            message_type_lower == "end-of-call-report" or  # Fallback for hyphenated format
+            (not message_type and "artifact" in message) or
+            (isinstance(message, dict) and "artifact" in message and message.get("artifact"))
+        )
+        
+        if not is_end_of_call:
+            if message_type:
+                print(f"ℹ️  Skipping transcript extraction for event type: {message_type} (not End Of Call Report)")
+            else:
+                print(f"ℹ️  Skipping transcript extraction - no type and no artifact found")
+            return {"status": "ok", "call_id": call_id, "event_type": message_type or "unknown", "message": "Not an End Of Call Report event"}
+        
+        # This is an End Of Call Report - process transcript extraction
+        print(f"✅ Processing End Of Call Report for call {call_id}")
         
         # Extract call ID from payload if not in headers
         if not call_id:
@@ -4922,6 +4956,14 @@ async def vapi_webhook_hyphen(request: Request):
         transcript = None
         transcript_parts = []
         summary = None
+        
+        # Debug: Print message structure to understand what we're receiving
+        if isinstance(message, dict):
+            print(f"🔍 Full message structure - Keys: {list(message.keys())}")
+            if "artifact" in message:
+                print(f"✅ Artifact found in message")
+            else:
+                print(f"⚠️  No 'artifact' key in message. Available keys: {list(message.keys())[:10]}")
         
         artifact = message.get("artifact", {})
         if artifact:
