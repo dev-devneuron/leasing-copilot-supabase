@@ -4608,6 +4608,64 @@ def _fetch_call_details_from_vapi(call_id: str) -> Optional[dict]:
         return None
 
 
+def _derive_duration_from_recording(recording_url: str) -> Optional[int]:
+    """
+    Derive recording duration using metadata headers so we avoid downloading the full file.
+    Primary approach is HEAD, with a tiny ranged GET fallback.
+    """
+    if not recording_url:
+        return None
+    
+    candidate_headers = [
+        "x-recording-duration",
+        "x-amz-meta-duration",
+        "x-amz-meta-recording-duration",
+        "content-duration",
+    ]
+    
+    def _extract_duration(headers: Dict[str, str]) -> Optional[int]:
+        lowered = {k.lower(): v for k, v in headers.items()}
+        for key in candidate_headers:
+            value = lowered.get(key.lower())
+            if value:
+                try:
+                    seconds = int(float(value))
+                    return seconds
+                except ValueError:
+                    continue
+        return None
+    
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.head(recording_url, follow_redirects=True)
+            if response.status_code < 400:
+                duration = _extract_duration(response.headers)
+                if duration:
+                    print(f"⏱️  Derived recording duration {duration}s from HEAD metadata")
+                    return duration
+    except Exception as e:
+        print(f"⚠️  Failed HEAD duration lookup: {e}")
+    
+    # Fallback: request a single byte to prompt signed URLs to return metadata headers
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(
+                recording_url,
+                headers={"Range": "bytes=0-1"},
+                follow_redirects=True,
+            )
+            if response.status_code in (200, 206):
+                duration = _extract_duration(response.headers)
+                if duration:
+                    print(f"⏱️  Derived recording duration {duration}s from ranged GET metadata")
+                    return duration
+    except Exception as e:
+        print(f"⚠️  Failed ranged GET duration lookup: {e}")
+    
+    print("⚠️  Unable to derive recording duration from recording metadata")
+    return None
+
+
 def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[CallRecord]:
     """Import a single call from VAPI API response into database."""
     call_id = call_data.get("id") or call_data.get("callId")
@@ -4636,6 +4694,15 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
             existing.recording_url = recording_url
             updated = True
         
+        if existing.recording_url and not existing.call_duration:
+            derived_duration = _derive_duration_from_recording(existing.recording_url)
+            if derived_duration:
+                existing.call_duration = derived_duration
+                if existing.call_metadata is None:
+                    existing.call_metadata = {}
+                existing.call_metadata["duration_source"] = "recording_headers"
+                updated = True
+        
         # Update other fields
         if call_data.get("status") and call_data["status"] != existing.call_status:
             existing.call_status = call_data["status"]
@@ -4643,6 +4710,9 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
         
         if call_data.get("duration") and call_data["duration"] != existing.call_duration:
             existing.call_duration = call_data["duration"]
+            if existing.call_metadata is None:
+                existing.call_metadata = {}
+            existing.call_metadata["duration_source"] = "payload"
             updated = True
         
         if updated:
@@ -4681,6 +4751,7 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
     recording_url = call_data.get("recordingUrl") or call_data.get("recording")
     call_status = call_data.get("status", "ended")
     call_duration = call_data.get("duration")
+    duration_source = "payload" if call_duration else None
     caller_number = call_data.get("fromNumber") or call_data.get("from")
     
     # If recording URL is missing, try to fetch from VAPI API
@@ -4695,8 +4766,16 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
             # Update other fields if missing
             if not call_duration:
                 call_duration = call_details.get("duration")
+                if call_duration:
+                    duration_source = "vapi_api"
             if not caller_number:
                 caller_number = call_details.get("fromNumber") or call_details.get("from")
+    
+    if not call_duration and recording_url:
+        derived_duration = _derive_duration_from_recording(recording_url)
+        if derived_duration:
+            call_duration = derived_duration
+            duration_source = "recording_headers"
     
     # Parse created_at if available
     created_at = datetime.utcnow()
@@ -4727,7 +4806,8 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
         call_metadata={
             "imported_from_vapi": True,
             "imported_at": datetime.utcnow().isoformat(),
-            "vapi_data": {k: v for k, v in call_data.items() if k not in ["id", "callId", "transcript", "recordingUrl", "recording"]}
+            "vapi_data": {k: v for k, v in call_data.items() if k not in ["id", "callId", "transcript", "recordingUrl", "recording"]},
+            **({"duration_source": duration_source} if duration_source else {}),
         },
         created_at=created_at,
     )
@@ -4884,6 +4964,17 @@ async def vapi_webhook_hyphen(request: Request):
             artifact = {}
         artifact_messages = artifact.get("messages", []) if artifact else []
         has_artifact_messages = bool(artifact_messages)
+        message_transcript = message.get("transcript")
+        message_summary = message.get("summary") or message.get("analysis", {}).get("summary")
+        duration_seconds = (
+            message.get("durationSeconds")
+            or message.get("duration")
+            or (
+                (message.get("durationMs") or message.get("duration_ms")) / 1000.0
+                if (message.get("durationMs") or message.get("duration_ms"))
+                else None
+            )
+        )
 
         # Debug: Log message structure
         print(f"🔍 Message object keys: {list(message.keys()) if isinstance(message, dict) else 'not a dict'}")
@@ -4963,20 +5054,30 @@ async def vapi_webhook_hyphen(request: Request):
             else:
                 print(f"⚠️  No 'artifact' key in message. Available keys: {list(message.keys())[:10]}")
         
-        if artifact:
+        if message_transcript and isinstance(message_transcript, str) and message_transcript.strip():
+            transcript = message_transcript.strip()
+            print(f"📄 Using transcript field from message: {len(transcript)} chars")
+        elif artifact:
             print(f"📋 Found artifact with {len(artifact_messages)} messages")
             if artifact_messages:
-                # Build transcript from messages array
+                allowed_roles = {"user", "bot", "assistant"}
+                system_messages = []
                 for msg in artifact_messages:
-                    role = msg.get("role", "")
-                    msg_text = msg.get("message", "")
-                    if msg_text and role in ["user", "bot", "assistant", "system"]:
-                        # Format: "Role: message"
-                        transcript_parts.append(f"{role.capitalize()}: {msg_text}")
-                
+                    role = (msg.get("role") or "").lower()
+                    msg_text = msg.get("message") or msg.get("text")
+                    if not msg_text:
+                        continue
+                    if role in allowed_roles:
+                        transcript_parts.append(f"{role.capitalize()}: {msg_text.strip()}")
+                    elif role == "system":
+                        # store system prompts separately to avoid bloating transcript
+                        system_messages.append(msg_text.strip())
                 if transcript_parts:
                     transcript = "\n\n".join(transcript_parts)
-                    print(f"📄 Extracted transcript from {len(artifact_messages)} messages: {len(transcript)} chars")
+                    print(f"📄 Extracted transcript from {len(transcript_parts)} conversational turns: {len(transcript)} chars")
+                elif system_messages:
+                    transcript = "\n\n".join(system_messages)
+                    print(f"⚠️  No user/bot messages; storing system text ({len(system_messages)} entries)")
                 else:
                     print(f"⚠️  No transcript parts extracted from {len(artifact_messages)} messages")
             else:
@@ -4986,7 +5087,10 @@ async def vapi_webhook_hyphen(request: Request):
         
         # Extract summary from analysis
         analysis = message.get("analysis", {})
-        if analysis:
+        if not analysis and message_summary:
+            summary = message_summary
+            print(f"📋 Using summary field from message: {len(summary)} chars")
+        elif analysis:
             summary = analysis.get("summary", "")
             if summary:
                 print(f"📋 Extracted summary: {len(summary)} chars")
@@ -5086,6 +5190,11 @@ async def vapi_webhook_hyphen(request: Request):
             
             # Store call status and other metadata
             call_record.call_status = message.get("status") or payload.get("status", "ended")
+            if duration_seconds is not None:
+                call_record.call_duration = int(duration_seconds)
+                if call_record.call_metadata is None:
+                    call_record.call_metadata = {}
+                call_record.call_metadata["duration_source"] = "webhook_payload"
             
             # Extract duration from message timestamp if available
             timestamp = message.get("timestamp")
@@ -5135,6 +5244,33 @@ async def vapi_webhook_hyphen(request: Request):
                                 if api_transcript:
                                     call_record.transcript = api_transcript
                                     updated = True
+                            # Update duration if missing
+                            if not call_record.call_duration:
+                                api_duration = (
+                                    call_details.get("durationSeconds")
+                                    or call_details.get("duration")
+                                    or (
+                                        (call_details.get("durationMs") or call_details.get("duration_ms")) / 1000.0
+                                        if (call_details.get("durationMs") or call_details.get("duration_ms"))
+                                        else None
+                                    )
+                                )
+                                if api_duration:
+                                    call_record.call_duration = int(api_duration)
+                                    if call_record.call_metadata is None:
+                                        call_record.call_metadata = {}
+                                    call_record.call_metadata["duration_source"] = "vapi_api"
+                                    updated = True
+            
+            if call_record.recording_url and not call_record.call_duration:
+                derived_duration = _derive_duration_from_recording(call_record.recording_url)
+                if derived_duration:
+                    call_record.call_duration = derived_duration
+                    if call_record.call_metadata is None:
+                        call_record.call_metadata = {}
+                    call_record.call_metadata["duration_source"] = "recording_headers"
+                    print(f"⏱️  Derived duration from recording headers: {derived_duration}s")
+                    updated = True
             
             # Store metadata
             if call_record.call_metadata is None:
@@ -5145,6 +5281,7 @@ async def vapi_webhook_hyphen(request: Request):
                 "message_type": message_type,
                 "has_summary": bool(summary),
                 "message_count": len(artifact_messages),
+                "system_message_count": sum(1 for msg in artifact_messages if (msg.get('role') or '').lower() == 'system'),
             })
             # Store full payload for debugging (limit size)
             payload_str = json.dumps(payload)
