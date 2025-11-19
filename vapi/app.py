@@ -4851,10 +4851,11 @@ def update_call_forwarding_state(
         payload.after_hours_enabled is None
         and payload.business_forwarding_enabled is None
         and payload.confirmation_status is None
+        and payload.carrier is None
     ):
         raise HTTPException(
             status_code=400,
-            detail="Provide at least one of after_hours_enabled, business_forwarding_enabled, or confirmation_status",
+            detail="Provide at least one of: after_hours_enabled, business_forwarding_enabled, confirmation_status, or carrier",
         )
 
     requester_type = user_data.get("user_type")

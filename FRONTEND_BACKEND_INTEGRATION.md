@@ -810,17 +810,24 @@ Auth required. If `realtor_id` is omitted, the authenticated user's state is ret
 **Request**
 ```json
 {
-  "after_hours_enabled": true,
-  "business_forwarding_enabled": true,
-  "carrier": "AT&T",              // Optional; update user's carrier
-  "realtor_id": 99,               // Optional; only PMs can set this
-  "notes": "Enabled after-hours from dashboard",
-  "confirmation_status": "success",  // "success" | "failure" | "pending"
-  "failure_reason": "Carrier busy tone" // Only when confirmation_status = "failure"
+  "after_hours_enabled": true,        // Optional
+  "business_forwarding_enabled": true, // Optional
+  "carrier": "AT&T",                  // Optional; update user's carrier (can be updated independently)
+  "realtor_id": 99,                   // Optional; only PMs can set this
+  "notes": "Enabled after-hours from dashboard", // Optional
+  "confirmation_status": "success",   // Optional: "success" | "failure" | "pending"
+  "failure_reason": "Carrier busy tone" // Optional; only when confirmation_status = "failure"
 }
 ```
 
-At least one of `after_hours_enabled`, `business_forwarding_enabled`, `carrier`, or `confirmation_status` must be present. When `realtor_id` is set, the PM must own that realtor. The endpoint updates database flags and carrier setting; carriers are controlled via dial codes returned in the response.
+**Important:** At least one of `after_hours_enabled`, `business_forwarding_enabled`, `carrier`, or `confirmation_status` must be present. You can update just the `carrier` field without providing any other fields. When `realtor_id` is set, the PM must own that realtor. The endpoint updates database flags and carrier setting; carriers are controlled via dial codes returned in the response.
+
+**Example: Update carrier only**
+```json
+{
+  "carrier": "Verizon"
+}
+```
 
 **Response**
 ```json
