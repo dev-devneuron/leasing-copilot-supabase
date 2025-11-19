@@ -921,9 +921,46 @@ Returns list of supported carriers and their capabilities.
 
 ### Frontend Implementation Guide
 
-#### 1. Carrier Selection (Onboarding/Settings)
+#### 1. Carrier Selection Workflow
 
-**First-time setup:** Collect the user's carrier during onboarding or in settings:
+**IMPORTANT: Carrier selection should be the FIRST step before showing any forwarding controls.**
+
+##### Step 1: Check if carrier is already set
+
+When the user opens the call forwarding section, first check if they have a carrier configured:
+
+```javascript
+// Get forwarding state to check if carrier is set
+async function getForwardingState() {
+  const response = await fetch('/call-forwarding-state', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  const data = await response.json();
+  return data;
+}
+
+// On page load / component mount
+async function initializeCallForwarding() {
+  const state = await getForwardingState();
+  
+  // Check if carrier is not set
+  if (!state.forwarding_state.carrier) {
+    // Show carrier selection modal/screen FIRST
+    showCarrierSelectionModal();
+    return; // Don't show forwarding controls yet
+  }
+  
+  // Carrier is set - show forwarding controls based on carrier capabilities
+  showForwardingControls(state.forwarding_codes);
+}
+```
+
+##### Step 2: Carrier Selection (First Time / Onboarding)
+
+**When carrier is `null` or not set:**
+- Show a carrier selection screen/modal BEFORE showing forwarding controls
+- This should be the FIRST thing the user sees in the call forwarding section
+- Use the carrier list from `/call-forwarding-carriers` endpoint
 
 ```javascript
 // Get list of supported carriers
@@ -933,6 +970,25 @@ async function getSupportedCarriers() {
   });
   const data = await response.json();
   return data.carrier_details; // Use this to populate a dropdown
+}
+
+// Show carrier selection modal
+async function showCarrierSelectionModal() {
+  const carriers = await getSupportedCarriers();
+  
+  // Display carrier selection UI
+  // Show list of carriers with their capabilities:
+  // - "AT&T" - Supports all features
+  // - "Verizon" - No 25-second forwarding
+  // - "Google Fi" - App-only setup
+  // etc.
+  
+  // When user selects a carrier:
+  await updateCarrier(selectedCarrier);
+  
+  // After carrier is set, refresh and show forwarding controls
+  const state = await getForwardingState();
+  showForwardingControls(state.forwarding_codes);
 }
 
 // Update user's carrier
@@ -948,6 +1004,88 @@ async function updateCarrier(carrier) {
   return await response.json();
 }
 ```
+
+##### Step 3: Show UI Based on Carrier
+
+**After carrier is selected:**
+- Show forwarding controls based on carrier capabilities
+- Use `forwarding_codes.supports_25_second_forwarding` to show/hide features
+- Use `forwarding_codes.forward_all.activate` to check if it's "app_only"
+
+```javascript
+function showForwardingControls(forwardingCodes) {
+  // Check carrier capabilities
+  const supports25Second = forwardingCodes.supports_25_second_forwarding;
+  const isAppOnly = forwardingCodes.forward_all.activate === "app_only";
+  
+  // Show/hide UI elements based on carrier
+  if (isAppOnly) {
+    // Google Fi - show app instructions, hide dial code buttons
+    showAppInstructions(forwardingCodes.forward_all.instructions);
+  } else {
+    // Show dial code buttons
+    if (supports25Second) {
+      // Show "Business Hours Forwarding" button (25-second)
+      showBusinessHoursButton(forwardingCodes.forward_no_answer.activate);
+    } else {
+      // Hide "Business Hours Forwarding" button
+      // Show message: "Your carrier (Verizon) doesn't support 25-second forwarding"
+      showCarrierLimitationMessage();
+    }
+    
+    // Show "After Hours Forwarding" button (forward all)
+    showAfterHoursButton(forwardingCodes.forward_all.activate);
+  }
+}
+```
+
+##### Step 4: Change Carrier (Settings)
+
+**For users who already have a carrier set:**
+- Don't show carrier selection on every login
+- Provide a "Change Carrier" option in settings/preferences
+- When changed, refresh forwarding codes and update UI
+
+```javascript
+// In settings/preferences section
+async function changeCarrier() {
+  // Show carrier selection modal again
+  const carriers = await getSupportedCarriers();
+  const selectedCarrier = await showCarrierSelectionModal();
+  
+  // Update carrier
+  await updateCarrier(selectedCarrier);
+  
+  // Refresh forwarding state and codes
+  const state = await getForwardingState();
+  
+  // Update UI with new carrier's capabilities
+  showForwardingControls(state.forwarding_codes);
+  
+  // Show success message
+  showNotification("Carrier updated successfully. Forwarding codes have been updated.");
+}
+```
+
+##### Complete Flow Summary
+
+1. **First Visit (No Carrier Set):**
+   ```
+   User opens Call Forwarding → Carrier Selection Modal → User selects carrier → 
+   Backend updates carrier → Show forwarding controls based on carrier
+   ```
+
+2. **Subsequent Visits (Carrier Already Set):**
+   ```
+   User opens Call Forwarding → Check carrier (already set) → 
+   Show forwarding controls immediately → Option to change carrier in settings
+   ```
+
+3. **Changing Carrier:**
+   ```
+   User clicks "Change Carrier" in settings → Carrier Selection Modal → 
+   User selects new carrier → Backend updates → Refresh UI with new codes
+   ```
 
 #### 2. Using Carrier-Specific Codes
 
@@ -1056,12 +1194,14 @@ function disableAfterHoursForwarding(codes) {
 
 ### Implementation Tips
 
+- **Carrier selection is the FIRST step:** Always check if `forwarding_state.carrier` is `null` before showing forwarding controls. If `null`, show carrier selection modal first.
+- **Don't ask for carrier on every login:** Once carrier is set, don't prompt again. Only show carrier selection if `carrier === null`.
+- **Provide carrier change option:** Add a "Change Carrier" button in settings/preferences for users who want to update their carrier later.
 - **Always use carrier-specific codes from the backend** - Never hardcode dial codes in the frontend. The backend generates the correct codes based on the user's carrier.
 - **Handle carrier limitations gracefully:**
   - Check `forwarding_codes.supports_25_second_forwarding` before showing "Business Hours Forwarding" button
   - For Google Fi, show app instructions instead of dial codes
   - For Verizon/Xfinity, explain that only unconditional forwarding is available
-- **Carrier selection is required:** Prompt users to select their carrier before enabling forwarding. Store it via `PATCH /call-forwarding-state` with `{ "carrier": "AT&T" }`.
 - **Number formatting:** The backend handles number formatting automatically. GSM carriers get `+1` prefix, Verizon/Xfinity get numbers without `+` and with spaces.
 - **No carrier APIs required:** Do not attempt to automate the dial codes server-side. The frontend opens the dialer, user executes the code, then confirms success.
 - **Audit logging:** The backend persists all forwarding events in `call_forwarding_events` table, including carrier information and dial codes used.
@@ -1077,7 +1217,11 @@ function disableAfterHoursForwarding(codes) {
   - Common issues: "Carrier busy", "Invalid code", "Carrier not responding"
   - For Google Fi, remind users to use the app
 - **Rate limiting:** Backend enforces 10 updates per hour per user. Show friendly message if HTTP 429 is received.
-- **Default carrier:** If carrier is not set, backend defaults to AT&T (GSM) codes. However, frontend should always prompt for carrier selection to ensure accuracy.
+- **UI State Management:**
+  - Store carrier in component state after first selection
+  - Check `forwarding_state.carrier` on component mount
+  - If carrier exists, load forwarding controls immediately
+  - If carrier is `null`, show selection modal first
 
 ---
 

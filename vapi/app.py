@@ -4891,7 +4891,9 @@ def update_call_forwarding_state(
                     status_code=400,
                     detail=f"Unsupported carrier: {payload.carrier}. Supported carriers: {', '.join(CALL_FORWARDING_CARRIERS)}"
                 )
-            if target_record.carrier != payload.carrier:
+            # Use getattr with None default in case carrier column doesn't exist yet (migration not run)
+            current_carrier = getattr(target_record, "carrier", None)
+            if current_carrier != payload.carrier:
                 target_record.carrier = payload.carrier
                 state_changes["carrier"] = payload.carrier
 
