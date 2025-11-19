@@ -163,7 +163,153 @@ if TWILIO_ACCOUNT_SID1 and TWILIO_AUTH_TOKEN1:
     except Exception as e:
         print(f"⚠️  Failed to initialize Twilio client 1: {e}")
 
-CALL_FORWARDING_CARRIERS = ["AT&T", "Verizon", "T-Mobile", "Mint", "Metro", "Google Fi"]
+# Supported carriers for call forwarding
+CALL_FORWARDING_CARRIERS = [
+    "AT&T",
+    "T-Mobile", 
+    "Mint",
+    "Metro",
+    "Verizon",
+    "Xfinity Mobile",
+    "Google Fi",
+    "Consumer Cellular",
+    "Ultra Mobile"
+]
+
+# Carrier code mapping - maps carrier names to their forwarding code formats
+CARRIER_CODES = {
+    # GSM-based carriers (support **21, **61, **25# format)
+    "AT&T": {
+        "type": "gsm",
+        "forward_all": {
+            "activate": "**21*{number}#",
+            "deactivate": "##21#",
+            "check": "*#21#"
+        },
+        "forward_no_answer": {
+            "activate": "**61*{number}**25#",
+            "deactivate": "##61#",
+            "check": "*#61#",
+            "supports_custom_seconds": True
+        }
+    },
+    "T-Mobile": {
+        "type": "gsm",
+        "forward_all": {
+            "activate": "**21*{number}#",
+            "deactivate": "##21#",
+            "check": "*#21#"
+        },
+        "forward_no_answer": {
+            "activate": "**61*{number}**25#",
+            "deactivate": "##61#",
+            "check": "*#61#",
+            "supports_custom_seconds": True
+        }
+    },
+    "Mint": {
+        "type": "gsm",
+        "forward_all": {
+            "activate": "**21*{number}#",
+            "deactivate": "##21#",
+            "check": "*#21#"
+        },
+        "forward_no_answer": {
+            "activate": "**61*{number}**25#",
+            "deactivate": "##61#",
+            "check": "*#61#",
+            "supports_custom_seconds": True
+        }
+    },
+    "Metro": {
+        "type": "gsm",
+        "forward_all": {
+            "activate": "**21*{number}#",
+            "deactivate": "##21#",
+            "check": "*#21#"
+        },
+        "forward_no_answer": {
+            "activate": "**61*{number}**25#",
+            "deactivate": "##61#",
+            "check": "*#61#",
+            "supports_custom_seconds": True
+        }
+    },
+    "Consumer Cellular": {
+        "type": "gsm",
+        "forward_all": {
+            "activate": "**21*{number}#",
+            "deactivate": "##21#",
+            "check": "*#21#"
+        },
+        "forward_no_answer": {
+            "activate": "**61*{number}**25#",
+            "deactivate": "##61#",
+            "check": "*#61#",
+            "supports_custom_seconds": True
+        }
+    },
+    "Ultra Mobile": {
+        "type": "gsm",
+        "forward_all": {
+            "activate": "**21*{number}#",
+            "deactivate": "##21#",
+            "check": "*#21#"
+        },
+        "forward_no_answer": {
+            "activate": "**61*{number}**25#",
+            "deactivate": "##61#",
+            "check": "*#61#",
+            "supports_custom_seconds": True
+        }
+    },
+    # Verizon (uses *72/*73 format, no 25-second support)
+    "Verizon": {
+        "type": "verizon",
+        "forward_all": {
+            "activate": "*72 {number}",
+            "deactivate": "*73",
+            "check": None  # No check code available
+        },
+        "forward_no_answer": {
+            "activate": None,  # Not supported
+            "deactivate": None,
+            "check": None,
+            "supports_custom_seconds": False
+        }
+    },
+    # Xfinity Mobile (uses *72/*73/*71 format, no 25-second support)
+    "Xfinity Mobile": {
+        "type": "xfinity",
+        "forward_all": {
+            "activate": "*72 {number}",
+            "deactivate": "*73",
+            "check": None
+        },
+        "forward_no_answer": {
+            "activate": "*71 {number}",  # No-answer forwarding (default ring time, no custom seconds)
+            "deactivate": "*73",
+            "check": None,
+            "supports_custom_seconds": False
+        }
+    },
+    # Google Fi (app-only, no GSM codes)
+    "Google Fi": {
+        "type": "google_fi",
+        "forward_all": {
+            "activate": "app_only",  # Must use Google Fi app/website
+            "deactivate": "app_only",
+            "check": "app_only"
+        },
+        "forward_no_answer": {
+            "activate": None,  # Not supported
+            "deactivate": None,
+            "check": None,
+            "supports_custom_seconds": False
+        }
+    }
+}
+
 BOT_NUMBER_REGEX = re.compile(r"^\+1\d{10}$")
 
 # ============================================================================
@@ -210,15 +356,74 @@ class CallForwardingStateUpdate(BaseModel):
     after_hours_enabled: Optional[bool] = None
     business_forwarding_enabled: Optional[bool] = None
     realtor_id: Optional[int] = None  # Only allowed for PMs
+    carrier: Optional[str] = None  # User's mobile carrier (e.g., "AT&T", "Verizon", "T-Mobile")
     notes: Optional[str] = None
     confirmation_status: Optional[str] = None  # "success", "failure", "pending"
     failure_reason: Optional[str] = None
+
+
+def _get_carrier_forwarding_codes(carrier: Optional[str], bot_number: Optional[str]) -> Dict[str, Any]:
+    """
+    Get carrier-specific forwarding codes for a given carrier and bot number.
+    
+    Returns a dictionary with:
+    - forward_all: {activate, deactivate, check}
+    - forward_no_answer: {activate, deactivate, check, supports_custom_seconds}
+    - carrier_type: "gsm", "verizon", "xfinity", "google_fi"
+    - supports_25_second_forwarding: bool
+    """
+    if not carrier or carrier not in CARRIER_CODES:
+        # Default to AT&T (GSM) if carrier not specified or unknown
+        carrier = "AT&T"
+    
+    carrier_config = CARRIER_CODES[carrier]
+    # For Verizon/Xfinity, remove + and format with space; for GSM, keep + and format
+    if carrier in ["Verizon", "Xfinity Mobile"]:
+        bot_number_clean = bot_number.replace("+", "").replace(" ", "").replace("-", "") if bot_number else ""
+    else:
+        bot_number_clean = bot_number if bot_number else ""
+    
+    codes = {
+        "carrier": carrier,
+        "carrier_type": carrier_config["type"],
+        "forward_all": {},
+        "forward_no_answer": {},
+        "supports_25_second_forwarding": carrier_config.get("forward_no_answer", {}).get("supports_custom_seconds", False)
+    }
+    
+    # Generate forward all codes
+    forward_all_config = carrier_config.get("forward_all", {})
+    if forward_all_config.get("activate"):
+        if forward_all_config["activate"] == "app_only":
+            codes["forward_all"]["activate"] = "app_only"
+            codes["forward_all"]["instructions"] = "Use Google Fi app or website to set up call forwarding"
+        else:
+            codes["forward_all"]["activate"] = forward_all_config["activate"].format(number=bot_number_clean)
+    else:
+        codes["forward_all"]["activate"] = None
+    
+    codes["forward_all"]["deactivate"] = forward_all_config.get("deactivate")
+    codes["forward_all"]["check"] = forward_all_config.get("check")
+    
+    # Generate forward no-answer codes
+    forward_no_answer_config = carrier_config.get("forward_no_answer", {})
+    if forward_no_answer_config.get("activate"):
+        codes["forward_no_answer"]["activate"] = forward_no_answer_config["activate"].format(number=bot_number_clean)
+    else:
+        codes["forward_no_answer"]["activate"] = None
+    
+    codes["forward_no_answer"]["deactivate"] = forward_no_answer_config.get("deactivate")
+    codes["forward_no_answer"]["check"] = forward_no_answer_config.get("check")
+    codes["forward_no_answer"]["supports_custom_seconds"] = forward_no_answer_config.get("supports_custom_seconds", False)
+    
+    return codes
 
 
 def _serialize_forwarding_state(user_record) -> Dict[str, Optional[Union[bool, str]]]:
     """Normalize forwarding state for JSON responses."""
     if not user_record:
         return {
+            "carrier": None,
             "business_forwarding_enabled": False,
             "after_hours_enabled": False,
             "last_after_hours_update": None,
@@ -234,6 +439,7 @@ def _serialize_forwarding_state(user_record) -> Dict[str, Optional[Union[bool, s
         user_record, "last_after_hours_update", None
     )
     state = {
+        "carrier": getattr(user_record, "carrier", None),
         "business_forwarding_enabled": bool(getattr(user_record, "business_forwarding_enabled", False)),
         "after_hours_enabled": bool(getattr(user_record, "after_hours_enabled", False)),
         "last_after_hours_update": getattr(user_record, "last_after_hours_update", None).isoformat()
@@ -4500,19 +4706,52 @@ def get_call_forwarding_state(
                 detail=f"Twilio number must be in E.164 format. Got: {bot_number}",
             )
 
+        carrier = getattr(target_record, "carrier", None)
+        forwarding_codes = _get_carrier_forwarding_codes(carrier, bot_number)
+        
         return JSONResponse(content={
             "user_type": target_type,
             "user_id": target_id,
             "twilio_number": bot_number,
             "twilio_sid": target_record.twilio_sid,
             "forwarding_state": _serialize_forwarding_state(target_record),
+            "forwarding_codes": forwarding_codes,
         })
 
 
 @app.get("/call-forwarding-carriers")
 def list_call_forwarding_carriers():
-    """Provide the recommended carrier testing matrix for the frontend."""
-    return {"carriers": CALL_FORWARDING_CARRIERS}
+    """
+    Provide the list of supported carriers and their capabilities.
+    Returns carrier information including which features are supported.
+    """
+    carrier_info = []
+    for carrier_name in CALL_FORWARDING_CARRIERS:
+        if carrier_name in CARRIER_CODES:
+            config = CARRIER_CODES[carrier_name]
+            carrier_info.append({
+                "name": carrier_name,
+                "type": config["type"],
+                "supports_forward_all": config.get("forward_all", {}).get("activate") is not None and config.get("forward_all", {}).get("activate") != "app_only",
+                "supports_25_second_forwarding": config.get("forward_no_answer", {}).get("supports_custom_seconds", False),
+                "requires_app": config.get("forward_all", {}).get("activate") == "app_only",
+                "notes": _get_carrier_notes(carrier_name)
+            })
+    
+    return JSONResponse(content={
+        "carriers": CALL_FORWARDING_CARRIERS,
+        "carrier_details": carrier_info
+    })
+
+
+def _get_carrier_notes(carrier_name: str) -> str:
+    """Get human-readable notes about carrier limitations."""
+    notes_map = {
+        "Verizon": "Only supports unconditional forwarding (*72). 25-second forwarding not available.",
+        "Xfinity Mobile": "Uses *72/*73/*71 codes. No-answer forwarding available but no custom seconds.",
+        "Google Fi": "Must configure forwarding through Google Fi app or website. No GSM codes supported.",
+    }
+    return notes_map.get(carrier_name, "")
 
 
 @app.patch("/call-forwarding-state")
@@ -4556,6 +4795,17 @@ def update_call_forwarding_state(
 
         state_changes: Dict[str, Any] = {}
         now = datetime.utcnow()
+
+        # Update carrier if provided
+        if payload.carrier is not None:
+            if payload.carrier not in CALL_FORWARDING_CARRIERS and payload.carrier:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported carrier: {payload.carrier}. Supported carriers: {', '.join(CALL_FORWARDING_CARRIERS)}"
+                )
+            if target_record.carrier != payload.carrier:
+                target_record.carrier = payload.carrier
+                state_changes["carrier"] = payload.carrier
 
         if payload.business_forwarding_enabled is not None:
             if target_record.business_forwarding_enabled != payload.business_forwarding_enabled:
@@ -4649,11 +4899,16 @@ def update_call_forwarding_state(
         if sms_message:
             _notify_forwarding_status_via_sms(sms_message)
 
+        bot_number = _get_or_sync_twilio_number(session, target_record)
+        carrier = getattr(target_record, "carrier", None)
+        forwarding_codes = _get_carrier_forwarding_codes(carrier, bot_number)
+
         return JSONResponse(content={
             "message": "Forwarding state updated",
             "user_type": target_type,
             "user_id": target_id,
             "forwarding_state": _serialize_forwarding_state(target_record),
+            "forwarding_codes": forwarding_codes,
         })
 
 

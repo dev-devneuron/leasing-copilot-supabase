@@ -163,6 +163,7 @@ class Realtor(SQLModel, table=True):
     )
 
     # Call forwarding state
+    carrier: Optional[str] = None  # User's mobile carrier (e.g., "AT&T", "Verizon", "T-Mobile", "Mint", "Metro", "Google Fi", "Xfinity Mobile")
     business_forwarding_enabled: bool = Field(default=False)
     after_hours_enabled: bool = Field(default=False)
     last_after_hours_update: Optional[datetime] = None

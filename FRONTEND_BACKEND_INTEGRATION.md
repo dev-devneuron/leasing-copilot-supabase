@@ -608,58 +608,78 @@ async function unassignPhoneNumber(purchasedPhoneNumberId) {
 
 ## 📲 Call Forwarding Controls (PM & Realtor)
 
-Property managers and their realtors keep their SIM-based carrier numbers, but we still need to drive calls into VAPI (Twilio bot) when certain conditions are met. Since carriers expose forwarding only via GSM/USSD dial codes, the frontend simply opens the dialer with pre-filled codes. Your backend responsibilities are:
+Property managers and their realtors keep their SIM-based carrier numbers, but we still need to drive calls into VAPI (Twilio bot) when certain conditions are met. **Different carriers use different dial codes**, so the backend now provides carrier-specific codes based on the user's configured carrier.
 
-1. **Expose each PM/realtor’s `bot_number` (Twilio DID)** via `GET /my-number` (self) and existing management endpoints (for realtors that a PM manages). The backend derives this strictly from `purchased_phone_numbers` (the official callbot pool)—it never falls back to whatever Twilio number was stored historically on the profile—so you can trust it’s the bot we provisioned.
-2. **Persist forwarding state** per user so the UI can show which modes are “enabled.” Suggested schema additions:
-   - `business_forwarding_enabled` (boolean, default `false`, set to `true` after the PM confirms one-time setup)
-   - `after_hours_enabled` (boolean, toggled daily)
-   - `last_after_hours_update` (timestamp, optional, helps with UX hints)
-3. **Provide a lightweight state update endpoint**:
+### Important: Carrier-Specific Implementation
 
-   ```
-   PATCH /call-forwarding-state
-   {
-     "after_hours_enabled": true,   // or false
-     "business_forwarding_enabled": true // optional future use
-   }
-   ```
+**Each carrier has different forwarding codes!** The backend automatically generates the correct codes based on the user's carrier setting. The frontend must:
 
-   - Auth required.
-   - Applies to the authenticated PM, or to a specific realtor if `realtor_id` is provided and owned by that PM.
-   - The endpoint should only change database flags; carriers are controlled entirely by the dial codes below.
+1. **Collect the user's carrier** during onboarding or settings
+2. **Use the carrier-specific codes** returned by the backend
+3. **Handle carrier limitations** (e.g., Verizon doesn't support 25-second forwarding)
 
-### Carrier Compatibility Testing
+### Supported Carriers & Capabilities
 
-Use the built-in matrix to render QA checklists:
+| Carrier | Forward ALL | 25-Second Forwarding | Code Format |
+|---------|-------------|---------------------|-------------|
+| **AT&T** | ✅ Yes | ✅ Yes | GSM (`**21*`, `**61*`) |
+| **T-Mobile** | ✅ Yes | ✅ Yes | GSM (`**21*`, `**61*`) |
+| **Mint** | ✅ Yes | ✅ Yes | GSM (`**21*`, `**61*`) |
+| **Metro** | ✅ Yes | ✅ Yes | GSM (`**21*`, `**61*`) |
+| **Consumer Cellular** | ✅ Yes | ✅ Yes | GSM (`**21*`, `**61*`) |
+| **Ultra Mobile** | ✅ Yes | ✅ Yes | GSM (`**21*`, `**61*`) |
+| **Verizon** | ✅ Yes | ❌ No | `*72` / `*73` |
+| **Xfinity Mobile** | ✅ Yes | ❌ No (default ring time only) | `*72` / `*73` / `*71` |
+| **Google Fi** | ⚠️ App Only | ❌ No | Must use Google Fi app |
 
-```http
-GET /call-forwarding-carriers
-```
+### Carrier Code Reference
 
-```json
-{
-  "carriers": ["AT&T", "Verizon", "T-Mobile", "Mint", "Metro", "Google Fi"]
-}
-```
+#### GSM Carriers (AT&T, T-Mobile, Mint, Metro, Consumer Cellular, Ultra Mobile)
 
-Each time we onboard a new PM, run through this list (or as many carriers as the team uses) to verify the GSM codes perform as expected. Record discrepancies so Support can coach PMs with carrier-specific notes.
+**Forward ALL calls:**
+- Activate: `**21*+14123882328#`
+- Deactivate: `##21#`
+- Check status: `*#21#`
 
-### Frontend Button Mapping
+**Forward after 25 seconds (no-answer):**
+- Activate: `**61*+14123882328**25#`
+- Deactivate: `##61#`
+- Check status: `*#61#`
 
-| Button Label | Purpose | Dial Sequence | When Used | Backend UI Flag |
-|--------------|---------|--------------|-----------|-----------------|
-| Enable Business Hours Forwarding (One-Time Setup) | Conditional “no-answer” forwarding so missed calls route to the bot after 25s | `**61*${botNumber}**25#` | Run once per PM/realtor | Sets `business_forwarding_enabled = true` |
-| Enable After-Hours Mode (Forward All Calls) | Every incoming call goes straight to the bot | `**21*${botNumber}#` | Daily at 5pm (or when manually enabling) | Sets `after_hours_enabled = true` |
-| Disable After-Hours Mode (Back to Normal) | Remove full forwarding while keeping conditional forwarding | `##21#` | Daily at 9am (or when resuming live phone) | Sets `after_hours_enabled = false` |
+#### Verizon
 
-> `botNumber` is the Twilio DID returned by the backend. Include the leading `+1`. Example: `+18885551234`.
+**Forward ALL calls:**
+- Activate: `*72 14123882328` (no + sign, space after *72)
+- Deactivate: `*73`
+- Check status: Not available
+
+**25-second forwarding:** ❌ Not supported
+
+#### Xfinity Mobile
+
+**Forward ALL calls:**
+- Activate: `*72 14123882328` (no + sign, space after *72)
+- Deactivate: `*73`
+- Check status: Not available
+
+**No-answer forwarding (default ring time, no custom seconds):**
+- Activate: `*71 14123882328`
+- Deactivate: `*73`
+- Check status: Not available
+
+#### Google Fi
+
+**Forward ALL calls:**
+- ⚠️ Must configure through Google Fi app or website
+- No dial codes supported
+
+**25-second forwarding:** ❌ Not supported
 
 ### API Reference
 
 **Get forwarding state (self or managed realtor)**  
 `GET /call-forwarding-state?realtor_id=<optional>`  
-Auth required. If `realtor_id` is omitted, the authenticated user’s state is returned. `realtor_id` is only allowed for property managers and must belong to them.
+Auth required. If `realtor_id` is omitted, the authenticated user's state is returned. `realtor_id` is only allowed for property managers and must belong to them.
 
 **Response**
 ```json
@@ -669,6 +689,7 @@ Auth required. If `realtor_id` is omitted, the authenticated user’s state is r
   "twilio_number": "+18885551234",
   "twilio_sid": "PNabc...",
   "forwarding_state": {
+    "carrier": "AT&T",
     "business_forwarding_enabled": true,
     "business_forwarding_active": true,
     "business_forwarding_confirmed_at": "2024-01-10T15:30:00Z",
@@ -679,6 +700,67 @@ Auth required. If `realtor_id` is omitted, the authenticated user’s state is r
     "last_after_hours_update": "2024-02-10T09:05:00Z",
     "last_forwarding_update": "2024-02-10T09:05:00Z",
     "forwarding_failure_reason": null
+  },
+  "forwarding_codes": {
+    "carrier": "AT&T",
+    "carrier_type": "gsm",
+    "supports_25_second_forwarding": true,
+    "forward_all": {
+      "activate": "**21*+18885551234#",
+      "deactivate": "##21#",
+      "check": "*#21#"
+    },
+    "forward_no_answer": {
+      "activate": "**61*+18885551234**25#",
+      "deactivate": "##61#",
+      "check": "*#61#",
+      "supports_custom_seconds": true
+    }
+  }
+}
+```
+
+**Example Response for Verizon (no 25-second support):**
+```json
+{
+  "forwarding_codes": {
+    "carrier": "Verizon",
+    "carrier_type": "verizon",
+    "supports_25_second_forwarding": false,
+    "forward_all": {
+      "activate": "*72 18885551234",
+      "deactivate": "*73",
+      "check": null
+    },
+    "forward_no_answer": {
+      "activate": null,
+      "deactivate": null,
+      "check": null,
+      "supports_custom_seconds": false
+    }
+  }
+}
+```
+
+**Example Response for Google Fi (app-only):**
+```json
+{
+  "forwarding_codes": {
+    "carrier": "Google Fi",
+    "carrier_type": "google_fi",
+    "supports_25_second_forwarding": false,
+    "forward_all": {
+      "activate": "app_only",
+      "instructions": "Use Google Fi app or website to set up call forwarding",
+      "deactivate": "app_only",
+      "check": "app_only"
+    },
+    "forward_no_answer": {
+      "activate": null,
+      "deactivate": null,
+      "check": null,
+      "supports_custom_seconds": false
+    }
   }
 }
 ```
@@ -691,14 +773,15 @@ Auth required. If `realtor_id` is omitted, the authenticated user’s state is r
 {
   "after_hours_enabled": true,
   "business_forwarding_enabled": true,
-  "realtor_id": 99,          // Optional; only PMs can set this
+  "carrier": "AT&T",              // Optional; update user's carrier
+  "realtor_id": 99,               // Optional; only PMs can set this
   "notes": "Enabled after-hours from dashboard",
   "confirmation_status": "success",  // "success" | "failure" | "pending"
   "failure_reason": "Carrier busy tone" // Only when confirmation_status = "failure"
 }
 ```
 
-At least one of `after_hours_enabled`, `business_forwarding_enabled`, or `confirmation_status` must be present. When `realtor_id` is set, the PM must own that realtor. The endpoint simply flips database flags; carriers are controlled solely via dial codes. Setting `confirmation_status` lets the backend know whether the carrier confirmed or rejected the dial code so Support can react (and optionally triggers an internal SMS alert if configured).
+At least one of `after_hours_enabled`, `business_forwarding_enabled`, `carrier`, or `confirmation_status` must be present. When `realtor_id` is set, the PM must own that realtor. The endpoint updates database flags and carrier setting; carriers are controlled via dial codes returned in the response.
 
 **Response**
 ```json
@@ -707,6 +790,7 @@ At least one of `after_hours_enabled`, `business_forwarding_enabled`, or `confir
   "user_type": "realtor",
   "user_id": 99,
   "forwarding_state": {
+    "carrier": "AT&T",
     "business_forwarding_enabled": true,
     "business_forwarding_active": true,
     "business_forwarding_confirmed_at": "2024-02-01T22:05:00Z",
@@ -717,7 +801,71 @@ At least one of `after_hours_enabled`, `business_forwarding_enabled`, or `confir
     "last_after_hours_update": "2024-02-01T22:05:00Z",
     "last_forwarding_update": "2024-02-01T22:05:00Z",
     "forwarding_failure_reason": null
+  },
+  "forwarding_codes": {
+    "carrier": "AT&T",
+    "carrier_type": "gsm",
+    "supports_25_second_forwarding": true,
+    "forward_all": {
+      "activate": "**21*+18885551234#",
+      "deactivate": "##21#",
+      "check": "*#21#"
+    },
+    "forward_no_answer": {
+      "activate": "**61*+18885551234**25#",
+      "deactivate": "##61#",
+      "check": "*#61#",
+      "supports_custom_seconds": true
+    }
   }
+}
+```
+
+**Get supported carriers**  
+`GET /call-forwarding-carriers`
+
+Returns list of supported carriers and their capabilities.
+
+**Response**
+```json
+{
+  "carriers": [
+    "AT&T",
+    "T-Mobile",
+    "Mint",
+    "Metro",
+    "Verizon",
+    "Xfinity Mobile",
+    "Google Fi",
+    "Consumer Cellular",
+    "Ultra Mobile"
+  ],
+  "carrier_details": [
+    {
+      "name": "AT&T",
+      "type": "gsm",
+      "supports_forward_all": true,
+      "supports_25_second_forwarding": true,
+      "requires_app": false,
+      "notes": ""
+    },
+    {
+      "name": "Verizon",
+      "type": "verizon",
+      "supports_forward_all": true,
+      "supports_25_second_forwarding": false,
+      "requires_app": false,
+      "notes": "Only supports unconditional forwarding (*72). 25-second forwarding not available."
+    },
+    {
+      "name": "Google Fi",
+      "type": "google_fi",
+      "supports_forward_all": false,
+      "supports_25_second_forwarding": false,
+      "requires_app": true,
+      "notes": ""
+    }
+  ]
 }
 ```
 
@@ -725,30 +873,165 @@ At least one of `after_hours_enabled`, `business_forwarding_enabled`, or `confir
 
 > **Error handling:** When `confirmation_status` is `"failure"`, include a human-readable `failure_reason`. The backend stores it and returns it in `forwarding_state.forwarding_failure_reason` so the UI can surface troubleshooting tips.
 
+### Frontend Implementation Guide
+
+#### 1. Carrier Selection (Onboarding/Settings)
+
+**First-time setup:** Collect the user's carrier during onboarding or in settings:
+
+```javascript
+// Get list of supported carriers
+async function getSupportedCarriers() {
+  const response = await fetch('/call-forwarding-carriers', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  const data = await response.json();
+  return data.carrier_details; // Use this to populate a dropdown
+}
+
+// Update user's carrier
+async function updateCarrier(carrier) {
+  const response = await fetch('/call-forwarding-state', {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ carrier: carrier })
+  });
+  return await response.json();
+}
+```
+
+#### 2. Using Carrier-Specific Codes
+
+**Always use codes from the backend response**, never hardcode them:
+
+```javascript
+// Get forwarding state with carrier-specific codes
+async function getForwardingState() {
+  const response = await fetch('/call-forwarding-state', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  const data = await response.json();
+  
+  // Use the codes from response.forwarding_codes
+  const codes = data.forwarding_codes;
+  
+  // Check if carrier supports 25-second forwarding
+  if (!codes.supports_25_second_forwarding) {
+    // Show warning: "Your carrier (Verizon) doesn't support 25-second forwarding"
+  }
+  
+  // For Google Fi, show app instructions
+  if (codes.forward_all.activate === "app_only") {
+    // Show: "Please configure forwarding in Google Fi app"
+    return;
+  }
+  
+  return codes;
+}
+
+// Enable business hours forwarding (25-second)
+function enableBusinessHoursForwarding(codes) {
+  if (!codes.forward_no_answer.activate) {
+    alert("Your carrier doesn't support 25-second forwarding");
+    return;
+  }
+  
+  // Use the code from backend
+  const dialCode = codes.forward_no_answer.activate;
+  window.location.href = `tel:${dialCode}`;
+  
+  // After user confirms, update state
+  updateForwardingState({ business_forwarding_enabled: true });
+}
+
+// Enable after-hours forwarding (forward all)
+function enableAfterHoursForwarding(codes) {
+  if (codes.forward_all.activate === "app_only") {
+    alert("Please configure forwarding in Google Fi app or website");
+    return;
+  }
+  
+  const dialCode = codes.forward_all.activate;
+  window.location.href = `tel:${dialCode}`;
+  
+  // After user confirms, update state
+  updateForwardingState({ after_hours_enabled: true });
+}
+
+// Disable after-hours forwarding
+function disableAfterHoursForwarding(codes) {
+  const dialCode = codes.forward_all.deactivate;
+  window.location.href = `tel:${dialCode}`;
+  
+  updateForwardingState({ after_hours_enabled: false });
+}
+```
+
+#### 3. UI Considerations
+
+**Carrier-specific UI:**
+
+- **If carrier is not set:** Show carrier selection dropdown before enabling forwarding
+- **If carrier doesn't support 25-second forwarding (Verizon, Xfinity):** 
+  - Disable or hide "Business Hours Forwarding" button
+  - Show message: "Your carrier (Verizon) only supports forwarding all calls, not 25-second forwarding"
+- **If carrier is Google Fi:**
+  - Show instructions: "Configure forwarding in Google Fi app: Settings → Calls → Call forwarding"
+  - Don't show dial code buttons
+- **For GSM carriers (AT&T, T-Mobile, etc.):**
+  - Show both buttons (Business Hours + After Hours)
+  - Use codes from `forwarding_codes.forward_no_answer.activate` and `forwarding_codes.forward_all.activate`
+
 ### Example Workflow
 
-1. **Initial setup:** PM opens dashboard, sees “Business Hours Forwarding” card. Backend reports `business_forwarding_enabled = false`, so the button is highlighted. When the PM taps the button, the frontend:
-   - Generates `**61*${botNumber}**25#`
-   - Opens the device dialer via `tel:` link (no backend call here)
-   - Once the PM confirms success, the frontend calls `PATCH /call-forwarding-state` with `{ "business_forwarding_enabled": true }`
+1. **Initial setup:**
+   - PM opens dashboard, sees "Call Forwarding" section
+   - If `carrier` is null, show carrier selection dropdown
+   - PM selects "AT&T" → Frontend calls `PATCH /call-forwarding-state` with `{ "carrier": "AT&T" }`
+   - Backend returns `forwarding_codes` with AT&T-specific codes
+   - PM taps "Enable Business Hours Forwarding" → Frontend uses `forwarding_codes.forward_no_answer.activate` (`**61*+18885551234**25#`)
+   - Opens dialer via `tel:**61*+18885551234**25#`
+   - After PM confirms success, frontend calls `PATCH /call-forwarding-state` with `{ "business_forwarding_enabled": true, "confirmation_status": "success" }`
 
 2. **Daily after-hours toggle:**
-   - At 5pm, PM presses “Enable After-Hours Mode.” Frontend triggers `tel:**21*${botNumber}#`, then `PATCH /call-forwarding-state` with `{ "after_hours_enabled": true }`.
-   - At 9am, PM uses “Disable After-Hours Mode.” Frontend triggers `tel:##21#`, then `PATCH /call-forwarding-state` with `{ "after_hours_enabled": false }`.
+   - At 5pm, PM presses "Enable After-Hours Mode"
+   - Frontend uses `forwarding_codes.forward_all.activate` from latest state
+   - For AT&T: `tel:**21*+18885551234#`
+   - For Verizon: `tel:*72 18885551234` (note: no +, space after *72)
+   - After confirmation, calls `PATCH /call-forwarding-state` with `{ "after_hours_enabled": true, "confirmation_status": "success" }`
+   - At 9am, PM uses "Disable After-Hours Mode" → Uses `forwarding_codes.forward_all.deactivate`
 
-3. **Realtor assignment:** When a PM assigns a bot number to a realtor (`POST /assign-phone-number`), store the `bot_number` relationship and initialize the forwarding flags for that realtor. The PM-facing UI should query both the realtor profile and the `forwarding_state` so the PM can walk their realtor through the exact same buttons/codes.
+3. **Carrier limitations:**
+   - If PM has Verizon and tries to enable 25-second forwarding, show: "Verizon doesn't support 25-second forwarding. Only unconditional forwarding is available."
+   - If PM has Google Fi, show app instructions instead of dial codes
 
 ### Implementation Tips
 
-- No carrier APIs are required; do not attempt to automate the GSM codes server-side.
-- `bot_number` should mirror the value Twilio/VAPI expects for inbound routing. If you support regional numbers, return the exact E.164 string to avoid formatting errors.
-- Consider adding an audit log table (`call_forwarding_events`) capturing the user, action (`business_enable`, `after_hours_on`, `after_hours_off`), timestamp, and optional notes so Support can troubleshoot.
-- The backend already persists these audit entries in `call_forwarding_events`, so Support can filter by `target_user_type`/`target_user_id` to confirm when a PM toggled a mode.
-- For mobile apps, use the native deep link format (`tel:${encodedCode}`); for web, `<a href="tel:**61*+18885551234**25#">`.
-- Frontend should display clear success instructions (e.g., “Tap call, wait for carrier confirmation tone, then return to the app”). Backend can return these copy strings as part of `/call-forwarding-state` if you want server-driven UX.
-- **Security guardrails:** The backend validates Twilio numbers (E.164 format) before responding, so disable the three dialer buttons if `twilio_number` is missing. Rate limit errors (HTTP 429) indicate the PM toggled more than the configured hourly allowance—surface a non-blocking alert and retry later.
-- **User feedback:** After the dial code completes, call `PATCH /call-forwarding-state` with `confirmation_status`. For failures, pass `failure_reason` and show `forwarding_state.forwarding_failure_reason` in the UI until the next success. Success responses may trigger an internal SMS alert for Support, so you don’t need to page them manually.
-- **Legacy data:** When an assigned number exists but `twilio_number` is still null (older records), the backend auto-fills it by reading the linked `purchased_phone_number`. Triggering `GET /my-number` (or any forwarding endpoint) will hydrate the value, so the “Assign a phone number” prompt should disappear without manual DB edits.
+- **Always use carrier-specific codes from the backend** - Never hardcode dial codes in the frontend. The backend generates the correct codes based on the user's carrier.
+- **Handle carrier limitations gracefully:**
+  - Check `forwarding_codes.supports_25_second_forwarding` before showing "Business Hours Forwarding" button
+  - For Google Fi, show app instructions instead of dial codes
+  - For Verizon/Xfinity, explain that only unconditional forwarding is available
+- **Carrier selection is required:** Prompt users to select their carrier before enabling forwarding. Store it via `PATCH /call-forwarding-state` with `{ "carrier": "AT&T" }`.
+- **Number formatting:** The backend handles number formatting automatically. GSM carriers get `+1` prefix, Verizon/Xfinity get numbers without `+` and with spaces.
+- **No carrier APIs required:** Do not attempt to automate the dial codes server-side. The frontend opens the dialer, user executes the code, then confirms success.
+- **Audit logging:** The backend persists all forwarding events in `call_forwarding_events` table, including carrier information and dial codes used.
+- **Mobile vs Web:** 
+  - Mobile apps: Use native deep link `tel:${code}`
+  - Web: Use `<a href="tel:${code}">` (works on mobile browsers)
+- **User instructions:** Display clear instructions:
+  - "Tap the button to open your dialer"
+  - "Wait for carrier confirmation tone (usually 3 beeps)"
+  - "Return to the app and confirm success"
+- **Error handling:** 
+  - If `confirmation_status = "failure"`, show `forwarding_failure_reason` to the user
+  - Common issues: "Carrier busy", "Invalid code", "Carrier not responding"
+  - For Google Fi, remind users to use the app
+- **Rate limiting:** Backend enforces 10 updates per hour per user. Show friendly message if HTTP 429 is received.
+- **Default carrier:** If carrier is not set, backend defaults to AT&T (GSM) codes. However, frontend should always prompt for carrier selection to ensure accuracy.
 
 ---
 
@@ -1146,7 +1429,9 @@ This endpoint returns:
 
 ---
 
-## 🗄️ Database Migration Required
+## 🗄️ Database Migrations Required
+
+### Migration 1: Call Records Table
 
 To enable call records functionality, run this SQL migration:
 
@@ -1183,4 +1468,26 @@ CREATE INDEX IF NOT EXISTS idx_callrecord_created_at ON callrecord(created_at DE
 - **If you're getting "column call_metadata does not exist" error, run the `ALTER TABLE` statement above**
 - The backend will automatically create this table on startup if using SQLModel's `create_all()`, but running the migration manually ensures proper indexes are in place
 - The schema includes indexes on `realtor_number`, `caller_number`, and `created_at` for efficient queries
+
+### Migration 2: Carrier Column for Call Forwarding
+
+To enable carrier-specific call forwarding, run this SQL migration:
+
+```sql
+-- Add carrier column to PropertyManager table
+ALTER TABLE propertymanager 
+ADD COLUMN IF NOT EXISTS carrier TEXT;
+
+-- Add carrier column to Realtor table
+ALTER TABLE realtor 
+ADD COLUMN IF NOT EXISTS carrier TEXT;
+```
+
+**Note:**
+- The `carrier` column stores the user's mobile carrier (e.g., "AT&T", "Verizon", "T-Mobile")
+- This allows the backend to generate carrier-specific forwarding codes
+- Users can update their carrier via `PATCH /call-forwarding-state` with `{ "carrier": "AT&T" }`
+- If carrier is not set, backend defaults to AT&T (GSM) codes, but frontend should prompt for carrier selection
+
+**See `migration_add_carrier_column.sql` for the complete migration script.**
 
