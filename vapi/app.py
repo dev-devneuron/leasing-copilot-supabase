@@ -377,11 +377,31 @@ def _get_carrier_forwarding_codes(carrier: Optional[str], bot_number: Optional[s
         carrier = "AT&T"
     
     carrier_config = CARRIER_CODES[carrier]
+    
+    # If no bot_number provided, return null codes (don't generate invalid codes)
+    if not bot_number:
+        return {
+            "carrier": carrier,
+            "carrier_type": carrier_config["type"],
+            "forward_all": {
+                "activate": None,
+                "deactivate": None,
+                "check": None
+            },
+            "forward_no_answer": {
+                "activate": None,
+                "deactivate": None,
+                "check": None,
+                "supports_custom_seconds": carrier_config.get("forward_no_answer", {}).get("supports_custom_seconds", False)
+            },
+            "supports_25_second_forwarding": carrier_config.get("forward_no_answer", {}).get("supports_custom_seconds", False)
+        }
+    
     # For Verizon/Xfinity, remove + and format with space; for GSM, keep + and format
     if carrier in ["Verizon", "Xfinity Mobile"]:
-        bot_number_clean = bot_number.replace("+", "").replace(" ", "").replace("-", "") if bot_number else ""
+        bot_number_clean = bot_number.replace("+", "").replace(" ", "").replace("-", "")
     else:
-        bot_number_clean = bot_number if bot_number else ""
+        bot_number_clean = bot_number
     
     codes = {
         "carrier": carrier,
