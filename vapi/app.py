@@ -1063,84 +1063,25 @@ _phone_id_cache: Dict[str, str] = {}
 # Store phone_number -> phone_number_id mapping (reverse lookup)
 _phone_to_id_cache: Dict[str, str] = {}
 
-@app.post("/vapi-webhook")
-async def vapi_webhook(request: Request):
-    """
-    Webhook endpoint to receive Vapi call events.
-    Stores call_id -> phone_number mapping for data isolation.
-    
-    This endpoint should be configured as the Server URL in Vapi phone number settings.
-    """
-    try:
-        body = await request.json()
-        print(f"📞 Vapi webhook received - Event type: {body.get('type', 'unknown')}")
-        print(f"   Body keys: {list(body.keys())}")
-        
-        # Extract call information - Vapi sends different structures for different events
-        # Also check headers for x-call-id (sent with tool calls)
-        call_id = (
-            body.get("call") or 
-            body.get("callId") or 
-            body.get("id") or
-            (body.get("call") and body["call"].get("id")) if isinstance(body.get("call"), dict) else None or
-            request.headers.get("x-call-id") or
-            request.headers.get("X-Call-ID")
-        )
-        
-        # Extract phone number ID
-        phone_number_id = (
-            body.get("phoneNumberId") or 
-            (body.get("phoneNumber") and body["phoneNumber"].get("id")) if isinstance(body.get("phoneNumber"), dict) else None or
-            (body.get("call") and body["call"].get("phoneNumberId")) if isinstance(body.get("call"), dict) else None
-        )
-        
-        # Try to get phone number from various fields
-        phone_number = (
-            body.get("phoneNumber") if isinstance(body.get("phoneNumber"), str) else
-            (body.get("phoneNumber") and body["phoneNumber"].get("number")) if isinstance(body.get("phoneNumber"), dict) else
-            body.get("to") or
-            body.get("To") or
-            (body.get("call") and body["call"].get("phoneNumber")) if isinstance(body.get("call"), dict) else None
-        )
-        
-        # Check for Twilio data (most reliable)
-        twilio_data = body.get("twilio", {})
-        if isinstance(twilio_data, dict):
-            destination_number = twilio_data.get("to") or twilio_data.get("To")
-            if destination_number:
-                phone_number = destination_number
-                print(f"   📞 Found destination number in twilio: {destination_number}")
-        
-        # If we have phoneNumberId but not phone number, fetch it
-        if phone_number_id and not phone_number:
-            from DB.vapi_helpers import get_phone_number_from_id
-            phone_number = get_phone_number_from_id(phone_number_id)
-            if phone_number:
-                _phone_id_cache[phone_number_id] = phone_number
-                print(f"   ✅ Fetched and cached phone number from ID: {phone_number}")
-        
-        # Store mapping if we have both call_id and phone_number
-        if call_id and phone_number:
-            _call_phone_cache[call_id] = phone_number
-            print(f"✅ Stored mapping: call_id={call_id} -> phone_number={phone_number}")
-            # Keep cache size reasonable (last 1000 calls)
-            if len(_call_phone_cache) > 1000:
-                # Remove oldest entries (simple FIFO)
-                oldest_key = next(iter(_call_phone_cache))
-                del _call_phone_cache[oldest_key]
-        
-        # Also store phone_number_id -> phone_number mapping (both directions)
-        if phone_number_id and phone_number:
-            _phone_id_cache[phone_number_id] = phone_number
-            _phone_to_id_cache[phone_number] = phone_number_id
-            print(f"✅ Stored phone_number_id mapping: {phone_number_id} <-> {phone_number}")
-        
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"⚠️  Error processing Vapi webhook: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"status": "error", "message": str(e)}
+
+def _update_vapi_caches(
+    call_id: Optional[str],
+    phone_number: Optional[str],
+    phone_number_id: Optional[str] = None,
+):
+    """Keep caches in sync for downstream data isolation helpers."""
+    if call_id and phone_number:
+        _call_phone_cache[call_id] = phone_number
+        # Keep cache size reasonable (last 1000 calls)
+        if len(_call_phone_cache) > 1000:
+            oldest_key = next(iter(_call_phone_cache))
+            del _call_phone_cache[oldest_key]
+        print(f"✅ Stored mapping: call_id={call_id} -> phone_number={phone_number}")
+
+    if phone_number_id and phone_number:
+        _phone_id_cache[phone_number_id] = phone_number
+        _phone_to_id_cache[phone_number] = phone_number_id
+        print(f"✅ Stored phone_number_id mapping: {phone_number_id} <-> {phone_number}")
 
 
 # ------------------ Twilio WhatsApp ------------------ #
@@ -4886,6 +4827,21 @@ async def vapi_webhook_hyphen(request: Request):
             # Fallback: maybe payload is the message itself
             message = payload
         
+        phone_number_id = (
+            payload.get("phoneNumberId")
+            or message.get("phoneNumberId")
+            or (
+                payload.get("phoneNumber", {}).get("id")
+                if isinstance(payload.get("phoneNumber"), dict)
+                else None
+            )
+            or (
+                message.get("phoneNumber", {}).get("id")
+                if isinstance(message.get("phoneNumber"), dict)
+                else None
+            )
+        )
+        
         # Debug: Log message structure
         print(f"🔍 Message object keys: {list(message.keys()) if isinstance(message, dict) else 'not a dict'}")
         if isinstance(message, dict) and "type" in message:
@@ -5032,6 +4988,7 @@ async def vapi_webhook_hyphen(request: Request):
                     realtor_number = _fetch_phone_number_from_vapi(phone_number_id)
         
         realtor_number = _normalize_bot_number(realtor_number) if realtor_number else "unknown"
+        _update_vapi_caches(call_id, None if realtor_number == "unknown" else realtor_number, phone_number_id)
         
         # If we don't have call_id, try to find recent call by phone number and timestamp
         # or fetch from VAPI API
