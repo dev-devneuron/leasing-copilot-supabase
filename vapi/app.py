@@ -343,6 +343,111 @@ def _normalize_bot_number(number: Optional[Union[str, Dict[str, Any], int, float
     return stripped
 
 
+def _extract_caller_number(
+    payload: Optional[Dict[str, Any]] = None,
+    message: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Best-effort extraction of the caller's phone number from VAPI payloads or headers."""
+    
+    def _clean(value: Any) -> Optional[str]:
+        if not value:
+            return None
+        if isinstance(value, dict):
+            candidate_keys = [
+                "phoneNumber",
+                "number",
+                "phone",
+                "contactNumber",
+                "contact_number",
+                "value",
+                "formatted",
+            ]
+            for key in candidate_keys:
+                candidate = value.get(key)
+                cleaned = _clean(candidate)
+                if cleaned:
+                    return cleaned
+            # Look into nested contact/customer nodes
+            for nested_key in ["contact", "customer", "details"]:
+                cleaned = _clean(value.get(nested_key))
+                if cleaned:
+                    return cleaned
+            return None
+        if isinstance(value, list):
+            for item in value:
+                cleaned = _clean(item)
+                if cleaned:
+                    return cleaned
+            return None
+        if isinstance(value, (int, float)):
+            value = str(int(value))
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return None
+    
+    candidate_values: list[Any] = []
+    
+    def _collect(source: Optional[Dict[str, Any]]):
+        if not isinstance(source, dict):
+            return
+        candidate_values.extend([
+            source.get("fromNumber"),
+            source.get("from"),
+            source.get("callerNumber"),
+            source.get("customerNumber"),
+            source.get("customerPhoneNumber"),
+        ])
+        call_obj = source.get("call")
+        if isinstance(call_obj, dict):
+            candidate_values.extend([
+                call_obj.get("fromNumber"),
+                call_obj.get("from"),
+                call_obj.get("callerNumber"),
+                call_obj.get("customerPhoneNumber"),
+                call_obj.get("customer", {}).get("phoneNumber") if isinstance(call_obj.get("customer"), dict) else None,
+            ])
+        customer_obj = source.get("customer")
+        if isinstance(customer_obj, dict):
+            candidate_values.extend([
+                customer_obj.get("phoneNumber"),
+                customer_obj.get("phone"),
+                customer_obj.get("number"),
+                customer_obj.get("contactNumber"),
+            ])
+            contact_obj = customer_obj.get("contact")
+            if isinstance(contact_obj, dict):
+                candidate_values.extend([
+                    contact_obj.get("phone"),
+                    contact_obj.get("phoneNumber"),
+                    contact_obj.get("number"),
+                    contact_obj.get("mobile"),
+                ])
+        twilio_obj = source.get("twilio")
+        if isinstance(twilio_obj, dict):
+            candidate_values.extend([
+                twilio_obj.get("from"),
+                twilio_obj.get("From"),
+            ])
+    
+    _collect(payload)
+    _collect(message)
+    
+    if headers:
+        candidate_values.extend([
+            headers.get("x-vapi-from"),
+            headers.get("x-vapi-caller"),
+            headers.get("x-forwarded-from"),
+        ])
+    
+    for value in candidate_values:
+        cleaned = _clean(value)
+        if cleaned:
+            return cleaned
+    return None
+
+
 def _get_or_sync_twilio_number(session: Session, user_record):
     """Ensure user record has a valid Twilio number, falling back to assigned purchased numbers."""
     purchased_id = getattr(user_record, "purchased_phone_number_id", None)
@@ -4752,7 +4857,8 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
     call_status = call_data.get("status", "ended")
     call_duration = call_data.get("duration")
     duration_source = "payload" if call_duration else None
-    caller_number = call_data.get("fromNumber") or call_data.get("from")
+    caller_number_raw = _extract_caller_number(call_data, call_data)
+    caller_number = _normalize_bot_number(caller_number_raw) if caller_number_raw else None
     
     # If recording URL is missing, try to fetch from VAPI API
     if not recording_url and call_id:
@@ -4769,7 +4875,8 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
                 if call_duration:
                     duration_source = "vapi_api"
             if not caller_number:
-                caller_number = call_details.get("fromNumber") or call_details.get("from")
+                details_caller = _extract_caller_number(call_details, call_details)
+                caller_number = _normalize_bot_number(details_caller) if details_caller else None
     
     if not call_duration and recording_url:
         derived_duration = _derive_duration_from_recording(recording_url)
@@ -4807,10 +4914,11 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
             "imported_from_vapi": True,
             "imported_at": datetime.utcnow().isoformat(),
             "vapi_data": {k: v for k, v in call_data.items() if k not in ["id", "callId", "transcript", "recordingUrl", "recording"]},
-            **({"duration_source": duration_source} if duration_source else {}),
         },
         created_at=created_at,
     )
+    if duration_source:
+        call_record.call_metadata["duration_source"] = duration_source
     
     session.add(call_record)
     session.commit()
@@ -4934,6 +5042,7 @@ async def vapi_webhook_hyphen(request: Request):
     """
     try:
         payload = await request.json()
+        headers_lower = {k.lower(): v for k, v in request.headers.items()}
         
         # Extract call ID from headers first (VAPI sends it in x-call-id header)
         call_id = request.headers.get("x-call-id") or request.headers.get("X-Call-Id")
@@ -4976,6 +5085,8 @@ async def vapi_webhook_hyphen(request: Request):
             )
         )
 
+        caller_number_raw = _extract_caller_number(payload, message, headers_lower)
+        
         # Debug: Log message structure
         print(f"🔍 Message object keys: {list(message.keys()) if isinstance(message, dict) else 'not a dict'}")
         if isinstance(message, dict) and "type" in message:
@@ -5207,15 +5318,14 @@ async def vapi_webhook_hyphen(request: Request):
                     call_record.call_metadata = {}
                 call_record.call_metadata["webhook_timestamp"] = timestamp
             
-            # Extract caller number if available
-            caller_number = (
-                payload.get("fromNumber") or 
-                payload.get("from") or
-                message.get("fromNumber") or
-                message.get("from")
-            )
-            if caller_number:
-                call_record.caller_number = _normalize_bot_number(caller_number)
+            if caller_number_raw and not call_record.caller_number:
+                normalized_caller = _normalize_bot_number(caller_number_raw)
+                if normalized_caller:
+                    call_record.caller_number = normalized_caller
+                    if call_record.call_metadata is None:
+                        call_record.call_metadata = {}
+                    call_record.call_metadata["caller_source"] = "webhook_payload"
+                    updated = True
             
             # Fetch recording URL and call_id from VAPI API if we don't have it
             if not call_record.recording_url or (call_id and call_id.startswith("webhook_")):
@@ -5260,6 +5370,15 @@ async def vapi_webhook_hyphen(request: Request):
                                     if call_record.call_metadata is None:
                                         call_record.call_metadata = {}
                                     call_record.call_metadata["duration_source"] = "vapi_api"
+                                    updated = True
+                            if not call_record.caller_number:
+                                details_caller_raw = _extract_caller_number(call_details, call_details)
+                                normalized_caller = _normalize_bot_number(details_caller_raw) if details_caller_raw else None
+                                if normalized_caller:
+                                    call_record.caller_number = normalized_caller
+                                    if call_record.call_metadata is None:
+                                        call_record.call_metadata = {}
+                                    call_record.call_metadata["caller_source"] = "vapi_api"
                                     updated = True
             
             if call_record.recording_url and not call_record.call_duration:
@@ -5331,6 +5450,8 @@ async def vapi_webhook(request: Request):
             data = payload
             call_id = data.get("callId") or data.get("id")
         
+        caller_number_raw = _extract_caller_number(data, data)
+        
         # Extract phone number - VAPI uses phoneNumberId or phoneNumber object
         realtor_number = None
         
@@ -5387,6 +5508,12 @@ async def vapi_webhook(request: Request):
             now = datetime.utcnow()
             updated = False
             
+            if caller_number_raw and not call_record.caller_number:
+                normalized_caller = _normalize_bot_number(caller_number_raw)
+                if normalized_caller:
+                    call_record.caller_number = normalized_caller
+                    updated = True
+            
             # Handle different event types
             if event_type == "transcript.created":
                 # Real-time transcript chunk
@@ -5411,7 +5538,8 @@ async def vapi_webhook(request: Request):
                 # Store call status and duration
                 call_record.call_status = "ended"
                 call_record.call_duration = data.get("duration") or data.get("callDuration")
-                call_record.caller_number = data.get("from") or data.get("callerNumber")
+                if caller_number_raw:
+                    call_record.caller_number = _normalize_bot_number(caller_number_raw)
                 call_record.updated_at = now
                 updated = True
                 
