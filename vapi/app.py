@@ -270,10 +270,47 @@ def _reset_forwarding_state(user_record):
     user_record.last_forwarding_update = None
 
 
-def _normalize_bot_number(number: Optional[str]) -> Optional[str]:
+def _normalize_bot_number(number: Optional[Union[str, Dict[str, Any], int, float]]) -> Optional[str]:
     """Normalize phone number to E.164 format (+1XXXXXXXXXX)."""
-    if not number:
+    if number is None:
         return None
+    
+    original = number
+    
+    # Handle objects VAPI might send (dict with number fields)
+    if isinstance(number, dict):
+        candidate_keys = [
+            "number",
+            "phoneNumber",
+            "value",
+            "phone",
+            "phone_number",
+            "formatted",
+            "formattedNumber",
+        ]
+        for key in candidate_keys:
+            value = number.get(key)
+            if isinstance(value, str) and value.strip():
+                number = value
+                break
+        else:
+            # Fallback to id or first non-empty string
+            fallback = number.get("id") or number.get("sid")
+            if isinstance(fallback, str):
+                number = fallback
+            else:
+                # Unable to extract string - log and return None
+                print(f"⚠️  _normalize_bot_number received dict without string value: {number}")
+                return None
+    
+    # Convert non-string primitives
+    if isinstance(number, (int, float)):
+        number = str(int(number))
+    
+    if not isinstance(number, str):
+        print(f"⚠️  _normalize_bot_number received unsupported type {type(original)}")
+        return None
+    
     stripped = number.strip()
     if not stripped or stripped.upper() == "TBD":
         return None
@@ -4842,6 +4879,12 @@ async def vapi_webhook_hyphen(request: Request):
             )
         )
         
+        artifact = message.get("artifact") if isinstance(message, dict) else None
+        if not isinstance(artifact, dict):
+            artifact = {}
+        artifact_messages = artifact.get("messages", []) if artifact else []
+        has_artifact_messages = bool(artifact_messages)
+
         # Debug: Log message structure
         print(f"🔍 Message object keys: {list(message.keys()) if isinstance(message, dict) else 'not a dict'}")
         if isinstance(message, dict) and "type" in message:
@@ -4865,8 +4908,7 @@ async def vapi_webhook_hyphen(request: Request):
         is_end_of_call = (
             ("end" in message_type_lower and "call" in message_type_lower and "report" in message_type_lower) or
             message_type_lower == "end-of-call-report" or  # Fallback for hyphenated format
-            (not message_type and "artifact" in message) or
-            (isinstance(message, dict) and "artifact" in message and message.get("artifact"))
+            (not message_type and has_artifact_messages)
         )
         
         if not is_end_of_call:
@@ -4921,13 +4963,11 @@ async def vapi_webhook_hyphen(request: Request):
             else:
                 print(f"⚠️  No 'artifact' key in message. Available keys: {list(message.keys())[:10]}")
         
-        artifact = message.get("artifact", {})
         if artifact:
-            messages = artifact.get("messages", [])
-            print(f"📋 Found artifact with {len(messages)} messages")
-            if messages:
+            print(f"📋 Found artifact with {len(artifact_messages)} messages")
+            if artifact_messages:
                 # Build transcript from messages array
-                for msg in messages:
+                for msg in artifact_messages:
                     role = msg.get("role", "")
                     msg_text = msg.get("message", "")
                     if msg_text and role in ["user", "bot", "assistant", "system"]:
@@ -4936,9 +4976,9 @@ async def vapi_webhook_hyphen(request: Request):
                 
                 if transcript_parts:
                     transcript = "\n\n".join(transcript_parts)
-                    print(f"📄 Extracted transcript from {len(messages)} messages: {len(transcript)} chars")
+                    print(f"📄 Extracted transcript from {len(artifact_messages)} messages: {len(transcript)} chars")
                 else:
-                    print(f"⚠️  No transcript parts extracted from {len(messages)} messages")
+                    print(f"⚠️  No transcript parts extracted from {len(artifact_messages)} messages")
             else:
                 print(f"⚠️  Artifact found but messages array is empty")
         else:
@@ -5104,7 +5144,7 @@ async def vapi_webhook_hyphen(request: Request):
                 "last_webhook_at": now.isoformat(),
                 "message_type": message_type,
                 "has_summary": bool(summary),
-                "message_count": len(artifact.get("messages", [])) if artifact else 0,
+                "message_count": len(artifact_messages),
             })
             # Store full payload for debugging (limit size)
             payload_str = json.dumps(payload)
