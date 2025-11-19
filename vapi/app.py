@@ -4900,7 +4900,7 @@ async def vapi_webhook_hyphen(request: Request):
         print(f"📞 VAPI webhook received - Event type: {message_type or 'unknown'}, Call ID: {call_id or 'not found'}")
         
         # Only process end-of-call-report for transcript extraction
-        # VAPI sends multiple webhook events during a call:
+        # VAPI sends multiple webhook events during a call so:
         # - Status Update, Conversation Update, Speech Update (no transcripts)
         # - End Of Call Report (contains transcript in artifact.messages)
         # VAPI uses "End Of Call Report" (with spaces and capitals) in the type field
