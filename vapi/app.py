@@ -690,10 +690,27 @@ def _get_or_sync_twilio_number(session: Session, user_record):
                 PurchasedPhoneNumber.assigned_to_type == "property_manager",
                 PurchasedPhoneNumber.assigned_to_type == "Property Manager",
             ])
+        elif assigned_type == "realtor":
+            type_conditions.extend([
+                PurchasedPhoneNumber.assigned_to_type == "realtor",
+                PurchasedPhoneNumber.assigned_to_type == "Realtor",
+            ])
         
         query = query.where(or_(*type_conditions))
         
         result = session.exec(query.order_by(PurchasedPhoneNumber.assigned_at.desc())).first()
+        
+        # CRITICAL: For realtors, verify the result is actually assigned to THIS realtor
+        # and not accidentally matching a PM's number
+        if result and assigned_type == "realtor":
+            # Double-check: ensure assigned_to_id matches the realtor_id, not PM_id
+            if result.assigned_to_id != target_id:
+                print(f"⚠️  WARNING: Found number {result.phone_number} but assigned_to_id {result.assigned_to_id} doesn't match realtor_id {target_id}")
+                return None
+            # Ensure it's not assigned to PM
+            if result.assigned_to_type and "manager" in result.assigned_to_type.lower():
+                print(f"⚠️  WARNING: Found number {result.phone_number} but it's assigned to PM, not realtor")
+                return None
         
         # Debug logging
         if isinstance(user_record, PropertyManager):
@@ -710,6 +727,13 @@ def _get_or_sync_twilio_number(session: Session, user_record):
                 print(f"  ✅ Found matching number: {result.phone_number}")
             else:
                 print(f"  ❌ No matching number found")
+        elif isinstance(user_record, Realtor):
+            print(f"🔍 DEBUG _lookup_assigned_number for Realtor {target_id}:")
+            print(f"  - Looking for assigned_to_id={target_id}, assigned_to_type={assigned_type}")
+            if result:
+                print(f"  ✅ Found matching number: {result.phone_number} (assigned_to_id={result.assigned_to_id}, assigned_to_type='{result.assigned_to_type}')")
+            else:
+                print(f"  ❌ No matching number found for realtor")
         
         return result
 
@@ -718,6 +742,7 @@ def _get_or_sync_twilio_number(session: Session, user_record):
     
     # Fallback: If still not found, try a very lenient lookup - just find ANY number
     # assigned to this PM/realtor (ignore assigned_to_type format issues)
+    # IMPORTANT: Only do this for PMs, NOT for realtors (realtors must have explicit assignment)
     if not purchased and isinstance(user_record, PropertyManager):
         print(f"🔍 DEBUG: Trying lenient fallback for PM {pm_id}")
         purchased = session.exec(
@@ -728,7 +753,12 @@ def _get_or_sync_twilio_number(session: Session, user_record):
             .order_by(PurchasedPhoneNumber.assigned_at.desc())
         ).first()
         if purchased:
-            print(f"  ✅ Lenient fallback found: {purchased.phone_number} (assigned_to_type='{purchased.assigned_to_type}')")
+            # Verify it's actually assigned to PM, not a realtor
+            if purchased.assigned_to_type and "realtor" in purchased.assigned_to_type.lower():
+                print(f"  ⚠️  Lenient fallback found number assigned to realtor, skipping for PM")
+                purchased = None
+            else:
+                print(f"  ✅ Lenient fallback found: {purchased.phone_number} (assigned_to_type='{purchased.assigned_to_type}')")
 
     # If the PM never explicitly assigned the bot number to themselves,
     # auto-promote the oldest number they own so the dashboard always has a callbot DID.
@@ -4700,6 +4730,43 @@ def get_call_forwarding_state(
         )
 
         bot_number = _get_or_sync_twilio_number(session, target_record)
+        
+        # For realtors, if no number is assigned, return None (don't fall back to PM's number)
+        if target_type == "realtor" and not bot_number:
+            # Verify the realtor truly has no assigned number
+            realtor = target_record
+            purchased_id = getattr(realtor, "purchased_phone_number_id", None)
+            if not purchased_id:
+                # Check if there's any number assigned to this realtor in PurchasedPhoneNumber
+                assigned_number = session.exec(
+                    select(PurchasedPhoneNumber)
+                    .where(PurchasedPhoneNumber.property_manager_id == realtor.property_manager_id)
+                    .where(PurchasedPhoneNumber.assigned_to_id == realtor.realtor_id)
+                    .where(
+                        or_(
+                            func.lower(func.coalesce(PurchasedPhoneNumber.assigned_to_type, "")) == "realtor",
+                            PurchasedPhoneNumber.assigned_to_type == "realtor",
+                            PurchasedPhoneNumber.assigned_to_type == "Realtor",
+                        )
+                    )
+                ).first()
+                
+                if not assigned_number:
+                    # Realtor has no number assigned - return None explicitly
+                    bot_number = None
+                    carrier = getattr(target_record, "carrier", None)
+                    forwarding_codes = _get_carrier_forwarding_codes(carrier, None)
+                    
+                    return JSONResponse(content={
+                        "user_type": target_type,
+                        "user_id": target_id,
+                        "twilio_number": None,
+                        "twilio_sid": None,
+                        "forwarding_state": _serialize_forwarding_state(target_record),
+                        "forwarding_codes": forwarding_codes,
+                        "message": "No phone number assigned to this realtor. Please assign a number first."
+                    })
+        
         if bot_number and not BOT_NUMBER_REGEX.match(bot_number):
             raise HTTPException(
                 status_code=422,

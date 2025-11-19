@@ -681,7 +681,7 @@ Property managers and their realtors keep their SIM-based carrier numbers, but w
 `GET /call-forwarding-state?realtor_id=<optional>`  
 Auth required. If `realtor_id` is omitted, the authenticated user's state is returned. `realtor_id` is only allowed for property managers and must belong to them.
 
-**Response**
+**Response (when number is assigned):**
 ```json
 {
   "user_type": "property_manager",
@@ -719,6 +719,45 @@ Auth required. If `realtor_id` is omitted, the authenticated user's state is ret
   }
 }
 ```
+
+**Response (when realtor has no number assigned):**
+```json
+{
+  "user_type": "realtor",
+  "user_id": 96,
+  "twilio_number": null,
+  "twilio_sid": null,
+  "message": "No phone number assigned to this realtor. Please assign a number first.",
+  "forwarding_state": {
+    "carrier": null,
+    "business_forwarding_enabled": false,
+    "after_hours_enabled": false,
+    ...
+  },
+  "forwarding_codes": {
+    "carrier": "AT&T",
+    "carrier_type": "gsm",
+    "supports_25_second_forwarding": true,
+    "forward_all": {
+      "activate": null,
+      "deactivate": null,
+      "check": null
+    },
+    "forward_no_answer": {
+      "activate": null,
+      "deactivate": null,
+      "check": null,
+      "supports_custom_seconds": true
+    }
+  }
+}
+```
+
+**Important:** 
+- If `twilio_number` is `null`, the realtor has no number assigned
+- The backend will **never** return the PM's number when querying for a realtor's forwarding state
+- Frontend should check for `twilio_number === null` and show "No number assigned" message
+- Disable forwarding controls when `twilio_number` is `null`
 
 **Example Response for Verizon (no 25-second support):**
 ```json
