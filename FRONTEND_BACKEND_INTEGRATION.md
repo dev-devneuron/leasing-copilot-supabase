@@ -963,6 +963,35 @@ VAPI automatically sends call events (transcripts, recordings, call status) to o
 }
 ```
 
+### Delete Call Record / Assets
+
+**Endpoint:** `DELETE /call-records/{call_id}?hard_delete=false`  
+**Auth:** Required
+
+- Default (`hard_delete=false`): removes transcript, live transcript chunks, and recording URL while keeping the row for auditing.
+- `hard_delete=true`: permanently deletes the row (irreversible).
+
+**Responses**
+
+```json
+{
+  "message": "Call transcript and recording removed",
+  "call_id": "vapi_call_123",
+  "hard_delete": false
+}
+
+{
+  "message": "Call record permanently deleted",
+  "call_id": "vapi_call_123",
+  "hard_delete": true
+}
+```
+
+**UI Guidance**
+- Present two destructive actions (“Remove transcript & audio” vs. “Delete record”) with confirmation dialogs.
+- After a soft delete, refresh the list so the row remains but transcript/recording columns are empty; hard deletes remove the row entirely.
+- Backend already enforces ownership (PMs manage their own + realtors’ calls; Realtors only their own), so surface a toast if API returns 403.
+
 **Frontend Implementation:**
 ```javascript
 // Get call records list

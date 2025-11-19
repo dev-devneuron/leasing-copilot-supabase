@@ -34,7 +34,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 import re
 import uuid
-from typing import Union, Optional, Dict, Any
+from typing import Union, Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 import json
@@ -5599,6 +5599,39 @@ async def vapi_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 
 
+def _get_accessible_bot_numbers(session: Session, user_type: str, user_id: int) -> List[str]:
+    """Return a list of bot numbers the current user is allowed to access."""
+    accessible_numbers: List[str] = []
+    
+    if user_type == "property_manager":
+        pm = session.get(PropertyManager, user_id)
+        if not pm:
+            raise HTTPException(status_code=404, detail="Property Manager not found")
+        
+        pm_bot = _get_or_sync_twilio_number(session, pm)
+        if pm_bot:
+            accessible_numbers.append(pm_bot)
+        
+        realtors = session.exec(
+            select(Realtor).where(Realtor.property_manager_id == user_id)
+        ).all()
+        for realtor in realtors:
+            realtor_bot = _get_or_sync_twilio_number(session, realtor)
+            if realtor_bot:
+                accessible_numbers.append(realtor_bot)
+    
+    elif user_type == "realtor":
+        realtor = session.get(Realtor, user_id)
+        if not realtor:
+            raise HTTPException(status_code=404, detail="Realtor not found")
+        
+        realtor_bot = _get_or_sync_twilio_number(session, realtor)
+        if realtor_bot:
+            accessible_numbers.append(realtor_bot)
+    
+    return accessible_numbers
+
+
 @app.get("/call-records")
 def get_call_records(
     user_data: dict = Depends(get_current_user_data),
@@ -5617,50 +5650,9 @@ def get_call_records(
         raise HTTPException(status_code=400, detail="Invalid user data")
     
     with Session(engine) as session:
-        # Get the user's bot number(s)
-        accessible_numbers = []
-        
-        if user_type == "property_manager":
-            # PM can see calls for their own number and all their realtors' numbers
-            pm = session.get(PropertyManager, user_id)
-            if not pm:
-                raise HTTPException(status_code=404, detail="Property Manager not found")
-            
-            # Get PM's bot number
-            pm_bot = _get_or_sync_twilio_number(session, pm)
-            if pm_bot:
-                accessible_numbers.append(pm_bot)
-            
-            # Get all realtors' bot numbers
-            realtors = session.exec(
-                select(Realtor).where(Realtor.property_manager_id == user_id)
-            ).all()
-            
-            for realtor in realtors:
-                realtor_bot = _get_or_sync_twilio_number(session, realtor)
-                if realtor_bot:
-                    accessible_numbers.append(realtor_bot)
-        
-        elif user_type == "realtor":
-            # Realtor can only see calls for their own number
-            realtor = session.get(Realtor, user_id)
-            if not realtor:
-                raise HTTPException(status_code=404, detail="Realtor not found")
-            
-            realtor_bot = _get_or_sync_twilio_number(session, realtor)
-            if not realtor_bot:
-                # No number assigned, return empty list
-                return JSONResponse(content={
-                    "call_records": [],
-                    "total": 0,
-                    "limit": limit,
-                    "offset": offset,
-                })
-            
-            accessible_numbers.append(realtor_bot)
+        accessible_numbers = _get_accessible_bot_numbers(session, user_type, user_id)
         
         if not accessible_numbers:
-            # No numbers assigned, return empty list
             return JSONResponse(content={
                 "call_records": [],
                 "total": 0,
@@ -5668,19 +5660,16 @@ def get_call_records(
                 "offset": offset,
             })
         
-        # Query call records for accessible numbers
         base_query = select(CallRecord).where(
             CallRecord.realtor_number.in_(accessible_numbers)
         )
         
-        # Get total count (efficient)
         from sqlalchemy import func
         total_query = select(func.count(CallRecord.id)).where(
             CallRecord.realtor_number.in_(accessible_numbers)
         )
         total = session.exec(total_query).one()
         
-        # Apply pagination and ordering
         call_records = session.exec(
             base_query.order_by(CallRecord.created_at.desc()).limit(limit).offset(offset)
         ).all()
@@ -5723,7 +5712,6 @@ def get_call_record_detail(
         raise HTTPException(status_code=400, detail="Invalid user data")
     
     with Session(engine) as session:
-        # Get the call record
         call_record = session.exec(
             select(CallRecord).where(CallRecord.call_id == call_id)
         ).first()
@@ -5731,30 +5719,7 @@ def get_call_record_detail(
         if not call_record:
             raise HTTPException(status_code=404, detail="Call record not found")
         
-        # Verify user has access to this call
-        accessible_numbers = []
-        
-        if user_type == "property_manager":
-            pm = session.get(PropertyManager, user_id)
-            if pm:
-                pm_bot = _get_or_sync_twilio_number(session, pm)
-                if pm_bot:
-                    accessible_numbers.append(pm_bot)
-                
-                realtors = session.exec(
-                    select(Realtor).where(Realtor.property_manager_id == user_id)
-                ).all()
-                for realtor in realtors:
-                    realtor_bot = _get_or_sync_twilio_number(session, realtor)
-                    if realtor_bot:
-                        accessible_numbers.append(realtor_bot)
-        
-        elif user_type == "realtor":
-            realtor = session.get(Realtor, user_id)
-            if realtor:
-                realtor_bot = _get_or_sync_twilio_number(session, realtor)
-                if realtor_bot:
-                    accessible_numbers.append(realtor_bot)
+        accessible_numbers = _get_accessible_bot_numbers(session, user_type, user_id)
         
         if call_record.realtor_number not in accessible_numbers:
             raise HTTPException(status_code=403, detail="Access denied to this call record")
@@ -5773,6 +5738,64 @@ def get_call_record_detail(
             "created_at": call_record.created_at.isoformat() if call_record.created_at else None,
             "updated_at": call_record.updated_at.isoformat() if call_record.updated_at else None,
         })
+
+
+@app.delete("/call-records/{call_id}")
+def delete_call_record(
+    call_id: str,
+    hard_delete: bool = False,
+    user_data: dict = Depends(get_current_user_data),
+):
+    """
+    Delete a call record or purge its sensitive assets.
+    - Default (hard_delete=false): Keep record metadata but remove transcript, live transcript chunks, and recording URL.
+    - hard_delete=true: Permanently delete the call record row.
+    """
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    if not user_type or not user_id:
+        raise HTTPException(status_code=400, detail="Invalid user data")
+    
+    with Session(engine) as session:
+        call_record = session.exec(
+            select(CallRecord).where(CallRecord.call_id == call_id)
+        ).first()
+        
+        if not call_record:
+            raise HTTPException(status_code=404, detail="Call record not found")
+        
+        accessible_numbers = _get_accessible_bot_numbers(session, user_type, user_id)
+        if call_record.realtor_number not in accessible_numbers:
+            raise HTTPException(status_code=403, detail="Access denied to this call record")
+        
+        if hard_delete:
+            session.delete(call_record)
+            session.commit()
+            return {"message": "Call record permanently deleted", "call_id": call_id, "hard_delete": True}
+        
+        # Soft delete: remove sensitive assets but keep metadata for auditing
+        call_record.transcript = None
+        call_record.live_transcript_chunks = None
+        call_record.recording_url = None
+        call_record.updated_at = datetime.utcnow()
+        if call_record.call_metadata is None:
+            call_record.call_metadata = {}
+        call_record.call_metadata["content_deleted_at"] = call_record.updated_at.isoformat()
+        call_record.call_metadata["content_deleted_by"] = {
+            "user_type": user_type,
+            "user_id": user_id,
+        }
+        
+        session.add(call_record)
+        session.commit()
+        session.refresh(call_record)
+        
+        return {
+            "message": "Call transcript and recording removed",
+            "call_id": call_id,
+            "hard_delete": False,
+        }
 
 
 @app.get("/recordings")
