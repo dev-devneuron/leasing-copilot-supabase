@@ -1301,221 +1301,221 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
         # Process tool call
         for tool_call in request.message.toolCalls:
             if tool_call.function.name == "submitMaintenanceRequest":
-            args = tool_call.function.arguments
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except:
-                    args = {"issue_description": args.strip()}
-            
-            # Extract and sanitize input
-            issue_description = (args.get("issue_description") or args.get("issueDescription") or "").strip()
-            tenant_name = (args.get("tenant_name") or args.get("tenantName") or "").strip() or None
-            tenant_email = (args.get("tenant_email") or args.get("tenantEmail") or "").strip() or None
-            tenant_phone = args.get("tenant_phone") or args.get("tenantPhone") or caller_phone
-            category = (args.get("category") or "").strip().lower() or None
-            location = (args.get("location") or "").strip() or None
-            priority = (args.get("priority") or "normal").strip().lower()
-            
-            # Validate issue description
-            if not issue_description:
-                raise HTTPException(status_code=400, detail="Missing issue_description")
-            
-            # Sanitize issue description (remove excessive whitespace, limit length)
-            issue_description = " ".join(issue_description.split())  # Normalize whitespace
-            if len(issue_description) > 5000:  # Reasonable limit
-                issue_description = issue_description[:5000] + "..."
-            
-            # Validate and normalize priority
-            valid_priorities = ["low", "normal", "high", "urgent"]
-            if priority not in valid_priorities:
-                # Auto-detect priority from issue description
-                issue_lower = issue_description.lower()
-                if any(word in issue_lower for word in ["urgent", "emergency", "flooding", "fire", "no heat", "no water", "gas leak"]):
-                    priority = "urgent"
-                elif any(word in issue_lower for word in ["broken", "not working", "leaking", "overflowing"]):
-                    priority = "high"
-                elif any(word in issue_lower for word in ["minor", "small", "cosmetic"]):
-                    priority = "low"
-                else:
-                    priority = "normal"
-            
-            # Validate category enum if provided
-            valid_categories = ["plumbing", "electrical", "appliance", "heating", "hvac", "other"]
-            if category and category not in valid_categories:
-                print(f"⚠️  Invalid category '{category}', will auto-detect from description")
-                category = None  # Reset to trigger auto-detection
-            
-            # Normalize "hvac" to "heating" (they're the same category)
-            if category == "hvac":
-                category = "heating"
-            
-            # Auto-detect category if not provided
-            if not category:
-                issue_lower = issue_description.lower()
-                if any(word in issue_lower for word in ["sink", "toilet", "faucet", "pipe", "drain", "water", "leak", "plumbing"]):
-                    category = "plumbing"
-                elif any(word in issue_lower for word in ["light", "outlet", "switch", "electrical", "power", "circuit", "breaker"]):
-                    category = "electrical"
-                elif any(word in issue_lower for word in ["heat", "heating", "furnace", "boiler", "radiator", "hvac", "ac", "air conditioning", "cooling"]):
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {"issue_description": args.strip()}
+                
+                # Extract and sanitize input
+                issue_description = (args.get("issue_description") or args.get("issueDescription") or "").strip()
+                tenant_name = (args.get("tenant_name") or args.get("tenantName") or "").strip() or None
+                tenant_email = (args.get("tenant_email") or args.get("tenantEmail") or "").strip() or None
+                tenant_phone = args.get("tenant_phone") or args.get("tenantPhone") or caller_phone
+                category = (args.get("category") or "").strip().lower() or None
+                location = (args.get("location") or "").strip() or None
+                priority = (args.get("priority") or "normal").strip().lower()
+                
+                # Validate issue description
+                if not issue_description:
+                    raise HTTPException(status_code=400, detail="Missing issue_description")
+                
+                # Sanitize issue description (remove excessive whitespace, limit length)
+                issue_description = " ".join(issue_description.split())  # Normalize whitespace
+                if len(issue_description) > 5000:  # Reasonable limit
+                    issue_description = issue_description[:5000] + "..."
+                
+                # Validate and normalize priority
+                valid_priorities = ["low", "normal", "high", "urgent"]
+                if priority not in valid_priorities:
+                    # Auto-detect priority from issue description
+                    issue_lower = issue_description.lower()
+                    if any(word in issue_lower for word in ["urgent", "emergency", "flooding", "fire", "no heat", "no water", "gas leak"]):
+                        priority = "urgent"
+                    elif any(word in issue_lower for word in ["broken", "not working", "leaking", "overflowing"]):
+                        priority = "high"
+                    elif any(word in issue_lower for word in ["minor", "small", "cosmetic"]):
+                        priority = "low"
+                    else:
+                        priority = "normal"
+                
+                # Validate category enum if provided
+                valid_categories = ["plumbing", "electrical", "appliance", "heating", "hvac", "other"]
+                if category and category not in valid_categories:
+                    print(f"⚠️  Invalid category '{category}', will auto-detect from description")
+                    category = None  # Reset to trigger auto-detection
+                
+                # Normalize "hvac" to "heating" (they're the same category)
+                if category == "hvac":
                     category = "heating"
-                elif any(word in issue_lower for word in ["appliance", "refrigerator", "dishwasher", "oven", "stove", "washer", "dryer"]):
-                    category = "appliance"
+                
+                # Auto-detect category if not provided
+                if not category:
+                    issue_lower = issue_description.lower()
+                    if any(word in issue_lower for word in ["sink", "toilet", "faucet", "pipe", "drain", "water", "leak", "plumbing"]):
+                        category = "plumbing"
+                    elif any(word in issue_lower for word in ["light", "outlet", "switch", "electrical", "power", "circuit", "breaker"]):
+                        category = "electrical"
+                    elif any(word in issue_lower for word in ["heat", "heating", "furnace", "boiler", "radiator", "hvac", "ac", "air conditioning", "cooling"]):
+                        category = "heating"
+                    elif any(word in issue_lower for word in ["appliance", "refrigerator", "dishwasher", "oven", "stove", "washer", "dryer"]):
+                        category = "appliance"
+                    else:
+                        category = "other"
+                
+                # Validate email format if provided
+                if tenant_email:
+                    import re
+                    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                    if not re.match(email_pattern, tenant_email):
+                        print(f"⚠️  Invalid email format: {tenant_email}, ignoring")
+                        tenant_email = None
+                
+                # Normalize phone number if provided (handles spoken formats)
+                if tenant_phone:
+                    # tenant_phone might be spoken text like "four one two five five five one two three four"
+                    # normalize_phone_number now handles this
+                    tenant_phone = normalize_phone_number(tenant_phone)
+                    print(f"   Normalized tenant phone: {tenant_phone}")
+                
+                print(f"🔧 Submitting maintenance request:")
+                print(f"   Issue: {issue_description}")
+                print(f"   Caller phone (from VAPI): {caller_phone}")
+                print(f"   Tenant phone (from conversation): {tenant_phone}")
+                print(f"   Tenant name (from conversation): {tenant_name}")
+                print(f"   Tenant email (from conversation): {tenant_email}")
+                
+                # STEP 2: Identify/confirm tenant with all available information
+                # Priority: Use pre-identified tenant if available, then validate with conversation data
+                tenant_info = None
+                
+                # If we pre-identified a tenant from caller phone, use that as base
+                if pre_identified_tenant:
+                    tenant_info = pre_identified_tenant
+                    print(f"✅ Using pre-identified tenant from caller phone")
+                    
+                    # Validate: Check if conversation data matches pre-identified tenant
+                    # (This helps catch cases where someone else is calling from tenant's phone)
+                    if tenant_phone and tenant_phone != caller_phone:
+                        # Phone mismatch - re-identify with conversation phone
+                        print(f"⚠️  Phone mismatch: caller={caller_phone}, conversation={tenant_phone}, re-identifying...")
+                        tenant_info = identify_tenant(phone_number=tenant_phone)
+                    elif tenant_email and tenant_info.get("tenant_email"):
+                        # Validate email matches
+                        if tenant_email.lower().strip() != tenant_info.get("tenant_email", "").lower().strip():
+                            print(f"⚠️  Email mismatch, trying to re-identify with email...")
+                            tenant_info = identify_tenant(phone_number=tenant_phone or caller_phone, email=tenant_email)
+                    elif tenant_name and tenant_info.get("tenant_name"):
+                        # Validate name matches (partial match is OK)
+                        if tenant_name.lower().strip() not in tenant_info.get("tenant_name", "").lower():
+                            print(f"⚠️  Name mismatch, trying to re-identify with name...")
+                            tenant_info = identify_tenant(phone_number=tenant_phone or caller_phone, name=tenant_name)
                 else:
-                    category = "other"
-            
-            # Validate email format if provided
-            if tenant_email:
-                import re
-                email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-                if not re.match(email_pattern, tenant_email):
-                    print(f"⚠️  Invalid email format: {tenant_email}, ignoring")
-                    tenant_email = None
-            
-            # Normalize phone number if provided (handles spoken formats)
-            if tenant_phone:
-                # tenant_phone might be spoken text like "four one two five five five one two three four"
-                # normalize_phone_number now handles this
-                tenant_phone = normalize_phone_number(tenant_phone)
-                print(f"   Normalized tenant phone: {tenant_phone}")
-            
-            print(f"🔧 Submitting maintenance request:")
-            print(f"   Issue: {issue_description}")
-            print(f"   Caller phone (from VAPI): {caller_phone}")
-            print(f"   Tenant phone (from conversation): {tenant_phone}")
-            print(f"   Tenant name (from conversation): {tenant_name}")
-            print(f"   Tenant email (from conversation): {tenant_email}")
-            
-            # STEP 2: Identify/confirm tenant with all available information
-            # Priority: Use pre-identified tenant if available, then validate with conversation data
-            tenant_info = None
-            
-            # If we pre-identified a tenant from caller phone, use that as base
-            if pre_identified_tenant:
-                tenant_info = pre_identified_tenant
-                print(f"✅ Using pre-identified tenant from caller phone")
+                    # No pre-identification - identify from conversation data
+                    # Use OR logic: match on phone OR email OR name (any match works)
+                    print(f"🔍 Identifying tenant from conversation data (phone/email/name)...")
+                    tenant_info = identify_tenant(
+                        phone_number=tenant_phone or caller_phone,
+                        email=tenant_email,
+                        name=tenant_name
+                    )
                 
-                # Validate: Check if conversation data matches pre-identified tenant
-                # (This helps catch cases where someone else is calling from tenant's phone)
-                if tenant_phone and tenant_phone != caller_phone:
-                    # Phone mismatch - re-identify with conversation phone
-                    print(f"⚠️  Phone mismatch: caller={caller_phone}, conversation={tenant_phone}, re-identifying...")
-                    tenant_info = identify_tenant(phone_number=tenant_phone)
-                elif tenant_email and tenant_info.get("tenant_email"):
-                    # Validate email matches
-                    if tenant_email.lower().strip() != tenant_info.get("tenant_email", "").lower().strip():
-                        print(f"⚠️  Email mismatch, trying to re-identify with email...")
-                        tenant_info = identify_tenant(phone_number=tenant_phone or caller_phone, email=tenant_email)
-                elif tenant_name and tenant_info.get("tenant_name"):
-                    # Validate name matches (partial match is OK)
-                    if tenant_name.lower().strip() not in tenant_info.get("tenant_name", "").lower():
-                        print(f"⚠️  Name mismatch, trying to re-identify with name...")
-                        tenant_info = identify_tenant(phone_number=tenant_phone or caller_phone, name=tenant_name)
-            else:
-                # No pre-identification - identify from conversation data
-                # Use OR logic: match on phone OR email OR name (any match works)
-                print(f"🔍 Identifying tenant from conversation data (phone/email/name)...")
-                tenant_info = identify_tenant(
-                    phone_number=tenant_phone or caller_phone,
-                    email=tenant_email,
-                    name=tenant_name
-                )
-            
-            if not tenant_info:
-                # Tenant not found - return detailed error for debugging
-                debug_info = {
-                    "caller_phone_extracted": caller_phone,
-                    "tenant_phone_from_conversation": tenant_phone,
-                    "tenant_email_from_conversation": tenant_email,
-                    "tenant_name_from_conversation": tenant_name,
-                    "pre_identified": pre_identified_tenant is not None
-                }
+                if not tenant_info:
+                    # Tenant not found - return detailed error for debugging
+                    debug_info = {
+                        "caller_phone_extracted": caller_phone,
+                        "tenant_phone_from_conversation": tenant_phone,
+                        "tenant_email_from_conversation": tenant_email,
+                        "tenant_name_from_conversation": tenant_name,
+                        "pre_identified": pre_identified_tenant is not None
+                    }
+                    
+                    print(f"❌ TENANT NOT FOUND - Debug info: {debug_info}")
+                    
+                    # Return error message for bot to communicate
+                    error_msg = "I couldn't find your tenant record in our system. "
+                    if not tenant_phone and not tenant_email and not tenant_name:
+                        error_msg += "Please provide your name, phone number, or email so I can identify you."
+                    else:
+                        error_msg += "Please contact your property manager directly to register your information."
+                    
+                    return {
+                        "results": [{
+                            "toolCallId": tool_call.id,
+                            "result": {
+                                "success": False,
+                                "error": error_msg,
+                                "tenant_not_found": True,
+                                "debug_info": debug_info  # Include debug info in response
+                            }
+                        }]
+                    }
                 
-                print(f"❌ TENANT NOT FOUND - Debug info: {debug_info}")
-                
-                # Return error message for bot to communicate
-                error_msg = "I couldn't find your tenant record in our system. "
-                if not tenant_phone and not tenant_email and not tenant_name:
-                    error_msg += "Please provide your name, phone number, or email so I can identify you."
-                else:
-                    error_msg += "Please contact your property manager directly to register your information."
-                
-                return {
-                    "results": [{
-                        "toolCallId": tool_call.id,
-                        "result": {
-                            "success": False,
-                            "error": error_msg,
-                            "tenant_not_found": True,
-                            "debug_info": debug_info  # Include debug info in response
-                        }
-                    }]
-                }
-            
-            # Create maintenance request
-            with Session(engine) as session:
-                # Try to get call transcript if available (from VAPI webhook cache or API)
-                call_transcript = None
-                if call_id:
-                    # Check if we have transcript in call records
-                    from DB.db import CallRecord
-                    from sqlmodel import select
-                    call_record = session.exec(
-                        select(CallRecord).where(CallRecord.call_id == call_id)
-                    ).first()
-                    if call_record and call_record.transcript:
-                        call_transcript = call_record.transcript
-                        print(f"📝 Found call transcript for call {call_id}")
-                
-                maintenance_request = MaintenanceRequest(
-                    tenant_id=tenant_info["tenant_id"],
-                    property_id=tenant_info["property_id"],
-                    property_manager_id=tenant_info["property_manager_id"],
-                    issue_description=issue_description,
-                    priority=priority,
-                    status="pending",
-                    category=category,
-                    location=location,
-                    tenant_name=tenant_info["tenant_name"],
-                    tenant_phone=tenant_info["tenant_phone"],
-                    tenant_email=tenant_info["tenant_email"],
-                    submitted_via="phone" if call_id else "text",
-                    vapi_call_id=call_id,
-                    call_transcript=call_transcript
-                )
-                
-                session.add(maintenance_request)
-                session.commit()
-                session.refresh(maintenance_request)
-                
-                print(f"✅ Created maintenance request ID {maintenance_request.maintenance_request_id}")
-                print(f"   Priority: {priority} (auto-detected: {priority not in args.get('priority', '')})")
-                print(f"   Category: {category} (auto-detected: {category not in args.get('category', '')})")
-                
-                # Return success message (user-friendly)
-                property_address = tenant_info.get('property_address') or "your property"
-                success_msg = (
-                    f"I've successfully submitted your maintenance request for {property_address}. "
-                    f"Your request ID is {maintenance_request.maintenance_request_id}. "
-                    f"Your property manager will be notified and should respond soon."
-                )
-                
-                # If priority was auto-detected as urgent, mention it
-                if priority == "urgent" and "priority" not in args:
-                    success_msg += " I've marked this as urgent based on your description."
-                
-                return {
-                    "results": [{
-                        "toolCallId": tool_call.id,
-                        "result": {
-                            "success": True,
-                            "message": success_msg,
-                            "maintenance_request_id": maintenance_request.maintenance_request_id,
-                            "property_address": tenant_info["property_address"],
-                            "status": "pending"
-                        }
-                    }]
-                }
+                # Create maintenance request
+                with Session(engine) as session:
+                    # Try to get call transcript if available (from VAPI webhook cache or API)
+                    call_transcript = None
+                    if call_id:
+                        # Check if we have transcript in call records
+                        from DB.db import CallRecord
+                        from sqlmodel import select
+                        call_record = session.exec(
+                            select(CallRecord).where(CallRecord.call_id == call_id)
+                        ).first()
+                        if call_record and call_record.transcript:
+                            call_transcript = call_record.transcript
+                            print(f"📝 Found call transcript for call {call_id}")
+                    
+                    maintenance_request = MaintenanceRequest(
+                        tenant_id=tenant_info["tenant_id"],
+                        property_id=tenant_info["property_id"],
+                        property_manager_id=tenant_info["property_manager_id"],
+                        issue_description=issue_description,
+                        priority=priority,
+                        status="pending",
+                        category=category,
+                        location=location,
+                        tenant_name=tenant_info["tenant_name"],
+                        tenant_phone=tenant_info["tenant_phone"],
+                        tenant_email=tenant_info["tenant_email"],
+                        submitted_via="phone" if call_id else "text",
+                        vapi_call_id=call_id,
+                        call_transcript=call_transcript
+                    )
+                    
+                    session.add(maintenance_request)
+                    session.commit()
+                    session.refresh(maintenance_request)
+                    
+                    print(f"✅ Created maintenance request ID {maintenance_request.maintenance_request_id}")
+                    print(f"   Priority: {priority} (auto-detected: {priority not in args.get('priority', '')})")
+                    print(f"   Category: {category} (auto-detected: {category not in args.get('category', '')})")
+                    
+                    # Return success message (user-friendly)
+                    property_address = tenant_info.get('property_address') or "your property"
+                    success_msg = (
+                        f"I've successfully submitted your maintenance request for {property_address}. "
+                        f"Your request ID is {maintenance_request.maintenance_request_id}. "
+                        f"Your property manager will be notified and should respond soon."
+                    )
+                    
+                    # If priority was auto-detected as urgent, mention it
+                    if priority == "urgent" and "priority" not in args:
+                        success_msg += " I've marked this as urgent based on your description."
+                    
+                    return {
+                        "results": [{
+                            "toolCallId": tool_call.id,
+                            "result": {
+                                "success": True,
+                                "message": success_msg,
+                                "maintenance_request_id": maintenance_request.maintenance_request_id,
+                                "property_address": tenant_info["property_address"],
+                                "status": "pending"
+                            }
+                        }]
+                    }
         
         # If we got here but didn't process any tool calls, return error
         raise HTTPException(
