@@ -1300,7 +1300,7 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
         
         # Process tool call
         for tool_call in request.message.toolCalls:
-        if tool_call.function.name == "submitMaintenanceRequest":
+            if tool_call.function.name == "submitMaintenanceRequest":
             args = tool_call.function.arguments
             if isinstance(args, str):
                 try:
