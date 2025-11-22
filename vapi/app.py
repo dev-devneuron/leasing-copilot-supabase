@@ -1501,6 +1501,21 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
+# Health check endpoint for testing (GET request)
+@app.get("/submit_maintenance_request/")
+async def submit_maintenance_request_get():
+    """
+    Health check endpoint - returns endpoint info.
+    Use POST method to actually submit maintenance requests.
+    """
+    return {
+        "message": "Maintenance request endpoint is active",
+        "method": "POST",
+        "endpoint": "/submit_maintenance_request/",
+        "note": "This endpoint requires POST method with VapiRequest body. Use POST to submit maintenance requests."
+    }
+
+
 # ------------------ Calendar Tools ------------------ #
 @app.post("/get_date/")
 def get_date(request: VapiRequest):
