@@ -1239,58 +1239,67 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
     This ensures we know who the tenant is from the start of the call, and can
     validate/confirm their identity when they submit the maintenance request.
     """
-    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
-    from DB.user_lookup import identify_tenant, normalize_phone_number, _extract_caller_number
-    from DB.db import Session, Tenant, MaintenanceRequest, ApartmentListing
-    
-    # Share the caches with the helper module
-    set_call_phone_cache(_call_phone_cache)
-    set_phone_caches(_phone_id_cache, _phone_to_id_cache)
-    
-    # Get caller information from VAPI request
-    body = await http_request.json()
-    header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
-    
-    # STEP 1: Identify tenant at call start (proactive identification)
-    # Extract caller phone number using the same method as other endpoints
-    caller_phone = _extract_caller_number(
-        payload=body,
-        message=body.get("message"),
-        headers=dict(http_request.headers)
-    )
-    
-    # Also try direct extraction methods
-    if not caller_phone:
-        twilio_data = body.get("twilio", {})
-        if isinstance(twilio_data, dict):
-            caller_phone = twilio_data.get("from") or twilio_data.get("From")
-    
-    if not caller_phone:
-        caller_phone = header_keys_lower.get("x-vapi-from")
-    
-    # Normalize caller phone
-    if caller_phone:
-        caller_phone = normalize_phone_number(caller_phone)
-    
-    # Get call ID for transcript linking
-    call_id = (
-        body.get("callId") or 
-        body.get("call_id") or
-        header_keys_lower.get("x-call-id")
-    )
-    
-    # Pre-identify tenant from caller phone (if available)
-    pre_identified_tenant = None
-    if caller_phone:
-        print(f"🔍 Pre-identifying tenant from caller phone: {caller_phone}")
-        pre_identified_tenant = identify_tenant(phone_number=caller_phone)
-        if pre_identified_tenant:
-            print(f"✅ Pre-identified tenant: {pre_identified_tenant['tenant_name']} (ID: {pre_identified_tenant['tenant_id']})")
-        else:
-            print(f"⚠️  Could not pre-identify tenant from phone number")
-    
-    # Process tool call
-    for tool_call in request.message.toolCalls:
+    try:
+        from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
+        from DB.user_lookup import identify_tenant, normalize_phone_number
+        from DB.db import Session, Tenant, MaintenanceRequest, ApartmentListing
+        # _extract_caller_number is defined in this file (vapi/app.py), not in DB.user_lookup
+        
+        # Share the caches with the helper module
+        set_call_phone_cache(_call_phone_cache)
+        set_phone_caches(_phone_id_cache, _phone_to_id_cache)
+        
+        # Get caller information from VAPI request
+        body = await http_request.json()
+        header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
+        
+        # STEP 1: Identify tenant at call start (proactive identification)
+        # Extract caller phone number using the same method as other endpoints
+        caller_phone = _extract_caller_number(
+            payload=body,
+            message=body.get("message"),
+            headers=dict(http_request.headers)
+        )
+        
+        # Also try direct extraction methods
+        if not caller_phone:
+            twilio_data = body.get("twilio", {})
+            if isinstance(twilio_data, dict):
+                caller_phone = twilio_data.get("from") or twilio_data.get("From")
+        
+        if not caller_phone:
+            caller_phone = header_keys_lower.get("x-vapi-from")
+        
+        # Normalize caller phone
+        if caller_phone:
+            caller_phone = normalize_phone_number(caller_phone)
+        
+        # Get call ID for transcript linking
+        call_id = (
+            body.get("callId") or 
+            body.get("call_id") or
+            header_keys_lower.get("x-call-id")
+        )
+        
+        # Pre-identify tenant from caller phone (if available)
+        pre_identified_tenant = None
+        if caller_phone:
+            print(f"🔍 Pre-identifying tenant from caller phone: {caller_phone}")
+            pre_identified_tenant = identify_tenant(phone_number=caller_phone)
+            if pre_identified_tenant:
+                print(f"✅ Pre-identified tenant: {pre_identified_tenant['tenant_name']} (ID: {pre_identified_tenant['tenant_id']})")
+            else:
+                print(f"⚠️  Could not pre-identify tenant from phone number")
+        
+        # Check if we have tool calls
+        if not hasattr(request, 'message') or not hasattr(request.message, 'toolCalls') or not request.message.toolCalls:
+            raise HTTPException(
+                status_code=400, 
+                detail="No tool calls found in request. Expected submitMaintenanceRequest function call."
+            )
+        
+        # Process tool call
+        for tool_call in request.message.toolCalls:
         if tool_call.function.name == "submitMaintenanceRequest":
             args = tool_call.function.arguments
             if isinstance(args, str):
@@ -1507,8 +1516,24 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
                         }
                     }]
                 }
+        
+        # If we got here but didn't process any tool calls, return error
+        raise HTTPException(
+            status_code=400, 
+            detail="No submitMaintenanceRequest tool call found in request"
+        )
     
-    raise HTTPException(status_code=400, detail="Invalid tool call")
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error in submit_maintenance_request: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {error_msg}"
+        )
 
 
 # Health check endpoint for testing (GET request)
