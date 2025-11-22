@@ -134,6 +134,8 @@ class PropertyManager(SQLModel, table=True):
         back_populates="assigned_property_manager",
         sa_relationship_kwargs={"foreign_keys": "[PropertyManager.purchased_phone_number_id]"}
     )
+    tenants: List["Tenant"] = Relationship()
+    maintenance_requests: List["MaintenanceRequest"] = Relationship()
 
 
 class Realtor(SQLModel, table=True):
@@ -183,6 +185,8 @@ class Realtor(SQLModel, table=True):
     sources: List["Source"] = Relationship(back_populates="realtor")
     bookings: List["Booking"] = Relationship(back_populates="realtor")
     purchased_phone_number: Optional["PurchasedPhoneNumber"] = Relationship(back_populates="assigned_realtor")
+    assigned_maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="assigned_realtor")
+    tenants: List["Tenant"] = Relationship()  # Tenants this realtor helped rent properties to
 
 
 class Customer(SQLModel, table=True):
@@ -245,6 +249,8 @@ class ApartmentListing(SQLModel, table=True):
     embedding: List[float] = Field(sa_column=Column(Vector(768)))
 
     source: Optional["Source"] = Relationship(back_populates="listings")
+    tenants: List["Tenant"] = Relationship()
+    maintenance_requests: List["MaintenanceRequest"] = Relationship()
 
 
 class Source(SQLModel, table=True):
@@ -409,6 +415,128 @@ class CallRecord(SQLModel, table=True):
     )
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Tenant(SQLModel, table=True):
+    """
+    Tenant entity representing a person renting a property.
+    
+    Tenants are associated with properties (ApartmentListing) and can submit
+    maintenance requests via phone, text, or email through the AI bot.
+    
+    When a tenant is created, the property's listing_status is automatically
+    updated to "Rented" to mark it as unavailable.
+    """
+    tenant_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Tenant identification
+    name: str = Field(index=True)  # Tenant's full name
+    phone_number: Optional[str] = Field(default=None, index=True)  # Phone number (E.164 format: +14125551234)
+    email: Optional[str] = Field(default=None, index=True)  # Email address
+    
+    # Property relationship
+    property_id: int = Field(
+        foreign_key="apartmentlisting.id",
+        index=True
+    )  # The property/apartment this tenant rents
+    
+    # Property Manager relationship (for data isolation)
+    property_manager_id: int = Field(
+        foreign_key="propertymanager.property_manager_id",
+        index=True
+    )  # The PM who manages this tenant's property
+    
+    # Realtor relationship (optional - tracks which realtor helped rent the property)
+    realtor_id: Optional[int] = Field(
+        default=None,
+        foreign_key="realtor.realtor_id",
+        index=True
+    )  # The realtor who helped rent this property (if applicable)
+    
+    # Lease information
+    lease_start_date: Optional[date] = None  # When the lease started
+    lease_end_date: Optional[date] = None  # When the lease ends (property becomes available again)
+    is_active: bool = Field(default=True, index=True)  # Whether this tenant is currently active (not moved out)
+    
+    # Optional metadata
+    unit_number: Optional[str] = None  # Unit/apartment number (e.g., "Apt 3B", "Unit 5")
+    notes: Optional[str] = None  # Additional notes about the tenant
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    property: Optional["ApartmentListing"] = Relationship()
+    property_manager: Optional["PropertyManager"] = Relationship()
+    realtor: Optional["Realtor"] = Relationship()
+    maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="tenant")
+
+
+class MaintenanceRequest(SQLModel, table=True):
+    """
+    Maintenance request submitted by a tenant.
+    
+    Created when a tenant calls/texts the AI bot to report a maintenance issue.
+    Property Managers can view and manage these requests in their dashboard.
+    """
+    maintenance_request_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Tenant relationship
+    tenant_id: int = Field(
+        foreign_key="tenant.tenant_id",
+        index=True
+    )
+    
+    # Property relationship
+    property_id: int = Field(
+        foreign_key="apartmentlisting.id",
+        index=True
+    )
+    
+    # Property Manager relationship (for data isolation)
+    property_manager_id: int = Field(
+        foreign_key="propertymanager.property_manager_id",
+        index=True
+    )
+    
+    # Request details
+    issue_description: str  # Description of the maintenance issue
+    priority: str = Field(default="normal")  # "low", "normal", "high", "urgent"
+    status: str = Field(default="pending", index=True)  # "pending", "in_progress", "completed", "cancelled"
+    
+    # Optional details
+    category: Optional[str] = None  # e.g., "plumbing", "electrical", "appliance", "heating", "other"
+    location: Optional[str] = None  # Specific location in the property (e.g., "Kitchen", "Bathroom", "Bedroom 2")
+    
+    # Contact information (snapshot at time of request)
+    tenant_name: str  # Tenant name at time of request
+    tenant_phone: Optional[str] = None  # Tenant phone at time of request
+    tenant_email: Optional[str] = None  # Tenant email at time of request
+    
+    # Request metadata
+    submitted_via: str = Field(default="phone")  # "phone", "text", "email"
+    vapi_call_id: Optional[str] = None  # VAPI call ID if submitted via phone/text
+    call_transcript: Optional[str] = None  # Transcript of the call if available
+    
+    # PM/Realtor response
+    assigned_to_realtor_id: Optional[int] = Field(
+        default=None,
+        foreign_key="realtor.realtor_id"
+    )  # Optional: assign to specific realtor
+    pm_notes: Optional[str] = None  # Internal notes from PM
+    resolution_notes: Optional[str] = None  # Notes about how the issue was resolved
+    
+    # Timestamps
+    submitted_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: Optional[datetime] = None  # When the request was marked as completed
+    
+    # Relationships
+    tenant: Optional["Tenant"] = Relationship(back_populates="maintenance_requests")
+    property: Optional["ApartmentListing"] = Relationship()
+    property_manager: Optional["PropertyManager"] = Relationship()
+    assigned_realtor: Optional["Realtor"] = Relationship()
 
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:
@@ -1383,6 +1511,131 @@ def create_booking_entry(
 
 
 # ------------------ CRUD---------------------------
+
+
+def create_tenant_entry(
+    name: str,
+    property_id: int,
+    property_manager_id: int,
+    phone_number: Optional[str] = None,
+    email: Optional[str] = None,
+    realtor_id: Optional[int] = None,
+    unit_number: Optional[str] = None,
+    lease_start_date: Optional[date] = None,
+    lease_end_date: Optional[date] = None,
+    notes: Optional[str] = None
+) -> Tenant:
+    """
+    Create a new tenant entry and automatically mark the property as "Rented".
+    
+    Args:
+        name: Tenant's full name
+        property_id: ID of the property being rented
+        property_manager_id: ID of the Property Manager
+        phone_number: Tenant's phone number (E.164 format)
+        email: Tenant's email address
+        realtor_id: Optional ID of the realtor who helped rent the property
+        unit_number: Unit/apartment number
+        lease_start_date: When the lease started
+        lease_end_date: When the lease ends
+        notes: Additional notes
+    
+    Returns:
+        Created Tenant object
+    
+    Raises:
+        HTTPException: If property not found, PM not found, or property already rented
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+    
+    with Session(engine) as session:
+        # Verify property exists
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found")
+        
+        # Verify Property Manager exists
+        pm = session.get(PropertyManager, property_manager_id)
+        if not pm:
+            raise HTTPException(status_code=404, detail="Property Manager not found")
+        
+        # Verify property belongs to this PM (via Source)
+        source = session.get(Source, property_listing.source_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="Source not found for property")
+        
+        if source.property_manager_id != property_manager_id:
+            # Check if it's assigned to a realtor under this PM
+            if source.realtor_id:
+                realtor = session.get(Realtor, source.realtor_id)
+                if not realtor or realtor.property_manager_id != property_manager_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Property does not belong to this Property Manager"
+                    )
+            else:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Property does not belong to this Property Manager"
+                )
+        
+        # Verify realtor belongs to PM if provided
+        if realtor_id:
+            realtor = session.get(Realtor, realtor_id)
+            if not realtor or realtor.property_manager_id != property_manager_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Realtor does not belong to this Property Manager"
+                )
+        
+        # Check if property already has an active tenant
+        existing_tenant = session.exec(
+            select(Tenant).where(
+                Tenant.property_id == property_id,
+                Tenant.is_active == True
+            )
+        ).first()
+        
+        if existing_tenant:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Property already has an active tenant: {existing_tenant.name}"
+            )
+        
+        # Normalize phone number if provided
+        if phone_number:
+            from .user_lookup import normalize_phone_number
+            phone_number = normalize_phone_number(phone_number)
+        
+        # Create tenant
+        tenant = Tenant(
+            name=name,
+            phone_number=phone_number,
+            email=email,
+            property_id=property_id,
+            property_manager_id=property_manager_id,
+            realtor_id=realtor_id,
+            unit_number=unit_number,
+            lease_start_date=lease_start_date,
+            lease_end_date=lease_end_date,
+            notes=notes,
+            is_active=True
+        )
+        
+        session.add(tenant)
+        
+        # Update property status to "Rented"
+        meta = dict(property_listing.listing_metadata) if property_listing.listing_metadata else {}
+        meta["listing_status"] = "Rented"
+        property_listing.listing_metadata = meta
+        flag_modified(property_listing, "listing_metadata")
+        
+        session.commit()
+        session.refresh(tenant)
+        
+        print(f"✅ Created tenant {tenant.name} for property {property_id} and marked property as Rented")
+        
+        return tenant
 
 
 def create_customer_entry(

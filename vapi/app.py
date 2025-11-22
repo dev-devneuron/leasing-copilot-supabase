@@ -1224,6 +1224,204 @@ async def search_apartments(request: VapiRequest, http_request: Request):
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
+# ------------------ Maintenance Requests ------------------ #
+@app.post("/submit_maintenance_request/")
+async def submit_maintenance_request(request: VapiRequest, http_request: Request):
+    """
+    Submit a maintenance request from a tenant via VAPI bot.
+    
+    Tenant identification flow:
+    1. At call start: Identify tenant from caller phone number (like we do for PMs/Realtors)
+    2. When maintenance tool is called: Confirm/validate with name, email, or phone from conversation
+    3. If conflict: Match on any provided criteria (phone OR email OR name)
+    4. Create maintenance request with confirmed tenant info
+    
+    This ensures we know who the tenant is from the start of the call, and can
+    validate/confirm their identity when they submit the maintenance request.
+    """
+    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
+    from DB.user_lookup import identify_tenant, normalize_phone_number, _extract_caller_number
+    from DB.db import Session, Tenant, MaintenanceRequest, ApartmentListing
+    
+    # Share the caches with the helper module
+    set_call_phone_cache(_call_phone_cache)
+    set_phone_caches(_phone_id_cache, _phone_to_id_cache)
+    
+    # Get caller information from VAPI request
+    body = await http_request.json()
+    header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
+    
+    # STEP 1: Identify tenant at call start (proactive identification)
+    # Extract caller phone number using the same method as other endpoints
+    caller_phone = _extract_caller_number(
+        payload=body,
+        message=body.get("message"),
+        headers=dict(http_request.headers)
+    )
+    
+    # Also try direct extraction methods
+    if not caller_phone:
+        twilio_data = body.get("twilio", {})
+        if isinstance(twilio_data, dict):
+            caller_phone = twilio_data.get("from") or twilio_data.get("From")
+    
+    if not caller_phone:
+        caller_phone = header_keys_lower.get("x-vapi-from")
+    
+    # Normalize caller phone
+    if caller_phone:
+        caller_phone = normalize_phone_number(caller_phone)
+    
+    # Get call ID for transcript linking
+    call_id = (
+        body.get("callId") or 
+        body.get("call_id") or
+        header_keys_lower.get("x-call-id")
+    )
+    
+    # Pre-identify tenant from caller phone (if available)
+    pre_identified_tenant = None
+    if caller_phone:
+        print(f"🔍 Pre-identifying tenant from caller phone: {caller_phone}")
+        pre_identified_tenant = identify_tenant(phone_number=caller_phone)
+        if pre_identified_tenant:
+            print(f"✅ Pre-identified tenant: {pre_identified_tenant['tenant_name']} (ID: {pre_identified_tenant['tenant_id']})")
+        else:
+            print(f"⚠️  Could not pre-identify tenant from phone number")
+    
+    # Process tool call
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == "submitMaintenanceRequest":
+            args = tool_call.function.arguments
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except:
+                    args = {"issue_description": args.strip()}
+            
+            issue_description = args.get("issue_description") or args.get("issueDescription") or ""
+            tenant_name = args.get("tenant_name") or args.get("tenantName") or None
+            tenant_email = args.get("tenant_email") or args.get("tenantEmail") or None
+            tenant_phone = args.get("tenant_phone") or args.get("tenantPhone") or caller_phone
+            category = args.get("category") or None
+            location = args.get("location") or None
+            priority = args.get("priority") or "normal"
+            
+            if not issue_description:
+                raise HTTPException(status_code=400, detail="Missing issue_description")
+            
+            # Normalize phone number if provided
+            if tenant_phone:
+                tenant_phone = normalize_phone_number(tenant_phone)
+            
+            print(f"🔧 Submitting maintenance request:")
+            print(f"   Issue: {issue_description}")
+            print(f"   Caller phone (from VAPI): {caller_phone}")
+            print(f"   Tenant phone (from conversation): {tenant_phone}")
+            print(f"   Tenant name (from conversation): {tenant_name}")
+            print(f"   Tenant email (from conversation): {tenant_email}")
+            
+            # STEP 2: Identify/confirm tenant with all available information
+            # Priority: Use pre-identified tenant if available, then validate with conversation data
+            tenant_info = None
+            
+            # If we pre-identified a tenant from caller phone, use that as base
+            if pre_identified_tenant:
+                tenant_info = pre_identified_tenant
+                print(f"✅ Using pre-identified tenant from caller phone")
+                
+                # Validate: Check if conversation data matches pre-identified tenant
+                # (This helps catch cases where someone else is calling from tenant's phone)
+                if tenant_phone and tenant_phone != caller_phone:
+                    # Phone mismatch - re-identify with conversation phone
+                    print(f"⚠️  Phone mismatch: caller={caller_phone}, conversation={tenant_phone}, re-identifying...")
+                    tenant_info = identify_tenant(phone_number=tenant_phone)
+                elif tenant_email and tenant_info.get("tenant_email"):
+                    # Validate email matches
+                    if tenant_email.lower().strip() != tenant_info.get("tenant_email", "").lower().strip():
+                        print(f"⚠️  Email mismatch, trying to re-identify with email...")
+                        tenant_info = identify_tenant(phone_number=tenant_phone or caller_phone, email=tenant_email)
+                elif tenant_name and tenant_info.get("tenant_name"):
+                    # Validate name matches (partial match is OK)
+                    if tenant_name.lower().strip() not in tenant_info.get("tenant_name", "").lower():
+                        print(f"⚠️  Name mismatch, trying to re-identify with name...")
+                        tenant_info = identify_tenant(phone_number=tenant_phone or caller_phone, name=tenant_name)
+            else:
+                # No pre-identification - identify from conversation data
+                # Use OR logic: match on phone OR email OR name (any match works)
+                print(f"🔍 Identifying tenant from conversation data (phone/email/name)...")
+                tenant_info = identify_tenant(
+                    phone_number=tenant_phone or caller_phone,
+                    email=tenant_email,
+                    name=tenant_name
+                )
+            
+            if not tenant_info:
+                # Tenant not found - return error message for bot to communicate
+                error_msg = "I couldn't find your tenant record in our system. "
+                if not tenant_phone and not tenant_email and not tenant_name:
+                    error_msg += "Please provide your name, phone number, or email so I can identify you."
+                else:
+                    error_msg += "Please contact your property manager directly to register your information."
+                
+                return {
+                    "results": [{
+                        "toolCallId": tool_call.id,
+                        "result": {
+                            "success": False,
+                            "error": error_msg,
+                            "tenant_not_found": True
+                        }
+                    }]
+                }
+            
+            # Create maintenance request
+            with Session(engine) as session:
+                maintenance_request = MaintenanceRequest(
+                    tenant_id=tenant_info["tenant_id"],
+                    property_id=tenant_info["property_id"],
+                    property_manager_id=tenant_info["property_manager_id"],
+                    issue_description=issue_description,
+                    priority=priority,
+                    status="pending",
+                    category=category,
+                    location=location,
+                    tenant_name=tenant_info["tenant_name"],
+                    tenant_phone=tenant_info["tenant_phone"],
+                    tenant_email=tenant_info["tenant_email"],
+                    submitted_via="phone" if call_id else "text",
+                    vapi_call_id=call_id
+                )
+                
+                session.add(maintenance_request)
+                session.commit()
+                session.refresh(maintenance_request)
+                
+                print(f"✅ Created maintenance request ID {maintenance_request.maintenance_request_id}")
+                
+                # Return success message
+                success_msg = (
+                    f"I've submitted your maintenance request for {tenant_info['property_address']}. "
+                    f"Your request ID is {maintenance_request.maintenance_request_id}. "
+                    f"Your property manager will be notified and should respond soon."
+                )
+                
+                return {
+                    "results": [{
+                        "toolCallId": tool_call.id,
+                        "result": {
+                            "success": True,
+                            "message": success_msg,
+                            "maintenance_request_id": maintenance_request.maintenance_request_id,
+                            "property_address": tenant_info["property_address"],
+                            "status": "pending"
+                        }
+                    }]
+                }
+    
+    raise HTTPException(status_code=400, detail="Invalid tool call")
+
+
 # ------------------ Calendar Tools ------------------ #
 @app.post("/get_date/")
 def get_date(request: VapiRequest):
@@ -1916,6 +2114,615 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
             result.append(property_result)
 
         return JSONResponse(content=result)
+
+
+@app.get("/maintenance-requests")
+async def get_maintenance_requests(
+    user_data: dict = Depends(get_current_user_data),
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    Get maintenance requests for the authenticated user.
+    
+    - Property Managers: See all maintenance requests for their properties
+    - Realtors: See maintenance requests assigned to them (if any)
+    
+    Query Parameters:
+    - status: Filter by status (pending, in_progress, completed, cancelled)
+    - limit: Number of results to return (default: 50, max: 100)
+    - offset: Pagination offset (default: 0)
+    """
+    from DB.db import MaintenanceRequest, Tenant, ApartmentListing, PropertyManager, Realtor
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        # Build query based on user type
+        query = select(MaintenanceRequest)
+        
+        if user_type == "property_manager":
+            # PMs see all requests for their properties
+            query = query.where(MaintenanceRequest.property_manager_id == user_id)
+        elif user_type == "realtor":
+            # Realtors see requests assigned to them OR for properties they manage
+            # First, get the realtor's PM to find their properties
+            realtor = session.get(Realtor, user_id)
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            
+            # Get properties managed by this realtor (via Source)
+            from DB.db import Source
+            realtor_sources = session.exec(
+                select(Source).where(Source.realtor_id == user_id)
+            ).all()
+            realtor_source_ids = [s.source_id for s in realtor_sources]
+            
+            # Get property IDs from these sources
+            if realtor_source_ids:
+                realtor_properties = session.exec(
+                    select(ApartmentListing).where(ApartmentListing.source_id.in_(realtor_source_ids))
+                ).all()
+                realtor_property_ids = [p.id for p in realtor_properties]
+            else:
+                realtor_property_ids = []
+            
+            # Query: assigned to realtor OR for realtor's properties
+            from sqlmodel import or_
+            query = query.where(
+                or_(
+                    MaintenanceRequest.assigned_to_realtor_id == user_id,
+                    MaintenanceRequest.property_id.in_(realtor_property_ids) if realtor_property_ids else False
+                )
+            )
+        else:
+            raise HTTPException(status_code=403, detail="Unauthorized user type")
+        
+        # Filter by status if provided
+        if status:
+            query = query.where(MaintenanceRequest.status == status)
+        
+        # Order by submitted_at (newest first)
+        query = query.order_by(MaintenanceRequest.submitted_at.desc())
+        
+        # Get total count (execute count query separately)
+        count_query = select(MaintenanceRequest)
+        if user_type == "property_manager":
+            count_query = count_query.where(MaintenanceRequest.property_manager_id == user_id)
+        elif user_type == "realtor":
+            realtor = session.get(Realtor, user_id)
+            if realtor:
+                from DB.db import Source
+                realtor_sources = session.exec(
+                    select(Source).where(Source.realtor_id == user_id)
+                ).all()
+                realtor_source_ids = [s.source_id for s in realtor_sources]
+                if realtor_source_ids:
+                    realtor_properties = session.exec(
+                        select(ApartmentListing).where(ApartmentListing.source_id.in_(realtor_source_ids))
+                    ).all()
+                    realtor_property_ids = [p.id for p in realtor_properties]
+                else:
+                    realtor_property_ids = []
+                count_query = count_query.where(
+                    or_(
+                        MaintenanceRequest.assigned_to_realtor_id == user_id,
+                        MaintenanceRequest.property_id.in_(realtor_property_ids) if realtor_property_ids else False
+                    )
+                )
+        if status:
+            count_query = count_query.where(MaintenanceRequest.status == status)
+        total = len(session.exec(count_query).all())
+        
+        # Apply pagination
+        query = query.limit(min(limit, 100)).offset(offset)
+        
+        # Execute query
+        requests = session.exec(query).all()
+        
+        # Format results
+        result = []
+        for req in requests:
+            # Get property address
+            property_listing = session.get(ApartmentListing, req.property_id)
+            property_address = property_listing.listing_metadata.get("address") if property_listing and property_listing.listing_metadata else None
+            
+            # Get assigned realtor name if assigned
+            assigned_realtor_name = None
+            if req.assigned_to_realtor_id:
+                assigned_realtor = session.get(Realtor, req.assigned_to_realtor_id)
+                assigned_realtor_name = assigned_realtor.name if assigned_realtor else None
+            
+            result.append({
+                "maintenance_request_id": req.maintenance_request_id,
+                "tenant_id": req.tenant_id,
+                "tenant_name": req.tenant_name,
+                "tenant_phone": req.tenant_phone,
+                "tenant_email": req.tenant_email,
+                "property_id": req.property_id,
+                "property_address": property_address,
+                "issue_description": req.issue_description,
+                "priority": req.priority,
+                "status": req.status,
+                "category": req.category,
+                "location": req.location,
+                "submitted_via": req.submitted_via,
+                "submitted_at": req.submitted_at.isoformat() if req.submitted_at else None,
+                "updated_at": req.updated_at.isoformat() if req.updated_at else None,
+                "completed_at": req.completed_at.isoformat() if req.completed_at else None,
+                "assigned_to_realtor_id": req.assigned_to_realtor_id,
+                "assigned_to_realtor_name": assigned_realtor_name,
+                "pm_notes": req.pm_notes,
+                "resolution_notes": req.resolution_notes,
+            })
+        
+        return JSONResponse(content={
+            "maintenance_requests": result,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        })
+
+
+@app.get("/maintenance-requests/{request_id}")
+async def get_maintenance_request(
+    request_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Get a specific maintenance request by ID.
+    Only accessible by the PM who manages the property or assigned realtor.
+    """
+    from DB.db import MaintenanceRequest, Tenant, ApartmentListing, PropertyManager, Realtor
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        request = session.get(MaintenanceRequest, request_id)
+        if not request:
+            raise HTTPException(status_code=404, detail="Maintenance request not found")
+        
+        # Check authorization
+        if user_type == "property_manager":
+            if request.property_manager_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to view this request")
+        elif user_type == "realtor":
+            if request.assigned_to_realtor_id != user_id:
+                # Check if realtor manages the property
+                realtor = session.get(Realtor, user_id)
+                if not realtor:
+                    raise HTTPException(status_code=404, detail="Realtor not found")
+                
+                from DB.db import Source
+                property_listing = session.get(ApartmentListing, request.property_id)
+                if not property_listing:
+                    raise HTTPException(status_code=404, detail="Property not found")
+                
+                realtor_sources = session.exec(
+                    select(Source).where(Source.realtor_id == user_id)
+                ).all()
+                realtor_source_ids = [s.source_id for s in realtor_sources]
+                
+                if property_listing.source_id not in realtor_source_ids:
+                    raise HTTPException(status_code=403, detail="Not authorized to view this request")
+        else:
+            raise HTTPException(status_code=403, detail="Unauthorized user type")
+        
+        # Get related data
+        property_listing = session.get(ApartmentListing, request.property_id)
+        property_address = property_listing.listing_metadata.get("address") if property_listing and property_listing.listing_metadata else None
+        
+        tenant = session.get(Tenant, request.tenant_id)
+        assigned_realtor = session.get(Realtor, request.assigned_to_realtor_id) if request.assigned_to_realtor_id else None
+        
+        return JSONResponse(content={
+            "maintenance_request_id": request.maintenance_request_id,
+            "tenant_id": request.tenant_id,
+            "tenant_name": request.tenant_name,
+            "tenant_phone": request.tenant_phone,
+            "tenant_email": request.tenant_email,
+            "tenant_unit_number": tenant.unit_number if tenant else None,
+            "property_id": request.property_id,
+            "property_address": property_address,
+            "issue_description": request.issue_description,
+            "priority": request.priority,
+            "status": request.status,
+            "category": request.category,
+            "location": request.location,
+            "submitted_via": request.submitted_via,
+            "vapi_call_id": request.vapi_call_id,
+            "call_transcript": request.call_transcript,
+            "submitted_at": request.submitted_at.isoformat() if request.submitted_at else None,
+            "updated_at": request.updated_at.isoformat() if request.updated_at else None,
+            "completed_at": request.completed_at.isoformat() if request.completed_at else None,
+            "assigned_to_realtor_id": request.assigned_to_realtor_id,
+            "assigned_to_realtor_name": assigned_realtor.name if assigned_realtor else None,
+            "pm_notes": request.pm_notes,
+            "resolution_notes": request.resolution_notes,
+        })
+
+
+@app.patch("/maintenance-requests/{request_id}")
+async def update_maintenance_request(
+    request_id: int,
+    update_data: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Update a maintenance request (status, notes, assignment, etc.).
+    Only PMs can update all fields. Realtors can only update status and notes for assigned requests.
+    """
+    from DB.db import MaintenanceRequest, Realtor
+    from datetime import datetime
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        request = session.get(MaintenanceRequest, request_id)
+        if not request:
+            raise HTTPException(status_code=404, detail="Maintenance request not found")
+        
+        # Check authorization
+        if user_type == "property_manager":
+            if request.property_manager_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to update this request")
+        elif user_type == "realtor":
+            if request.assigned_to_realtor_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to update this request")
+        else:
+            raise HTTPException(status_code=403, detail="Unauthorized user type")
+        
+        # Update fields
+        if "status" in update_data:
+            new_status = update_data["status"]
+            if new_status not in ["pending", "in_progress", "completed", "cancelled"]:
+                raise HTTPException(status_code=400, detail="Invalid status")
+            request.status = new_status
+            
+            # Set completed_at if status is completed
+            if new_status == "completed" and not request.completed_at:
+                request.completed_at = datetime.utcnow()
+            elif new_status != "completed":
+                request.completed_at = None
+        
+        # Only PMs can update these fields
+        if user_type == "property_manager":
+            if "assigned_to_realtor_id" in update_data:
+                realtor_id = update_data["assigned_to_realtor_id"]
+                if realtor_id:
+                    # Verify realtor belongs to this PM
+                    realtor = session.get(Realtor, realtor_id)
+                    if not realtor or realtor.property_manager_id != user_id:
+                        raise HTTPException(status_code=400, detail="Invalid realtor assignment")
+                request.assigned_to_realtor_id = realtor_id
+            
+            if "priority" in update_data:
+                if update_data["priority"] not in ["low", "normal", "high", "urgent"]:
+                    raise HTTPException(status_code=400, detail="Invalid priority")
+                request.priority = update_data["priority"]
+            
+            if "category" in update_data:
+                request.category = update_data["category"]
+            
+            if "location" in update_data:
+                request.location = update_data["location"]
+        
+        # Both PMs and Realtors can update notes
+        if "pm_notes" in update_data and user_type == "property_manager":
+            request.pm_notes = update_data["pm_notes"]
+        
+        if "resolution_notes" in update_data:
+            request.resolution_notes = update_data["resolution_notes"]
+        
+        request.updated_at = datetime.utcnow()
+        
+        session.add(request)
+        session.commit()
+        session.refresh(request)
+        
+        return JSONResponse(content={
+            "message": "Maintenance request updated successfully",
+            "maintenance_request_id": request.maintenance_request_id,
+            "status": request.status
+        })
+
+
+@app.post("/tenants")
+async def create_tenant_endpoint(
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Create a new tenant and automatically mark the property as "Rented".
+    
+    Only Property Managers can create tenants.
+    When a tenant is created, the property's listing_status is automatically
+    updated to "Rented" to mark it as unavailable.
+    """
+    from DB.db import create_tenant_entry, ApartmentListing
+    from datetime import datetime
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can create tenants"
+        )
+    
+    # Extract required fields
+    name = payload.get("name")
+    property_id = payload.get("property_id")
+    
+    if not name or not property_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required fields: name, property_id"
+        )
+    
+    # Extract optional fields
+    phone_number = payload.get("phone_number")
+    email = payload.get("email")
+    realtor_id = payload.get("realtor_id")
+    unit_number = payload.get("unit_number")
+    lease_start_date_str = payload.get("lease_start_date")
+    lease_end_date_str = payload.get("lease_end_date")
+    notes = payload.get("notes")
+    
+    # Parse dates if provided
+    lease_start_date = None
+    lease_end_date = None
+    if lease_start_date_str:
+        try:
+            lease_start_date = datetime.fromisoformat(lease_start_date_str.replace('Z', '+00:00')).date()
+        except:
+            raise HTTPException(status_code=400, detail="Invalid lease_start_date format (use YYYY-MM-DD)")
+    
+    if lease_end_date_str:
+        try:
+            lease_end_date = datetime.fromisoformat(lease_end_date_str.replace('Z', '+00:00')).date()
+        except:
+            raise HTTPException(status_code=400, detail="Invalid lease_end_date format (use YYYY-MM-DD)")
+    
+    try:
+        tenant = create_tenant_entry(
+            name=name,
+            property_id=property_id,
+            property_manager_id=property_manager_id,
+            phone_number=phone_number,
+            email=email,
+            realtor_id=realtor_id,
+            unit_number=unit_number,
+            lease_start_date=lease_start_date,
+            lease_end_date=lease_end_date,
+            notes=notes
+        )
+        
+        # Get property address for response
+        with Session(engine) as session:
+            property_listing = session.get(ApartmentListing, property_id)
+            property_address = property_listing.listing_metadata.get("address") if property_listing and property_listing.listing_metadata else None
+        
+        return JSONResponse(content={
+            "message": "Tenant created successfully and property marked as Rented",
+            "tenant": {
+                "tenant_id": tenant.tenant_id,
+                "name": tenant.name,
+                "phone_number": tenant.phone_number,
+                "email": tenant.email,
+                "property_id": tenant.property_id,
+                "property_address": property_address,
+                "realtor_id": tenant.realtor_id,
+                "unit_number": tenant.unit_number,
+                "lease_start_date": tenant.lease_start_date.isoformat() if tenant.lease_start_date else None,
+                "lease_end_date": tenant.lease_end_date.isoformat() if tenant.lease_end_date else None,
+                "is_active": tenant.is_active
+            }
+        }, status_code=201)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create tenant: {str(e)}")
+
+
+@app.get("/tenants")
+async def get_tenants_endpoint(
+    user_data: dict = Depends(get_current_user_data),
+    property_id: Optional[int] = None,
+    is_active: Optional[bool] = None
+):
+    """
+    Get tenants for the authenticated user.
+    
+    - Property Managers: See all tenants for their properties
+    - Realtors: See tenants for properties they manage (if any)
+    """
+    from DB.db import Tenant, ApartmentListing, Source, Realtor
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        query = select(Tenant)
+        
+        if user_type == "property_manager":
+            query = query.where(Tenant.property_manager_id == user_id)
+        elif user_type == "realtor":
+            # Realtors see tenants for properties they manage
+            realtor = session.get(Realtor, user_id)
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            
+            # Get properties managed by this realtor
+            realtor_sources = session.exec(
+                select(Source).where(Source.realtor_id == user_id)
+            ).all()
+            realtor_source_ids = [s.source_id for s in realtor_sources]
+            
+            if realtor_source_ids:
+                realtor_properties = session.exec(
+                    select(ApartmentListing).where(ApartmentListing.source_id.in_(realtor_source_ids))
+                ).all()
+                realtor_property_ids = [p.id for p in realtor_properties]
+                
+                # Also include tenants assigned to this realtor
+                query = query.where(
+                    or_(
+                        Tenant.property_id.in_(realtor_property_ids),
+                        Tenant.realtor_id == user_id
+                    )
+                )
+            else:
+                # No properties, only show tenants assigned to this realtor
+                query = query.where(Tenant.realtor_id == user_id)
+        else:
+            raise HTTPException(status_code=403, detail="Unauthorized user type")
+        
+        # Filter by property_id if provided
+        if property_id:
+            query = query.where(Tenant.property_id == property_id)
+        
+        # Filter by is_active if provided
+        if is_active is not None:
+            query = query.where(Tenant.is_active == is_active)
+        
+        tenants = session.exec(query).all()
+        
+        # Format results
+        result = []
+        for tenant in tenants:
+            property_listing = session.get(ApartmentListing, tenant.property_id)
+            property_address = property_listing.listing_metadata.get("address") if property_listing and property_listing.listing_metadata else None
+            
+            result.append({
+                "tenant_id": tenant.tenant_id,
+                "name": tenant.name,
+                "phone_number": tenant.phone_number,
+                "email": tenant.email,
+                "property_id": tenant.property_id,
+                "property_address": property_address,
+                "property_manager_id": tenant.property_manager_id,
+                "realtor_id": tenant.realtor_id,
+                "unit_number": tenant.unit_number,
+                "lease_start_date": tenant.lease_start_date.isoformat() if tenant.lease_start_date else None,
+                "lease_end_date": tenant.lease_end_date.isoformat() if tenant.lease_end_date else None,
+                "is_active": tenant.is_active,
+                "notes": tenant.notes,
+                "created_at": tenant.created_at.isoformat() if tenant.created_at else None
+            })
+        
+        return JSONResponse(content={"tenants": result})
+
+
+@app.patch("/tenants/{tenant_id}")
+async def update_tenant_endpoint(
+    tenant_id: int,
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Update a tenant (e.g., mark as inactive when they move out, update lease dates).
+    When a tenant is marked as inactive, the property status can be updated back to "Available".
+    """
+    from DB.db import Tenant, ApartmentListing
+    from sqlalchemy.orm.attributes import flag_modified
+    from datetime import datetime
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        tenant = session.get(Tenant, tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        
+        # Check authorization
+        if user_type == "property_manager":
+            if tenant.property_manager_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to update this tenant")
+        elif user_type == "realtor":
+            # Realtors can only update tenants they helped rent
+            if tenant.realtor_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to update this tenant")
+        else:
+            raise HTTPException(status_code=403, detail="Unauthorized user type")
+        
+        # Track if we need to update property status
+        was_active = tenant.is_active
+        new_is_active = payload.get("is_active")
+        
+        # Update fields
+        if "name" in payload:
+            tenant.name = payload["name"]
+        if "phone_number" in payload:
+            from DB.user_lookup import normalize_phone_number
+            tenant.phone_number = normalize_phone_number(payload["phone_number"]) if payload["phone_number"] else None
+        if "email" in payload:
+            tenant.email = payload["email"]
+        if "unit_number" in payload:
+            tenant.unit_number = payload["unit_number"]
+        if "notes" in payload:
+            tenant.notes = payload["notes"]
+        if "lease_start_date" in payload:
+            if payload["lease_start_date"]:
+                try:
+                    tenant.lease_start_date = datetime.fromisoformat(payload["lease_start_date"].replace('Z', '+00:00')).date()
+                except:
+                    raise HTTPException(status_code=400, detail="Invalid lease_start_date format")
+            else:
+                tenant.lease_start_date = None
+        if "lease_end_date" in payload:
+            if payload["lease_end_date"]:
+                try:
+                    tenant.lease_end_date = datetime.fromisoformat(payload["lease_end_date"].replace('Z', '+00:00')).date()
+                except:
+                    raise HTTPException(status_code=400, detail="Invalid lease_end_date format")
+            else:
+                tenant.lease_end_date = None
+        if new_is_active is not None:
+            tenant.is_active = new_is_active
+        
+        tenant.updated_at = datetime.utcnow()
+        
+        # If tenant is being marked as inactive and property has no other active tenants,
+        # update property status back to "Available"
+        if was_active and new_is_active == False:
+            # Check if property has any other active tenants
+            other_active_tenants = session.exec(
+                select(Tenant).where(
+                    Tenant.property_id == tenant.property_id,
+                    Tenant.tenant_id != tenant_id,
+                    Tenant.is_active == True
+                )
+            ).first()
+            
+            if not other_active_tenants:
+                # No other active tenants, mark property as available
+                property_listing = session.get(ApartmentListing, tenant.property_id)
+                if property_listing:
+                    meta = dict(property_listing.listing_metadata) if property_listing.listing_metadata else {}
+                    meta["listing_status"] = "Available"
+                    property_listing.listing_metadata = meta
+                    flag_modified(property_listing, "listing_metadata")
+                    print(f"✅ Marked property {tenant.property_id} as Available (tenant moved out)")
+        
+        session.add(tenant)
+        session.commit()
+        session.refresh(tenant)
+        
+        return JSONResponse(content={
+            "message": "Tenant updated successfully",
+            "tenant_id": tenant.tenant_id,
+            "is_active": tenant.is_active
+        })
 
 
 @app.get("/managed-realtors")

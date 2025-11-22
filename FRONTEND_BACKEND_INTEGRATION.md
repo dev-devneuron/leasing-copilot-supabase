@@ -1526,6 +1526,397 @@ function downloadRecording(recordingUrl, callId) {
 
 ---
 
+## 🔧 Maintenance Request Logging
+
+### Overview
+
+Tenants can call or text the AI bot to submit maintenance or repair requests. The bot automatically:
+1. Identifies the tenant by phone number, email, or name
+2. Links the request to the tenant's property
+3. Creates a maintenance request record
+4. Notifies the Property Manager
+
+### VAPI Bot Integration
+
+**Endpoint:** `POST /submit_maintenance_request/`  
+**Auth:** None (Public endpoint, called by VAPI)
+
+This endpoint is called by the VAPI bot when a tenant wants to submit a maintenance request. The bot should use the `submitMaintenanceRequest` function tool.
+
+**VAPI Function Tool Definition:**
+
+Add this function to your VAPI assistant configuration:
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "submitMaintenanceRequest",
+    "description": "Submit a maintenance or repair request for a tenant's property. Use this when a tenant reports an issue that needs to be fixed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "issue_description": {
+          "type": "string",
+          "description": "Detailed description of the maintenance issue or problem"
+        },
+        "category": {
+          "type": "string",
+          "description": "Category of the issue (e.g., plumbing, electrical, appliance, heating, other)",
+          "enum": ["plumbing", "electrical", "appliance", "heating", "hvac", "other"]
+        },
+        "location": {
+          "type": "string",
+          "description": "Specific location in the property (e.g., Kitchen, Bathroom, Bedroom 2)"
+        },
+        "priority": {
+          "type": "string",
+          "description": "Priority level of the issue",
+          "enum": ["low", "normal", "high", "urgent"],
+          "default": "normal"
+        },
+        "tenant_name": {
+          "type": "string",
+          "description": "Tenant's name (if not already identified)"
+        },
+        "tenant_phone": {
+          "type": "string",
+          "description": "Tenant's phone number (if not already identified)"
+        },
+        "tenant_email": {
+          "type": "string",
+          "description": "Tenant's email address (if not already identified)"
+        }
+      },
+      "required": ["issue_description"]
+    }
+  }
+}
+```
+
+**Response:**
+
+Success:
+```json
+{
+  "results": [{
+    "toolCallId": "...",
+    "result": {
+      "success": true,
+      "message": "I've submitted your maintenance request for 123 Main St. Your request ID is 42. Your property manager will be notified and should respond soon.",
+      "maintenance_request_id": 42,
+      "property_address": "123 Main St",
+      "status": "pending"
+    }
+  }]
+}
+```
+
+Error (tenant not found):
+```json
+{
+  "results": [{
+    "toolCallId": "...",
+    "result": {
+      "success": false,
+      "error": "I couldn't find your tenant record in our system. Please contact your property manager directly to register your information.",
+      "tenant_not_found": true
+    }
+  }]
+}
+```
+
+### Dashboard Endpoints (PM & Realtor)
+
+#### Get Maintenance Requests
+
+**Endpoint:** `GET /maintenance-requests?status=pending&limit=50&offset=0`  
+**Auth:** Required
+
+**Query Parameters:**
+- `status` (optional): Filter by status (`pending`, `in_progress`, `completed`, `cancelled`)
+- `limit` (optional): Number of results (default: 50, max: 100)
+- `offset` (optional): Pagination offset (default: 0)
+
+**Response:**
+```json
+{
+  "maintenance_requests": [
+    {
+      "maintenance_request_id": 1,
+      "tenant_id": 5,
+      "tenant_name": "John Smith",
+      "tenant_phone": "+14125551234",
+      "tenant_email": "john@example.com",
+      "property_id": 10,
+      "property_address": "123 Main St, Apt 3B",
+      "issue_description": "Kitchen sink is leaking",
+      "priority": "normal",
+      "status": "pending",
+      "category": "plumbing",
+      "location": "Kitchen",
+      "submitted_via": "phone",
+      "submitted_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-15T10:30:00Z",
+      "completed_at": null,
+      "assigned_to_realtor_id": null,
+      "assigned_to_realtor_name": null,
+      "pm_notes": null,
+      "resolution_notes": null
+    }
+  ],
+  "total": 25,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Data Isolation:**
+- **Property Managers:** See all maintenance requests for their properties
+- **Realtors:** See maintenance requests assigned to them OR for properties they manage
+
+#### Get Maintenance Request Details
+
+**Endpoint:** `GET /maintenance-requests/{request_id}`  
+**Auth:** Required
+
+**Response:**
+```json
+{
+  "maintenance_request_id": 1,
+  "tenant_id": 5,
+  "tenant_name": "John Smith",
+  "tenant_phone": "+14125551234",
+  "tenant_email": "john@example.com",
+  "tenant_unit_number": "Apt 3B",
+  "property_id": 10,
+  "property_address": "123 Main St, Apt 3B",
+  "issue_description": "Kitchen sink is leaking",
+  "priority": "normal",
+  "status": "pending",
+  "category": "plumbing",
+  "location": "Kitchen",
+  "submitted_via": "phone",
+  "vapi_call_id": "vapi_call_123",
+  "call_transcript": "Tenant: My kitchen sink is leaking...",
+  "submitted_at": "2024-01-15T10:30:00Z",
+  "updated_at": "2024-01-15T10:30:00Z",
+  "completed_at": null,
+  "assigned_to_realtor_id": null,
+  "assigned_to_realtor_name": null,
+  "pm_notes": null,
+  "resolution_notes": null
+}
+```
+
+#### Update Maintenance Request
+
+**Endpoint:** `PATCH /maintenance-requests/{request_id}`  
+**Auth:** Required
+
+**Request:**
+```json
+{
+  "status": "in_progress",
+  "priority": "high",
+  "assigned_to_realtor_id": 5,
+  "pm_notes": "Assigned to plumber",
+  "category": "plumbing",
+  "location": "Kitchen"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Maintenance request updated successfully",
+  "maintenance_request_id": 1,
+  "status": "in_progress"
+}
+```
+
+**Field Permissions:**
+- **Property Managers:** Can update all fields (status, priority, assignment, notes, category, location)
+- **Realtors:** Can only update status and resolution_notes for assigned requests
+
+**Valid Values:**
+- `status`: `pending`, `in_progress`, `completed`, `cancelled`
+- `priority`: `low`, `normal`, `high`, `urgent`
+
+**Frontend Implementation:**
+```javascript
+// Get maintenance requests
+async function getMaintenanceRequests(status = null, limit = 50, offset = 0) {
+  const params = new URLSearchParams({ limit, offset });
+  if (status) params.append('status', status);
+  
+  const response = await fetch(`/maintenance-requests?${params}`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  return await response.json();
+}
+
+// Update maintenance request
+async function updateMaintenanceRequest(requestId, updateData) {
+  const response = await fetch(`/maintenance-requests/${requestId}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(updateData)
+  });
+  return await response.json();
+}
+```
+
+**UI Requirements:**
+- Display maintenance requests in a table/list with:
+  - Tenant name and contact info
+  - Property address
+  - Issue description
+  - Priority (with color coding: red=urgent, orange=high, yellow=normal, gray=low)
+  - Status (with badges: pending, in_progress, completed, cancelled)
+  - Submitted date/time
+  - Actions: View details, Update status, Assign to realtor, Add notes
+- Filter by status (pending, in_progress, completed, cancelled)
+- Sort by submitted date (newest first)
+- For PMs: Show assignment options (assign to realtor)
+- For Realtors: Show only assigned requests or requests for their properties
+
+### Tenant Management
+
+**Important:** When a tenant is created, the property's `listing_status` is automatically updated to **"Rented"** to mark it as unavailable. When a tenant is marked as inactive (moved out), the property status is automatically updated back to **"Available"** (if no other active tenants).
+
+#### Create Tenant
+
+**Endpoint:** `POST /tenants`  
+**Auth:** Required (PM only)
+
+**Request:**
+```json
+{
+  "name": "John Smith",
+  "property_id": 10,
+  "phone_number": "+14125551234",
+  "email": "john@example.com",
+  "realtor_id": 5,
+  "unit_number": "Apt 3B",
+  "lease_start_date": "2024-01-01",
+  "lease_end_date": "2024-12-31",
+  "notes": "First-time renter"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Tenant created successfully and property marked as Rented",
+  "tenant": {
+    "tenant_id": 1,
+    "name": "John Smith",
+    "phone_number": "+14125551234",
+    "email": "john@example.com",
+    "property_id": 10,
+    "property_address": "123 Main St",
+    "realtor_id": 5,
+    "unit_number": "Apt 3B",
+    "lease_start_date": "2024-01-01",
+    "lease_end_date": "2024-12-31",
+    "is_active": true
+  }
+}
+```
+
+**Notes:**
+- Property status is automatically set to "Rented" when tenant is created
+- If `realtor_id` is provided, it must belong to the PM's managed realtors
+- Property must belong to the PM (via Source)
+- Property cannot have another active tenant
+
+#### Get Tenants
+
+**Endpoint:** `GET /tenants?property_id=10&is_active=true`  
+**Auth:** Required
+
+**Query Parameters:**
+- `property_id` (optional): Filter by property
+- `is_active` (optional): Filter by active status (true/false)
+
+**Response:**
+```json
+{
+  "tenants": [
+    {
+      "tenant_id": 1,
+      "name": "John Smith",
+      "phone_number": "+14125551234",
+      "email": "john@example.com",
+      "property_id": 10,
+      "property_address": "123 Main St",
+      "property_manager_id": 1,
+      "realtor_id": 5,
+      "unit_number": "Apt 3B",
+      "lease_start_date": "2024-01-01",
+      "lease_end_date": "2024-12-31",
+      "is_active": true,
+      "notes": "First-time renter",
+      "created_at": "2024-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+**Data Isolation:**
+- **Property Managers:** See all tenants for their properties
+- **Realtors:** See tenants for properties they manage OR tenants they helped rent
+
+#### Update Tenant
+
+**Endpoint:** `PATCH /tenants/{tenant_id}`  
+**Auth:** Required
+
+**Request:**
+```json
+{
+  "is_active": false,
+  "lease_end_date": "2024-12-31",
+  "notes": "Tenant moved out"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Tenant updated successfully",
+  "tenant_id": 1,
+  "is_active": false
+}
+```
+
+**Important:** When `is_active` is set to `false` (tenant moved out), the property status is automatically updated back to "Available" (if no other active tenants exist).
+
+**Tenant Record Fields:**
+- `name`: Tenant's full name (required)
+- `phone_number`: Phone number in E.164 format (e.g., +14125551234)
+- `email`: Email address (optional but recommended)
+- `property_id`: ID of the property/apartment they rent (required)
+- `property_manager_id`: ID of the PM who manages the property (required)
+- `realtor_id`: ID of the realtor who helped rent the property (optional)
+- `unit_number`: Unit/apartment number (optional, e.g., "Apt 3B")
+- `lease_start_date`: When the lease started (optional, YYYY-MM-DD)
+- `lease_end_date`: When the lease ends (optional, YYYY-MM-DD)
+- `is_active`: Whether tenant is currently active (default: true)
+- `notes`: Additional notes (optional)
+
+**Tenant Identification (for maintenance requests):**
+The bot identifies tenants by:
+1. **Phone number** (primary method - from caller ID)
+2. **Email** (if provided during the call)
+3. **Name** (if phone/email not available, partial match)
+
+---
+
 ## 📝 Key Points
 
 - ✅ **Authentication:** All endpoints (except `/book-demo` and `/vapi/webhook`) require JWT token
