@@ -1331,6 +1331,16 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
                 else:
                     priority = "normal"
             
+            # Validate category enum if provided
+            valid_categories = ["plumbing", "electrical", "appliance", "heating", "hvac", "other"]
+            if category and category not in valid_categories:
+                print(f"⚠️  Invalid category '{category}', will auto-detect from description")
+                category = None  # Reset to trigger auto-detection
+            
+            # Normalize "hvac" to "heating" (they're the same category)
+            if category == "hvac":
+                category = "heating"
+            
             # Auto-detect category if not provided
             if not category:
                 issue_lower = issue_description.lower()
