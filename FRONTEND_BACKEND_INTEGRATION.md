@@ -15,7 +15,8 @@ Complete API documentation for integrating the frontend with the Leasap Backend 
 7. [Phone Number System](#-phone-number-request--assignment-system)
 8. [Call Forwarding Controls](#-call-forwarding-controls-pm--realtor)
 9. [Call Records & Transcripts](#-call-records--transcripts)
-10. [Admin Endpoints](#-admin-endpoints-tech-team)
+10. [Maintenance Request Logging](#-maintenance-request-logging)
+11. [Admin Endpoints](#-admin-endpoints-tech-team)
 
 ---
 
@@ -1937,6 +1938,70 @@ Error (tenant not found):
 **Valid Values:**
 - `status`: `pending`, `in_progress`, `completed`, `cancelled`
 - `priority`: `low`, `normal`, `high`, `urgent`
+
+#### Delete Maintenance Request
+
+**Endpoint:** `DELETE /maintenance-requests/{request_id}`  
+**Auth:** Required
+
+**Permissions:**
+- **Property Managers:** Can delete any maintenance request for their properties
+- **Realtors:** Can delete maintenance requests assigned to them OR for properties they manage
+
+**Response:**
+```json
+{
+  "message": "Maintenance request deleted successfully",
+  "maintenance_request_id": 1
+}
+```
+
+**Error Responses:**
+
+If maintenance request not found:
+```json
+{
+  "detail": "Maintenance request not found"
+}
+```
+
+If user doesn't have permission:
+```json
+{
+  "detail": "You can only delete maintenance requests for your properties"
+}
+```
+
+**Note:** This is a hard delete - the request is permanently removed from the database. Use with caution.
+
+**Frontend Implementation:**
+```javascript
+// Delete maintenance request
+async function deleteMaintenanceRequest(requestId) {
+  if (!confirm('Are you sure you want to delete this maintenance request? This action cannot be undone.')) {
+    return;
+  }
+  
+  const response = await fetch(`/maintenance-requests/${requestId}`, {
+    method: 'DELETE',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Success - refresh the maintenance requests list
+    refreshMaintenanceRequests();
+    return data;
+  } else {
+    const errorData = await response.json();
+    const errorMsg = errorData.detail || 'Failed to delete maintenance request';
+    alert(errorMsg);
+    throw new Error(errorMsg);
+  }
+}
+```
 
 **Frontend Implementation:**
 ```javascript
