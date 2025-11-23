@@ -1444,15 +1444,29 @@ VAPI automatically sends call events (transcripts, recordings, call status) to o
 - Default (`hard_delete=false`): removes transcript, live transcript chunks, and recording URL while keeping the row for auditing.
 - `hard_delete=true`: permanently deletes the row (irreversible).
 
+**⚠️ IMPORTANT: Use `call_id` NOT `id`**
+
+The `call_id` parameter must be the **`call_id` field** from the GET response (string), NOT the `id` field (UUID).
+
+**Correct:**
+- Use `call_id` from response: `"call_id": "vapi_call_123"` → `/call-records/vapi_call_123`
+
+**Wrong:**
+- Don't use `id` from response: `"id": "550e8400-e29b-41d4-a716-446655440000"` ❌
+
 **Responses**
 
+Soft delete (default):
 ```json
 {
   "message": "Call transcript and recording removed",
   "call_id": "vapi_call_123",
   "hard_delete": false
 }
+```
 
+Hard delete:
+```json
 {
   "message": "Call record permanently deleted",
   "call_id": "vapi_call_123",
@@ -1460,10 +1474,120 @@ VAPI automatically sends call events (transcripts, recordings, call status) to o
 }
 ```
 
+**Error Responses:**
+
+If you use the wrong field (UUID `id` instead of `call_id`):
+```json
+{
+  "detail": "Invalid call_id: '550e8400-e29b-41d4-a716-446655440000' appears to be a database UUID. Please use the 'call_id' field from the GET /call-records response, not the 'id' field. The correct call_id for this record is: 'vapi_call_123'"
+}
+```
+
+If call record not found:
+```json
+{
+  "detail": "Call record not found with call_id: 'invalid_id'. Make sure you're using the 'call_id' field from GET /call-records response."
+}
+```
+
 **UI Guidance**
-- Present two destructive actions (“Remove transcript & audio” vs. “Delete record”) with confirmation dialogs.
+- Present two destructive actions ("Remove transcript & audio" vs. "Delete record") with confirmation dialogs.
 - After a soft delete, refresh the list so the row remains but transcript/recording columns are empty; hard deletes remove the row entirely.
-- Backend already enforces ownership (PMs manage their own + realtors’ calls; Realtors only their own), so surface a toast if API returns 403.
+- Backend already enforces ownership (PMs manage their own + realtors' calls; Realtors only their own), so surface a toast if API returns 403.
+- **Always use the `call_id` field from the GET response, never the `id` field.**
+- URL encode the `call_id` if it contains special characters before using it in the DELETE request.
+
+**Frontend Implementation:**
+```javascript
+// Remove transcript & audio (soft delete)
+async function removeCallContent(callRecord) {
+  // IMPORTANT: Use call_id, not id
+  const callId = callRecord.call_id; // ✅ Correct
+  // const callId = callRecord.id; // ❌ WRONG - This is a UUID, not the call_id
+  
+  // URL encode the call_id in case it has special characters
+  const encodedCallId = encodeURIComponent(callId);
+  
+  const response = await fetch(`/call-records/${encodedCallId}?hard_delete=false`, {
+    method: 'DELETE',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Success - refresh the call records list
+    // The call record will still exist but transcript/recording will be null
+    refreshCallRecords();
+    return data;
+  } else {
+    const errorData = await response.json();
+    const errorMsg = errorData.detail || 'Failed to remove call content';
+    console.error('Delete error:', errorMsg);
+    alert(errorMsg);
+    throw new Error(errorMsg);
+  }
+}
+
+// Delete record entirely (hard delete)
+async function deleteCallRecord(callRecord) {
+  if (!confirm('Are you sure you want to permanently delete this call record? This cannot be undone.')) {
+    return;
+  }
+  
+  // IMPORTANT: Use call_id, not id
+  const callId = callRecord.call_id; // ✅ Correct
+  // const callId = callRecord.id; // ❌ WRONG
+  
+  // URL encode the call_id
+  const encodedCallId = encodeURIComponent(callId);
+  
+  const response = await fetch(`/call-records/${encodedCallId}?hard_delete=true`, {
+    method: 'DELETE',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (response.ok) {
+    const data = await response.json();
+    // Success - refresh the call records list
+    // The call record will be completely removed
+    refreshCallRecords();
+    return data;
+  } else {
+    const errorData = await response.json();
+    const errorMsg = errorData.detail || 'Failed to delete call record';
+    console.error('Delete error:', errorMsg);
+    alert(errorMsg);
+    throw new Error(errorMsg);
+  }
+}
+
+// Example usage in a React component:
+function CallRecordRow({ callRecord }) {
+  return (
+    <tr>
+      <td>{callRecord.call_id}</td>
+      <td>{callRecord.caller_number}</td>
+      <td>
+        <button onClick={() => removeCallContent(callRecord)}>
+          Remove Transcript & Audio
+        </button>
+        <button onClick={() => deleteCallRecord(callRecord)}>
+          Delete Record
+        </button>
+      </td>
+    </tr>
+  );
+}
+```
+
+**Common Mistakes to Avoid:**
+1. ❌ Using `callRecord.id` (UUID) instead of `callRecord.call_id` (string)
+2. ❌ Not URL encoding the call_id if it contains special characters
+3. ❌ Using the wrong field name from the response object
 
 **Frontend Implementation:**
 ```javascript

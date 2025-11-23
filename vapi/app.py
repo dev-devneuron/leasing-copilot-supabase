@@ -7282,20 +7282,74 @@ def delete_call_record(
     Delete a call record or purge its sensitive assets.
     - Default (hard_delete=false): Keep record metadata but remove transcript, live transcript chunks, and recording URL.
     - hard_delete=true: Permanently delete the call record row.
+    
+    Note: The call_id parameter should be the VAPI call_id (string), not the database UUID id.
+    Use the 'call_id' field from GET /call-records response, not the 'id' field.
     """
+    from urllib.parse import unquote
+    
     user_type = user_data.get("user_type")
     user_id = user_data.get("id")
     
     if not user_type or not user_id:
         raise HTTPException(status_code=400, detail="Invalid user data")
     
+    # URL decode the call_id in case it was encoded
+    call_id = unquote(call_id).strip()
+    
+    if not call_id:
+        raise HTTPException(status_code=400, detail="Invalid call_id: cannot be empty")
+    
     with Session(engine) as session:
+        # Try to find by call_id first (this is the correct field)
         call_record = session.exec(
             select(CallRecord).where(CallRecord.call_id == call_id)
         ).first()
         
+        # If not found, check if they accidentally used the UUID id instead
         if not call_record:
-            raise HTTPException(status_code=404, detail="Call record not found")
+            try:
+                # Check if it's a UUID (database id)
+                import uuid as uuid_lib
+                uuid_obj = uuid_lib.UUID(call_id)
+                # If it's a valid UUID, try to find by id
+                call_record_by_id = session.get(CallRecord, uuid_obj)
+                if call_record_by_id:
+                    # They used the wrong field - provide helpful error
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid call_id: '{call_id}' appears to be a database UUID. Please use the 'call_id' field from the GET /call-records response, not the 'id' field. The correct call_id for this record is: '{call_record_by_id.call_id}'"
+                    )
+            except (ValueError, AttributeError):
+                # Not a UUID, so it's just not found
+                pass
+        
+        if not call_record:
+            # Provide helpful debugging info
+            # Check if there are any call records at all for this user
+            accessible_numbers = _get_accessible_bot_numbers(session, user_type, user_id)
+            if accessible_numbers:
+                sample_records = session.exec(
+                    select(CallRecord)
+                    .where(CallRecord.realtor_number.in_(accessible_numbers))
+                    .limit(1)
+                ).all()
+                if sample_records:
+                    sample_call_id = sample_records[0].call_id
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Call record not found with call_id: '{call_id}'. Make sure you're using the 'call_id' field from GET /call-records response. Example call_id format: '{sample_call_id}'"
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Call record not found with call_id: '{call_id}'. No call records found for your account."
+                    )
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Call record not found with call_id: '{call_id}'. You don't have access to any call records."
+                )
         
         accessible_numbers = _get_accessible_bot_numbers(session, user_type, user_id)
         if call_record.realtor_number not in accessible_numbers:
