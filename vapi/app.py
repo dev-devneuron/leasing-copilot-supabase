@@ -1591,18 +1591,23 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
                 
                 # Create maintenance request
                 with Session(engine) as session:
-                    # Try to get call transcript if available (from VAPI webhook cache or API)
+                    # Try to get call transcript and recording URL if available (from VAPI webhook cache or API)
                     call_transcript = None
+                    call_recording_url = None
                     if call_id:
-                        # Check if we have transcript in call records
+                        # Check if we have transcript and recording in call records
                         from DB.db import CallRecord
                         from sqlmodel import select
                         call_record = session.exec(
                             select(CallRecord).where(CallRecord.call_id == call_id)
                         ).first()
-                        if call_record and call_record.transcript:
-                            call_transcript = call_record.transcript
-                            print(f"📝 Found call transcript for call {call_id}")
+                        if call_record:
+                            if call_record.transcript:
+                                call_transcript = call_record.transcript
+                                print(f"📝 Found call transcript for call {call_id}")
+                            if call_record.recording_url:
+                                call_recording_url = call_record.recording_url
+                                print(f"🎵 Found call recording URL for call {call_id}")
                     
                     maintenance_request = MaintenanceRequest(
                         tenant_id=tenant_info["tenant_id"],
@@ -1618,7 +1623,8 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
                         tenant_email=tenant_info["tenant_email"],
                         submitted_via="phone" if call_id else "text",
                         vapi_call_id=call_id,
-                        call_transcript=call_transcript
+                        call_transcript=call_transcript,
+                        call_recording_url=call_recording_url
                     )
                     
                     session.add(maintenance_request)
@@ -2515,6 +2521,9 @@ async def get_maintenance_requests(
                 "category": req.category,
                 "location": req.location,
                 "submitted_via": req.submitted_via,
+                "vapi_call_id": req.vapi_call_id,
+                "call_transcript": req.call_transcript,
+                "call_recording_url": req.call_recording_url,
                 "submitted_at": req.submitted_at.isoformat() if req.submitted_at else None,
                 "updated_at": req.updated_at.isoformat() if req.updated_at else None,
                 "completed_at": req.completed_at.isoformat() if req.completed_at else None,
@@ -2584,6 +2593,36 @@ async def get_maintenance_request(
         tenant = session.get(Tenant, request.tenant_id)
         assigned_realtor = session.get(Realtor, request.assigned_to_realtor_id) if request.assigned_to_realtor_id else None
         
+        # If we have a vapi_call_id but no recording URL stored, try to fetch it from CallRecord
+        call_recording_url = request.call_recording_url
+        if request.vapi_call_id and not call_recording_url:
+            from DB.db import CallRecord
+            from sqlmodel import select
+            call_record = session.exec(
+                select(CallRecord).where(CallRecord.call_id == request.vapi_call_id)
+            ).first()
+            if call_record and call_record.recording_url:
+                call_recording_url = call_record.recording_url
+                # Optionally update the maintenance request with the recording URL for future requests
+                request.call_recording_url = call_recording_url
+                session.add(request)
+                session.commit()
+        
+        # If we have a vapi_call_id but no transcript stored, try to fetch it from CallRecord
+        call_transcript = request.call_transcript
+        if request.vapi_call_id and not call_transcript:
+            from DB.db import CallRecord
+            from sqlmodel import select
+            call_record = session.exec(
+                select(CallRecord).where(CallRecord.call_id == request.vapi_call_id)
+            ).first()
+            if call_record and call_record.transcript:
+                call_transcript = call_record.transcript
+                # Optionally update the maintenance request with the transcript for future requests
+                request.call_transcript = call_transcript
+                session.add(request)
+                session.commit()
+        
         return JSONResponse(content={
             "maintenance_request_id": request.maintenance_request_id,
             "tenant_id": request.tenant_id,
@@ -2600,7 +2639,8 @@ async def get_maintenance_request(
             "location": request.location,
             "submitted_via": request.submitted_via,
             "vapi_call_id": request.vapi_call_id,
-            "call_transcript": request.call_transcript,
+            "call_transcript": call_transcript,
+            "call_recording_url": call_recording_url,
             "submitted_at": request.submitted_at.isoformat() if request.submitted_at else None,
             "updated_at": request.updated_at.isoformat() if request.updated_at else None,
             "completed_at": request.completed_at.isoformat() if request.completed_at else None,

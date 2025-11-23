@@ -518,6 +518,7 @@ class MaintenanceRequest(SQLModel, table=True):
     submitted_via: str = Field(default="phone")  # "phone", "text", "email"
     vapi_call_id: Optional[str] = None  # VAPI call ID if submitted via phone/text
     call_transcript: Optional[str] = None  # Transcript of the call if available
+    call_recording_url: Optional[str] = None  # MP3 recording URL from VAPI if available
     
     # PM/Realtor response
     assigned_to_realtor_id: Optional[int] = Field(

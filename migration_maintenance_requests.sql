@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS maintenancerequest (
 
 -- Add missing columns if table already exists from previous migration attempt
 ALTER TABLE maintenancerequest ADD COLUMN IF NOT EXISTS assigned_to_realtor_id INTEGER;
+ALTER TABLE maintenancerequest ADD COLUMN IF NOT EXISTS call_recording_url TEXT;
 
 -- Create indexes for MaintenanceRequest table
 CREATE INDEX IF NOT EXISTS idx_maintenance_request_tenant_id ON maintenancerequest(tenant_id);

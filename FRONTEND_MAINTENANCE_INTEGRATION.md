@@ -208,6 +208,7 @@ const propertyTenants = await fetchTenants(10, true);
     "submitted_via": "phone",
     "vapi_call_id": "call_123",
     "call_transcript": "User reported sink leak...",
+    "call_recording_url": "https://vapi-cdn.s3.amazonaws.com/recordings/call_123.mp3",
     "assigned_to_realtor_id": 5,
     "pm_notes": "Waiting for plumber",
     "resolution_notes": null,
@@ -407,6 +408,51 @@ await deleteMaintenanceRequest(1);
 
 ---
 
+## Linking to Call Records
+
+Maintenance requests submitted via phone are automatically linked to their call records through the `vapi_call_id` field. This allows you to:
+
+1. **Access Call Record Details**: Use the `vapi_call_id` to fetch full call details via `GET /call-records/{call_id}`
+2. **View Recording**: The `call_recording_url` provides direct access to the MP3 audio file
+3. **Read Transcript**: The `call_transcript` contains the full conversation text
+
+**Example: Fetching Full Call Details**
+
+```javascript
+async function getCallDetails(vapiCallId) {
+  if (!vapiCallId) return null;
+  
+  const response = await fetch(
+    `https://leasing-copilot-mvp.onrender.com/call-records/${vapiCallId}`,
+    {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+  
+  if (!response.ok) {
+    console.warn('Could not fetch call details');
+    return null;
+  }
+  
+  return await response.json();
+}
+
+// Usage in component
+const maintenanceRequest = await getMaintenanceRequest(requestId);
+if (maintenanceRequest.vapi_call_id) {
+  const callDetails = await getCallDetails(maintenanceRequest.vapi_call_id);
+  // callDetails includes: recording_url, transcript, live_transcript_chunks, 
+  // call_duration, call_status, caller_number, metadata, etc.
+}
+```
+
+**Note**: The maintenance request stores `call_recording_url` and `call_transcript` for quick access, but you can always fetch the latest data from the call record if needed.
+
+---
+
 ## Data Isolation & Permissions
 
 ### Property Managers (PMs)
@@ -466,7 +512,10 @@ await deleteMaintenanceRequest(1);
    - Timeline (submitted, updated, completed)
    - Assignment (if assigned to realtor)
    - Notes (PM notes, resolution notes)
-   - Call transcript (if available)
+   - **Call Information (if submitted via phone):**
+     - Call transcript (if available) - Display in expandable section
+     - Call recording (if available) - Audio player with play/pause controls
+     - Link to full call record details
    - Actions: Update Status | Assign to Realtor | Add Notes | Delete
 
 #### For Realtors:
@@ -485,6 +534,7 @@ await deleteMaintenanceRequest(1);
    - Same as PM view, but limited actions
    - Can update status and resolution notes
    - Cannot assign to other realtors or delete
+   - Can view call transcript and recording (if available)
 
 ### Status Badge Colors
 
@@ -506,6 +556,73 @@ const priorityColors = {
   high: 'orange',        // Orange badge
   urgent: 'red'          // Red badge
 };
+```
+
+### Call Recording & Transcript Display
+
+When a maintenance request is submitted via phone, it may include:
+- **`vapi_call_id`**: The VAPI call ID (can be used to fetch full call details)
+- **`call_transcript`**: Full text transcript of the conversation
+- **`call_recording_url`**: Direct URL to the MP3 audio recording
+
+**Example Audio Player Component:**
+
+```jsx
+// CallRecordingPlayer.jsx
+import React, { useState } from 'react';
+
+function CallRecordingPlayer({ recordingUrl, transcript }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [showTranscript, setShowTranscript] = useState(false);
+
+  if (!recordingUrl && !transcript) {
+    return null; // No call data available
+  }
+
+  return (
+    <div className="call-info-section">
+      <h4>Call Information</h4>
+      
+      {recordingUrl && (
+        <div className="audio-player">
+          <audio
+            controls
+            src={recordingUrl}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+          >
+            Your browser does not support the audio element.
+          </audio>
+          <a 
+            href={recordingUrl} 
+            download 
+            className="download-link"
+          >
+            Download Recording
+          </a>
+        </div>
+      )}
+      
+      {transcript && (
+        <div className="transcript-section">
+          <button 
+            onClick={() => setShowTranscript(!showTranscript)}
+            className="toggle-transcript"
+          >
+            {showTranscript ? 'Hide' : 'Show'} Transcript
+          </button>
+          {showTranscript && (
+            <div className="transcript-content">
+              <pre>{transcript}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default CallRecordingPlayer;
 ```
 
 ### Example React Component Structure
@@ -588,6 +705,23 @@ function MaintenanceRequestsList({ userType, userId }) {
             
             {request.assigned_realtor && (
               <p><strong>Assigned to:</strong> {request.assigned_realtor.name}</p>
+            )}
+            
+            {/* Display call recording and transcript if available */}
+            {(request.call_recording_url || request.call_transcript) && (
+              <div className="call-info">
+                {request.call_recording_url && (
+                  <audio controls src={request.call_recording_url}>
+                    Your browser does not support audio playback.
+                  </audio>
+                )}
+                {request.call_transcript && (
+                  <details>
+                    <summary>View Call Transcript</summary>
+                    <pre>{request.call_transcript}</pre>
+                  </details>
+                )}
+              </div>
             )}
             
             <div className="request-actions">
