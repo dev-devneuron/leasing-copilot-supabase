@@ -1225,6 +1225,143 @@ async def search_apartments(request: VapiRequest, http_request: Request):
 
 
 # ------------------ Maintenance Requests ------------------ #
+@app.post("/lookup_tenant/")
+async def lookup_tenant(request: VapiRequest, http_request: Request):
+    """
+    Lookup tenant information by name, phone, or email.
+    Returns tenant name and unit/apartment number for the bot to confirm with user.
+    
+    This is called BEFORE submitting the maintenance request to verify tenant identity.
+    Similar to how search_apartments works - bot asks for info, we return data, bot confirms.
+    """
+    try:
+        from DB.user_lookup import identify_tenant, normalize_phone_number
+        from DB.db import Session, ApartmentListing
+        
+        # Get caller information from VAPI request
+        body = await http_request.json()
+        header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
+        
+        # Extract caller phone number
+        caller_phone = _extract_caller_number(
+            payload=body,
+            message=body.get("message"),
+            headers=dict(http_request.headers)
+        )
+        
+        # Also try direct extraction methods
+        if not caller_phone:
+            twilio_data = body.get("twilio", {})
+            if isinstance(twilio_data, dict):
+                caller_phone = twilio_data.get("from") or twilio_data.get("From")
+        
+        if not caller_phone:
+            caller_phone = header_keys_lower.get("x-vapi-from")
+        
+        # Normalize caller phone
+        if caller_phone:
+            caller_phone = normalize_phone_number(caller_phone)
+        
+        # Check if we have tool calls
+        if not hasattr(request, 'message') or not hasattr(request.message, 'toolCalls') or not request.message.toolCalls:
+            raise HTTPException(
+                status_code=400, 
+                detail="No tool calls found in request. Expected lookupTenant function call."
+            )
+        
+        # Process tool call
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name == "lookupTenant":
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {}
+                
+                # Extract tenant identification info
+                tenant_name = (args.get("tenant_name") or args.get("tenantName") or "").strip() or None
+                tenant_email = (args.get("tenant_email") or args.get("tenantEmail") or "").strip() or None
+                tenant_phone = args.get("tenant_phone") or args.get("tenantPhone") or caller_phone
+                
+                # Normalize phone number if provided
+                if tenant_phone:
+                    tenant_phone = normalize_phone_number(tenant_phone)
+                
+                print(f"🔍 Looking up tenant:")
+                print(f"   Name: {tenant_name}")
+                print(f"   Email: {tenant_email}")
+                print(f"   Phone: {tenant_phone}")
+                
+                # Lookup tenant
+                tenant_info = identify_tenant(
+                    phone_number=tenant_phone,
+                    email=tenant_email,
+                    name=tenant_name
+                )
+                
+                if not tenant_info:
+                    # Tenant not found
+                    return {
+                        "results": [{
+                            "toolCallId": tool_call.id,
+                            "result": {
+                                "found": False,
+                                "message": "Tenant not found. Please verify your information or contact your property manager."
+                            }
+                        }]
+                    }
+                
+                # Get property details and unit number
+                with Session(engine) as session:
+                    property_listing = session.get(ApartmentListing, tenant_info["property_id"])
+                    property_address = property_listing.listing_metadata.get("address") if property_listing and property_listing.listing_metadata else None
+                    
+                    # Get unit number from tenant object
+                    tenant_obj = tenant_info.get("tenant")
+                    unit_number = None
+                    if tenant_obj and hasattr(tenant_obj, 'unit_number'):
+                        unit_number = tenant_obj.unit_number
+                
+                # Return tenant info for bot to confirm
+                result = {
+                    "found": True,
+                    "tenant_name": tenant_info["tenant_name"],
+                    "unit_number": unit_number,
+                    "property_address": property_address or tenant_info.get("property_address"),
+                    "tenant_id": tenant_info["tenant_id"],
+                    "property_id": tenant_info["property_id"],
+                    "message": f"Found tenant: {tenant_info['tenant_name']}" + (f" in unit {unit_number}" if unit_number else "")
+                }
+                
+                print(f"✅ Found tenant: {result['tenant_name']} (Unit: {result.get('unit_number', 'N/A')})")
+                
+                return {
+                    "results": [{
+                        "toolCallId": tool_call.id,
+                        "result": result
+                    }]
+                }
+        
+        # If we got here but didn't process any tool calls, return error
+        raise HTTPException(
+            status_code=400, 
+            detail="No lookupTenant tool call found in request"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error in lookup_tenant: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {error_msg}"
+        )
+
+
 @app.post("/submit_maintenance_request/")
 async def submit_maintenance_request(request: VapiRequest, http_request: Request):
     """
@@ -2471,6 +2608,80 @@ async def get_maintenance_request(
             "assigned_to_realtor_name": assigned_realtor.name if assigned_realtor else None,
             "pm_notes": request.pm_notes,
             "resolution_notes": request.resolution_notes,
+        })
+
+
+@app.delete("/maintenance-requests/{request_id}")
+async def delete_maintenance_request(
+    request_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Delete a maintenance request.
+    
+    - Property Managers: Can delete any request for their properties
+    - Realtors: Can delete requests assigned to them or for their properties
+    
+    Note: This is a soft delete - the request is permanently removed from the database.
+    """
+    from DB.db import MaintenanceRequest, Realtor, ApartmentListing, Source
+    from sqlmodel import or_
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        # Get the maintenance request
+        request = session.get(MaintenanceRequest, request_id)
+        if not request:
+            raise HTTPException(status_code=404, detail="Maintenance request not found")
+        
+        # Check permissions
+        if user_type == "property_manager":
+            # PMs can delete requests for their properties
+            if request.property_manager_id != user_id:
+                raise HTTPException(status_code=403, detail="You can only delete maintenance requests for your properties")
+        elif user_type == "realtor":
+            # Realtors can delete requests assigned to them or for their properties
+            realtor = session.get(Realtor, user_id)
+            if not realtor:
+                raise HTTPException(status_code=404, detail="Realtor not found")
+            
+            # Get properties managed by this realtor
+            realtor_sources = session.exec(
+                select(Source).where(Source.realtor_id == user_id)
+            ).all()
+            realtor_source_ids = [s.source_id for s in realtor_sources]
+            
+            if realtor_source_ids:
+                realtor_properties = session.exec(
+                    select(ApartmentListing).where(ApartmentListing.source_id.in_(realtor_source_ids))
+                ).all()
+                realtor_property_ids = [p.id for p in realtor_properties]
+            else:
+                realtor_property_ids = []
+            
+            # Check if request is assigned to realtor OR for realtor's property
+            can_delete = (
+                request.assigned_to_realtor_id == user_id or
+                request.property_id in realtor_property_ids
+            )
+            
+            if not can_delete:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="You can only delete maintenance requests assigned to you or for your properties"
+                )
+        else:
+            raise HTTPException(status_code=403, detail="Unauthorized user type")
+        
+        # Delete the request
+        session.delete(request)
+        session.commit()
+        
+        return JSONResponse(content={
+            "message": "Maintenance request deleted successfully",
+            "maintenance_request_id": request_id
         })
 
 

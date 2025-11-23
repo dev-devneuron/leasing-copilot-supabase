@@ -1530,18 +1530,89 @@ function downloadRecording(recordingUrl, callId) {
 
 ### Overview
 
-Tenants can call or text the AI bot to submit maintenance or repair requests. The bot automatically:
-1. Identifies the tenant by phone number, email, or name
-2. Links the request to the tenant's property
-3. Creates a maintenance request record
-4. Notifies the Property Manager
+Tenants can call or text the AI bot to submit maintenance or repair requests. The workflow is:
 
-### VAPI Bot Integration
+1. **Bot asks for tenant info** (name, phone, email)
+2. **Bot calls lookup endpoint** to verify tenant and get unit/apartment info
+3. **Bot confirms with user** (shows name and unit number)
+4. **Bot collects issue description** and submits maintenance request
+
+### VAPI Bot Integration - Two-Step Process
+
+#### Step 1: Lookup Tenant (NEW)
+
+**Endpoint:** `POST /lookup_tenant/`  
+**Auth:** None (Public endpoint, called by VAPI)
+
+This endpoint is called FIRST when the bot collects tenant information. It verifies the tenant exists and returns their name and unit number for confirmation.
+
+**VAPI Function Tool Definition:**
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "lookupTenant",
+    "description": "Lookup tenant information by name, phone, or email. Use this to verify tenant identity and get their unit/apartment number before submitting a maintenance request.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "tenant_name": {
+          "type": "string",
+          "description": "Tenant's name"
+        },
+        "tenant_phone": {
+          "type": "string",
+          "description": "Tenant's phone number"
+        },
+        "tenant_email": {
+          "type": "string",
+          "description": "Tenant's email address"
+        }
+      }
+    }
+  }
+}
+```
+
+**Response Format:**
+
+```json
+{
+  "results": [{
+    "toolCallId": "...",
+    "result": {
+      "found": true,
+      "tenant_name": "John Smith",
+      "unit_number": "Apt 3B",
+      "property_address": "123 Main St, City, State",
+      "tenant_id": 1,
+      "property_id": 10,
+      "message": "Found tenant: John Smith in unit Apt 3B"
+    }
+  }]
+}
+```
+
+If tenant not found:
+```json
+{
+  "results": [{
+    "toolCallId": "...",
+    "result": {
+      "found": false,
+      "message": "Tenant not found. Please verify your information or contact your property manager."
+    }
+  }]
+}
+```
+
+#### Step 2: Submit Maintenance Request
 
 **Endpoint:** `POST /submit_maintenance_request/`  
 **Auth:** None (Public endpoint, called by VAPI)
 
-This endpoint is called by the VAPI bot when a tenant wants to submit a maintenance request. The bot should use the `submitMaintenanceRequest` function tool.
+This endpoint is called AFTER tenant verification to actually submit the maintenance request. The bot should use the `submitMaintenanceRequest` function tool.
 
 **VAPI Function Tool Definition:**
 
