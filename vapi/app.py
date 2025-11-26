@@ -7980,27 +7980,31 @@ async def create_availability_slot(
 # Create Booking Request (VAPI) - No property_id, only property_name
 @app.post("/vapi/bookings/request")
 async def create_booking_request_vapi(
-    http_request: Request,  # FastAPI will inject this - must be first (no default)
+    http_request: Request,  # FastAPI will inject this - must be first
     request: Optional[VapiRequest] = None,
-    property_name: str = Body(...),  # Required: property name/address (user-provided)
-    visitor_name: str = Body(...),
-    visitor_phone: str = Body(...),
+    property_name: Optional[str] = Body(None),
+    visitor_name: Optional[str] = Body(None),
+    visitor_phone: Optional[str] = Body(None),
     visitor_email: Optional[str] = Body(None),
-    requested_start_at: str = Body(...),  # ISO format
-    requested_end_at: str = Body(...),  # ISO format
-    timezone: str = Body(default="America/New_York"),
+    requested_start_at: Optional[str] = Body(None),
+    requested_end_at: Optional[str] = Body(None),
+    timezone: Optional[str] = Body(None),
     notes: Optional[str] = Body(None)
 ):
     """
-    Create a booking request (called by VAPI).
+    Create a booking request (called by VAPI or other clients).
     Creates booking with status 'pending' - never auto-approves.
+    
+    Accepts BOTH formats:
+    1. VapiRequest format with toolCalls (from VAPI)
+    2. Regular JSON body with direct parameters (from other clients)
     
     No property_id needed - only property_name (user-provided).
     """
-    # Extract parameters from VapiRequest if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+    # Extract parameters from VapiRequest toolCalls if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
-            if tool_call.function.name in ["createBooking", "requestTour", "bookTour"]:
+            if tool_call.function.name in ["createBooking", "requestTour", "bookTour", "createBookingRequest"]:
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -8017,6 +8021,25 @@ async def create_booking_request_vapi(
                 timezone = timezone or args.get("timezone") or "America/New_York"
                 notes = notes or args.get("notes")
                 break
+    
+    # If still missing, try to get from request body directly
+    if not property_name or not visitor_name or not visitor_phone:
+        try:
+            body = await http_request.json()
+            property_name = property_name or body.get("property_name") or body.get("propertyName")
+            visitor_name = visitor_name or body.get("visitor_name") or body.get("visitorName")
+            visitor_phone = visitor_phone or body.get("visitor_phone") or body.get("visitorPhone")
+            visitor_email = visitor_email or body.get("visitor_email") or body.get("visitorEmail")
+            requested_start_at = requested_start_at or body.get("requested_start_at") or body.get("requestedStartAt")
+            requested_end_at = requested_end_at or body.get("requested_end_at") or body.get("requestedEndAt")
+            timezone = timezone or body.get("timezone") or "America/New_York"
+            notes = notes or body.get("notes")
+        except:
+            pass  # Body might not be JSON or already consumed
+    
+    # Set defaults
+    if not timezone:
+        timezone = "America/New_York"
     
     # Validate required fields - property_name is required (no property_id from VAPI)
     if not property_name or not property_name.strip():
@@ -8760,38 +8783,22 @@ async def lookup_user(
 # Also support check-availability endpoint name for VAPI compatibility
 @app.post("/vapi/properties/check-availability")
 async def check_property_availability_vapi(
-    http_request: Request,  # FastAPI will inject this - must be first (no default)
+    http_request: Request,  # FastAPI will inject this - must be first
     request: Optional[VapiRequest] = None,
-    property_name: str = Body(...),  # Required: property name/address (user-provided)
-    from_date: Optional[str] = Body(None),  # ISO format (defaults to now)
-    to_date: Optional[str] = Body(None)  # ISO format (defaults to 2 weeks from now)
+    property_name: Optional[str] = Body(None),
+    from_date: Optional[str] = Body(None),
+    to_date: Optional[str] = Body(None)
 ):
     """
-    Alias for /vapi/properties/availability - VAPI compatibility endpoint.
+    VAPI endpoint to check property availability.
+    Accepts BOTH formats:
+    1. VapiRequest format with toolCalls (from VAPI)
+    2. Regular JSON body with direct parameters (from other clients)
     """
-    # Call the main availability endpoint function
-    return await get_property_availability_vapi(http_request, request, property_name, from_date, to_date)
-
-
-@app.post("/vapi/properties/availability")
-async def get_property_availability_vapi(
-    http_request: Request,  # FastAPI will inject this - must be first (no default)
-    request: Optional[VapiRequest] = None,
-    property_name: str = Body(...),  # Required: property name/address (user-provided)
-    from_date: Optional[str] = Body(None),  # ISO format (defaults to now)
-    to_date: Optional[str] = Body(None)  # ISO format (defaults to 2 weeks from now)
-):
-    """
-    Get availability for the user assigned to a property.
-    VAPI calls this after finding a property to check available slots.
-    
-    No property_id needed - only property_name (user-provided).
-    If from_date/to_date not provided, defaults to next 2 weeks.
-    """
-    # Extract parameters from VapiRequest if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+    # Extract parameters from VapiRequest toolCalls if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
-            if tool_call.function.name in ["getAvailability", "checkAvailability", "getPropertyAvailability"]:
+            if tool_call.function.name in ["checkPropertyAvailability", "getAvailability", "checkAvailability", "getPropertyAvailability"]:
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -8804,6 +8811,85 @@ async def get_property_availability_vapi(
                 to_date = to_date or args.get("to_date") or args.get("toDate")
                 break
     
+    # If still missing, try to get from request body directly
+    if not property_name:
+        try:
+            body = await http_request.json()
+            property_name = property_name or body.get("property_name") or body.get("propertyName")
+            from_date = from_date or body.get("from_date") or body.get("fromDate")
+            to_date = to_date or body.get("to_date") or body.get("toDate")
+        except:
+            pass  # Body might not be JSON or already consumed
+    
+    if not property_name:
+        raise HTTPException(
+            status_code=400,
+            detail="property_name is required. Please provide the property name or address."
+        )
+    
+    # Call the shared handler function with extracted parameters
+    return await _handle_property_availability(http_request, property_name, from_date, to_date)
+
+
+@app.post("/vapi/properties/availability")
+async def get_property_availability_vapi(
+    http_request: Request,  # FastAPI will inject this - must be first
+    request: Optional[VapiRequest] = None,
+    property_name: Optional[str] = Body(None),
+    from_date: Optional[str] = Body(None),
+    to_date: Optional[str] = Body(None)
+):
+    """
+    Get availability for the user assigned to a property.
+    
+    Accepts BOTH formats:
+    1. VapiRequest format with toolCalls (from VAPI)
+    2. Regular JSON body with direct parameters (from other clients)
+    
+    VAPI calls this after finding a property to check available slots.
+    No property_id needed - only property_name (user-provided).
+    If from_date/to_date not provided, defaults to next 2 weeks.
+    """
+    # Extract parameters from VapiRequest if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name in ["getAvailability", "checkAvailability", "getPropertyAvailability", "checkPropertyAvailability"]:
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {}
+                
+                property_name = property_name or args.get("property_name") or args.get("propertyName")
+                from_date = from_date or args.get("from_date") or args.get("fromDate")
+                to_date = to_date or args.get("to_date") or args.get("toDate")
+                break
+    
+    # If still no property_name, try to get from request body directly
+    if not property_name:
+        try:
+            body = await http_request.json()
+            property_name = property_name or body.get("property_name") or body.get("propertyName")
+            from_date = from_date or body.get("from_date") or body.get("fromDate")
+            to_date = to_date or body.get("to_date") or body.get("toDate")
+        except:
+            pass  # Body might not be JSON or already consumed
+    
+    # Call shared handler function
+    return await _handle_property_availability(http_request, property_name, from_date, to_date)
+
+
+# Shared handler function for property availability logic
+async def _handle_property_availability(
+    http_request: Request,
+    property_name: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str]
+):
+    """
+    Shared logic for handling property availability requests.
+    """
     # Validate property_name
     if not property_name or not property_name.strip():
         raise HTTPException(
@@ -9057,14 +9143,18 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
 # Validate Tour Request and Get Alternatives
 @app.post("/vapi/properties/validate-tour-request")
 async def validate_tour_request(
-    http_request: Request,  # FastAPI will inject this - must be first (no default)
+    http_request: Request,  # FastAPI will inject this - must be first
     request: Optional[VapiRequest] = None,
-    property_name: str = Body(...),  # Required: property name/address (user-provided)
-    requested_start_at: str = Body(...),  # ISO format
-    requested_end_at: str = Body(...)  # ISO format
+    property_name: Optional[str] = Body(None),
+    requested_start_at: Optional[str] = Body(None),
+    requested_end_at: Optional[str] = Body(None)
 ):
     """
     Validate a tour request for a specific time slot.
+    
+    Accepts BOTH formats:
+    1. VapiRequest format with toolCalls (from VAPI)
+    2. Regular JSON body with direct parameters (from other clients)
     
     VAPI sends: property_name (required) + requested time
     Backend checks if that time is available for the property's assigned PM/Realtor.
@@ -9080,8 +9170,8 @@ async def validate_tour_request(
     """
     from DB.vapi_helpers import identify_user_from_vapi_request
     
-    # Extract parameters from VapiRequest if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+    # Extract parameters from VapiRequest toolCalls if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
             if tool_call.function.name in ["validateTourRequest", "checkTourAvailability", "validateTour"]:
                 args = tool_call.function.arguments
@@ -9095,6 +9185,16 @@ async def validate_tour_request(
                 requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
                 requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
                 break
+    
+    # If still missing, try to get from request body directly
+    if not property_name or not requested_start_at or not requested_end_at:
+        try:
+            body = await http_request.json()
+            property_name = property_name or body.get("property_name") or body.get("propertyName")
+            requested_start_at = requested_start_at or body.get("requested_start_at") or body.get("requestedStartAt")
+            requested_end_at = requested_end_at or body.get("requested_end_at") or body.get("requestedEndAt")
+        except:
+            pass  # Body might not be JSON or already consumed
     
     # Validate property_name is provided
     if not property_name or not property_name.strip():
@@ -9300,22 +9400,26 @@ async def validate_tour_request(
 # Get Bookings by Visitor (VAPI) - POST only, no property_id needed
 @app.post("/vapi/bookings/by-visitor")
 async def get_bookings_by_visitor_vapi(
-    http_request: Request,  # FastAPI will inject this - must be first (no default)
+    http_request: Request,  # FastAPI will inject this - must be first
     request: Optional[VapiRequest] = None,
     visitor_phone: Optional[str] = Body(None),
-    visitor_name: Optional[str] = Body(None),  # Alternative: search by name
-    status: Optional[str] = Body(None)  # Filter by status
+    visitor_name: Optional[str] = Body(None),
+    status: Optional[str] = Body(None)
 ):
     """
     Get bookings for a visitor by their phone number or name.
-    VAPI calls this to check booking status or get booking details.
     
+    Accepts BOTH formats:
+    1. VapiRequest format with toolCalls (from VAPI)
+    2. Regular JSON body with direct parameters (from other clients)
+    
+    VAPI calls this to check booking status or get booking details.
     No property_id needed - only user-provided info (name, phone).
     """
-    # Extract parameters from VapiRequest if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+    # Extract parameters from VapiRequest toolCalls if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
-            if tool_call.function.name in ["getBookingStatus", "checkBooking", "getBookings"]:
+            if tool_call.function.name in ["getBookingStatus", "checkBooking", "getBookings", "getBookingsByVisitor"]:
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -9327,6 +9431,16 @@ async def get_bookings_by_visitor_vapi(
                 visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
                 status = status or args.get("status")
                 break
+    
+    # If still missing, try to get from request body directly
+    if not visitor_phone and not visitor_name:
+        try:
+            body = await http_request.json()
+            visitor_phone = visitor_phone or body.get("visitor_phone") or body.get("visitorPhone")
+            visitor_name = visitor_name or body.get("visitor_name") or body.get("visitorName")
+            status = status or body.get("status")
+        except:
+            pass  # Body might not be JSON or already consumed
     
     if not visitor_phone and not visitor_name:
         raise HTTPException(
@@ -9433,15 +9547,19 @@ async def get_bookings_by_visitor_vapi(
 # Cancel/Delete Booking by Visitor (VAPI) - Handles both bookings and pending requests
 @app.post("/vapi/bookings/cancel")
 async def cancel_booking_vapi(
-    http_request: Request,  # FastAPI will inject this - must be first (no default)
+    http_request: Request,  # FastAPI will inject this - must be first
     request: Optional[VapiRequest] = None,
-    property_name: Optional[str] = Body(None),  # Property name/address (user-provided, optional)
+    property_name: Optional[str] = Body(None),
     visitor_phone: Optional[str] = Body(None),
     visitor_name: Optional[str] = Body(None),
     reason: Optional[str] = Body(None)
 ):
     """
     Cancel or delete a booking/tour request by visitor information.
+    
+    Accepts BOTH formats:
+    1. VapiRequest format with toolCalls (from VAPI)
+    2. Regular JSON body with direct parameters (from other clients)
     
     Flow:
     1. First checks for existing bookings (pending/approved) by visitor name and phone
@@ -9452,10 +9570,10 @@ async def cancel_booking_vapi(
     VAPI should call this when user wants to cancel a tour booking.
     No property_id needed - only user-provided info (name, phone, property_name).
     """
-    # Extract parameters from VapiRequest if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+    # Extract parameters from VapiRequest toolCalls if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
-            if tool_call.function.name in ["cancelBooking", "cancelTour", "deleteTourRequest"]:
+            if tool_call.function.name in ["cancelBooking", "cancelTour", "deleteTourRequest", "cancelBookingRequest"]:
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -9468,6 +9586,17 @@ async def cancel_booking_vapi(
                 visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
                 reason = reason or args.get("reason")
                 break
+    
+    # If still missing, try to get from request body directly
+    if not visitor_phone and not visitor_name:
+        try:
+            body = await http_request.json()
+            property_name = property_name or body.get("property_name") or body.get("propertyName")
+            visitor_phone = visitor_phone or body.get("visitor_phone") or body.get("visitorPhone")
+            visitor_name = visitor_name or body.get("visitor_name") or body.get("visitorName")
+            reason = reason or body.get("reason")
+        except:
+            pass  # Body might not be JSON or already consumed
     
     if not visitor_phone and not visitor_name:
         raise HTTPException(
