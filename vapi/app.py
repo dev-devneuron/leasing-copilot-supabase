@@ -8369,34 +8369,6 @@ async def create_booking_request_vapi(
             detail=f"Tour duration is too long ({duration_minutes:.0f} minutes). Maximum is 2 hours."
         )
     
-    # Extract call record information from headers (if booking came from VAPI call)
-    vapi_call_id = None
-    call_transcript = None
-    call_recording_url = None
-    
-    if http_request:
-        try:
-            headers = dict(http_request.headers)
-            header_keys_lower = {k.lower(): v for k, v in headers.items()}
-            
-            # Extract call_id from headers
-            vapi_call_id = header_keys_lower.get("x-call-id") or header_keys_lower.get("x-vapi-call-id")
-            
-            # If we have a call_id, try to get call record from database
-            if vapi_call_id:
-                with Session(engine) as temp_session:
-                    call_record = temp_session.exec(
-                        select(CallRecord).where(CallRecord.call_id == vapi_call_id)
-                    ).first()
-                    
-                    if call_record:
-                        call_transcript = call_record.transcript
-                        call_recording_url = call_record.recording_url
-                        print(f"✅ Linked booking to call record: {vapi_call_id}")
-        except Exception as e:
-            print(f"⚠️  Error extracting call record info: {e}")
-            # Don't fail the booking creation if call record linking fails
-    
     # Robust phone normalization
     try:
         normalized_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
@@ -8465,9 +8437,9 @@ async def create_booking_request_vapi(
                         call_transcript = call_record.transcript
                         call_recording_url = call_record.recording_url
                         print(f"✅ Linked booking to call record: {vapi_call_id}")
-        except Exception as e:
-            print(f"⚠️  Error extracting call record info: {e}")
-            # Don't fail the booking creation if call record linking fails
+            except Exception as e:
+                print(f"⚠️  Error extracting call record info: {e}")
+                # Don't fail the booking creation if call record linking fails
         
         # Create booking
         booking = PropertyTourBooking(
