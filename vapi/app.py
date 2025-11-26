@@ -7989,7 +7989,7 @@ async def create_booking_request_vapi(
     requested_end_at: str = Body(...),  # ISO format
     timezone: str = Body(default="America/New_York"),
     notes: Optional[str] = Body(None),
-    http_request: Optional[Request] = None
+    http_request: Request  # FastAPI will inject this
 ):
     """
     Create a booking request (called by VAPI).
@@ -8701,7 +8701,7 @@ async def get_property_availability_vapi(
     property_name: str = Body(...),  # Required: property name/address (user-provided)
     from_date: Optional[str] = Body(None),  # ISO format (defaults to now)
     to_date: Optional[str] = Body(None),  # ISO format (defaults to 2 weeks from now)
-    http_request: Optional[Request] = None
+    http_request: Request  # FastAPI will inject this
 ):
     """
     Get availability for the user assigned to a property.
@@ -8983,7 +8983,7 @@ async def validate_tour_request(
     property_name: str = Body(...),  # Required: property name/address (user-provided)
     requested_start_at: str = Body(...),  # ISO format
     requested_end_at: str = Body(...),  # ISO format
-    http_request: Optional[Request] = None
+    http_request: Request  # FastAPI will inject this
 ):
     """
     Validate a tour request for a specific time slot.
@@ -9226,7 +9226,7 @@ async def get_bookings_by_visitor_vapi(
     visitor_phone: Optional[str] = Body(None),
     visitor_name: Optional[str] = Body(None),  # Alternative: search by name
     status: Optional[str] = Body(None),  # Filter by status
-    http_request: Optional[Request] = None
+    http_request: Request  # FastAPI will inject this
 ):
     """
     Get bookings for a visitor by their phone number or name.
@@ -9360,7 +9360,7 @@ async def cancel_booking_vapi(
     visitor_phone: Optional[str] = Body(None),
     visitor_name: Optional[str] = Body(None),
     reason: Optional[str] = Body(None),
-    http_request: Optional[Request] = None
+    http_request: Request  # FastAPI will inject this
 ):
     """
     Cancel or delete a booking/tour request by visitor information.
