@@ -280,6 +280,11 @@ class PropertyTourBooking(SQLModel, table=True):
         index=True
     )  # 'pending' | 'approved' | 'denied' | 'cancelled' | 'rescheduled'
     
+    # Soft delete for cancelled/deleted bookings
+    deleted_at: Optional[datetime] = Field(default=None, index=True)  # When booking was deleted/cancelled
+    deletion_reason: Optional[str] = None  # Reason for deletion/cancellation
+    deleted_by: Optional[str] = None  # 'visitor' | 'pm' | 'realtor' | 'system'
+    
     # Source of booking
     created_by: str = Field(default="vapi")  # 'vapi' | 'ui' | 'phone'
     

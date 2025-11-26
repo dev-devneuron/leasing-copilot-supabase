@@ -7977,31 +7977,52 @@ async def create_availability_slot(
 
 
 # Create Booking Request
-@app.post("/api/bookings/request")
-async def create_booking_request(
-    property_id: Optional[int] = Body(None),
-    property_name: Optional[str] = Body(None),  # Alternative: use property name
+# Create Booking Request (VAPI) - No property_id, only property_name
+@app.post("/vapi/bookings/request")
+async def create_booking_request_vapi(
+    request: Optional[VapiRequest] = None,
+    property_name: str = Body(...),  # Required: property name/address (user-provided)
     visitor_name: str = Body(...),
     visitor_phone: str = Body(...),
     visitor_email: Optional[str] = Body(None),
     requested_start_at: str = Body(...),  # ISO format
     requested_end_at: str = Body(...),  # ISO format
     timezone: str = Body(default="America/New_York"),
-    created_by: str = Body(default="vapi"),  # 'vapi' | 'ui' | 'phone'
     notes: Optional[str] = Body(None),
     http_request: Optional[Request] = None
 ):
     """
-    Create a booking request (called by VAPI or UI).
+    Create a booking request (called by VAPI).
     Creates booking with status 'pending' - never auto-approves.
     
-    Robust: Accepts property_id OR property_name, handles various formats, provides helpful errors.
+    No property_id needed - only property_name (user-provided).
     """
-    # Validate required fields
-    if not property_id and not property_name:
+    # Extract parameters from VapiRequest if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name in ["createBooking", "requestTour", "bookTour"]:
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {}
+                
+                property_name = property_name or args.get("property_name") or args.get("propertyName")
+                visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
+                visitor_phone = visitor_phone or args.get("visitor_phone") or args.get("visitorPhone")
+                visitor_email = visitor_email or args.get("visitor_email") or args.get("visitorEmail")
+                requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
+                requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
+                timezone = timezone or args.get("timezone") or "America/New_York"
+                notes = notes or args.get("notes")
+                break
+    
+    # Validate required fields - property_name is required (no property_id from VAPI)
+    if not property_name or not property_name.strip():
         raise HTTPException(
             status_code=400,
-            detail="Either property_id or property_name must be provided."
+            detail="property_name is required. Please provide the property name or address."
         )
     
     if not visitor_name or not visitor_name.strip():
@@ -8075,7 +8096,7 @@ async def create_booking_request(
     with Session(engine) as session:
         # Get source_ids for property search if needed
         source_ids = None
-        if property_name and http_request:
+        if http_request:
             try:
                 from DB.vapi_helpers import identify_user_from_vapi_request
                 body = await http_request.json() if hasattr(http_request, 'json') else {}
@@ -8085,9 +8106,9 @@ async def create_booking_request(
             except:
                 pass
         
-        # Robust property finding
+        # Robust property finding - only use property_name (no property_id)
         property_listing, found_property_id, error_msg = _find_property_robust(
-            session, property_id, property_name, source_ids
+            session, None, property_name, source_ids  # No property_id, only property_name
         )
         
         if not property_listing:
@@ -8124,13 +8145,13 @@ async def create_booking_request(
             end_at=end_dt,
             timezone=timezone,
             status="pending",
-            created_by=created_by,
+            created_by="vapi",  # Always "vapi" for VAPI endpoint
             notes=notes,
             audit_log=[{
                 "actorId": None,
                 "action": "created",
                 "timestamp": datetime.utcnow().isoformat(),
-                "reason": f"Created by {created_by}"
+                "reason": "Created by vapi"
             }]
         )
         
@@ -8139,7 +8160,7 @@ async def create_booking_request(
         session.refresh(booking)
         
         # Notify assigned user
-        notification_msg = f"New tour booking request from {visitor_name} ({visitor_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
+        notification_msg = f"New tour booking request from {visitor_name} ({normalized_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
         _send_sms_notification(assigned_user["phone"], notification_msg)
         
         # Also notify PM if different from assigned user
@@ -8673,34 +8694,109 @@ async def lookup_user(
 # These endpoints are designed for VAPI to call with minimal context
 # VAPI will have: property_id, visitor phone, and can identify PM/Realtor from call
 
-# Get Availability for Property's Assigned User (VAPI)
-@app.get("/vapi/properties/{property_id}/availability")
-async def get_property_assigned_user_availability(
-    property_id: int,
-    from_date: str,  # ISO format
-    to_date: str,  # ISO format
-    # No auth required - VAPI can call this
+# Get Availability for Property's Assigned User (VAPI) - POST only, no property_id needed
+@app.post("/vapi/properties/availability")
+async def get_property_availability_vapi(
+    request: Optional[VapiRequest] = None,
+    property_name: str = Body(...),  # Required: property name/address (user-provided)
+    from_date: Optional[str] = Body(None),  # ISO format (defaults to now)
+    to_date: Optional[str] = Body(None),  # ISO format (defaults to 2 weeks from now)
+    http_request: Optional[Request] = None
 ):
     """
     Get availability for the user assigned to a property.
     VAPI calls this after finding a property to check available slots.
+    
+    No property_id needed - only property_name (user-provided).
+    If from_date/to_date not provided, defaults to next 2 weeks.
     """
+    # Extract parameters from VapiRequest if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name in ["getAvailability", "checkAvailability", "getPropertyAvailability"]:
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {}
+                
+                property_name = property_name or args.get("property_name") or args.get("propertyName")
+                from_date = from_date or args.get("from_date") or args.get("fromDate")
+                to_date = to_date or args.get("to_date") or args.get("toDate")
+                break
+    
+    # Validate property_name
+    if not property_name or not property_name.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="property_name is required. Please provide the property name or address."
+        )
+    
+    # Default date range to next 2 weeks if not provided
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    if not from_date:
+        from_date = now.isoformat()
+    if not to_date:
+        to_date = (now + timedelta(days=14)).isoformat()
+    
+    # Robust datetime parsing
     try:
-        from_dt = datetime.fromisoformat(from_date.replace("Z", "+00:00"))
-        to_dt = datetime.fromisoformat(to_date.replace("Z", "+00:00"))
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format (e.g., 2025-12-01T00:00:00Z)")
+        from_dt = _parse_datetime_robust(from_date, "from_date")
+        to_dt = _parse_datetime_robust(to_date, "to_date")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error parsing dates: {str(e)}. Please use ISO format (e.g., 2025-12-01T00:00:00Z)"
+        )
+    
+    # Validate date range
+    if to_dt <= from_dt:
+        raise HTTPException(
+            status_code=400,
+            detail="to_date must be after from_date. Please provide a valid date range."
+        )
+    
+    # Validate range is not too large (max 30 days)
+    days_diff = (to_dt - from_dt).days
+    if days_diff > 30:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date range is too large ({days_diff} days). Maximum allowed range is 30 days. Please use a smaller date range."
+        )
     
     with Session(engine) as session:
-        # Get property
-        property_listing = session.get(ApartmentListing, property_id)
+        # Get source_ids for property search
+        source_ids = None
+        if http_request:
+            try:
+                from DB.vapi_helpers import identify_user_from_vapi_request
+                body = await http_request.json() if hasattr(http_request, 'json') else {}
+                headers = dict(http_request.headers) if http_request else {}
+                user_info = identify_user_from_vapi_request(body, headers)
+                source_ids = user_info.get("source_ids") if user_info else None
+            except:
+                pass
+        
+        # Robust property finding - only use property_name (no property_id)
+        property_listing, found_property_id, error_msg = _find_property_robust(
+            session, None, property_name, source_ids  # No property_id, only property_name
+        )
+        
         if not property_listing:
-            raise HTTPException(status_code=404, detail="Property not found")
+            raise HTTPException(status_code=404, detail=error_msg or "Property not found.")
+        
+        property_id = found_property_id  # Use found property_id
         
         # Get assigned user
         assigned_user = _get_property_assigned_user(session, property_id)
         if not assigned_user:
-            raise HTTPException(status_code=400, detail="Property has no assigned user")
+            raise HTTPException(
+                status_code=400,
+                detail="Property has no assigned PM or Realtor. Please assign a user to the property first."
+            )
         
         # Get availability
         prefs = _get_user_calendar_preferences(session, assigned_user["user_id"], assigned_user["user_type"])
@@ -8892,7 +8988,7 @@ async def validate_tour_request(
     """
     Validate a tour request for a specific time slot.
     
-    VAPI sends: property_id OR property_name + requested time
+    VAPI sends: property_name (required) + requested time
     Backend checks if that time is available for the property's assigned PM/Realtor.
     
     Returns:
@@ -8902,7 +8998,7 @@ async def validate_tour_request(
     The PM/Realtor is identified from the call's destination number (via headers).
     Only suggests slots within 2 weeks from now.
     
-    You can send EITHER property_id OR property_name. If both are provided, property_id takes precedence.
+    No property_id needed - only property_name (user-provided).
     """
     from DB.vapi_helpers import identify_user_from_vapi_request
     
@@ -8927,17 +9023,19 @@ async def validate_tour_request(
     
     with Session(engine) as session:
         # Try to identify user for data isolation
-        try:
-            body = await http_request.json()
-        except:
-            body = {}
-        headers = dict(http_request.headers)
-        user_info = identify_user_from_vapi_request(body, headers)
-        source_ids = user_info.get("source_ids") if user_info else None
+        source_ids = None
+        if http_request:
+            try:
+                body = await http_request.json()
+            except:
+                body = {}
+            headers = dict(http_request.headers) if http_request else {}
+            user_info = identify_user_from_vapi_request(body, headers)
+            source_ids = user_info.get("source_ids") if user_info else None
         
-        # Robust property finding
+        # Robust property finding - only use property_name (no property_id)
         property_listing, found_property_id, error_msg = _find_property_robust(
-            session, property_id, property_name, source_ids
+            session, None, property_name, source_ids  # No property_id, only property_name
         )
         
         if not property_listing:
@@ -9067,36 +9165,96 @@ async def validate_tour_request(
             })
 
 
-# Get Bookings by Visitor Phone (VAPI)
-@app.get("/vapi/bookings/by-visitor-phone")
-async def get_bookings_by_visitor_phone(
-    visitor_phone: str,
-    status: Optional[str] = None,  # Filter by status
-    # No auth required - VAPI can call this
+# Get Bookings by Visitor (VAPI) - POST only, no property_id needed
+@app.post("/vapi/bookings/by-visitor")
+async def get_bookings_by_visitor_vapi(
+    request: Optional[VapiRequest] = None,
+    visitor_phone: Optional[str] = Body(None),
+    visitor_name: Optional[str] = Body(None),  # Alternative: search by name
+    status: Optional[str] = Body(None),  # Filter by status
+    http_request: Optional[Request] = None
 ):
     """
-    Get bookings for a visitor by their phone number.
+    Get bookings for a visitor by their phone number or name.
     VAPI calls this to check booking status or get booking details.
+    
+    No property_id needed - only user-provided info (name, phone).
     """
-    with Session(engine) as session:
-        # Normalize phone number
-        normalized_phone = visitor_phone.replace("+", "").replace("-", "").replace(" ", "").strip()
-        
-        # Search for bookings by visitor phone (exact match or normalized)
-        query = select(PropertyTourBooking).where(
-            or_(
-                PropertyTourBooking.visitor_phone == visitor_phone,
-                PropertyTourBooking.visitor_phone.like(f"%{normalized_phone}%")
-            )
+    # Extract parameters from VapiRequest if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name in ["getBookingStatus", "checkBooking", "getBookings"]:
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {}
+                
+                visitor_phone = visitor_phone or args.get("visitor_phone") or args.get("visitorPhone")
+                visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
+                status = status or args.get("status")
+                break
+    
+    if not visitor_phone and not visitor_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Either visitor_phone or visitor_name must be provided."
         )
+    
+    with Session(engine) as session:
+        bookings = []
         
-        if status:
-            query = query.where(PropertyTourBooking.status == status)
+        # Method 1: Search by phone number (preferred)
+        if visitor_phone:
+            try:
+                normalized_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
+                
+                # Try exact match first
+                query = select(PropertyTourBooking).where(
+                    PropertyTourBooking.visitor_phone == normalized_phone,
+                    PropertyTourBooking.deleted_at.is_(None)  # Not deleted
+                )
+                
+                if status:
+                    query = query.where(PropertyTourBooking.status == status)
+                
+                bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
+                
+                # If no exact match, try partial match (last 10 digits)
+                if not bookings and len(normalized_phone) >= 10:
+                    last_10 = normalized_phone[-10:]
+                    query = select(PropertyTourBooking).where(
+                        PropertyTourBooking.visitor_phone.like(f"%{last_10}%"),
+                        PropertyTourBooking.deleted_at.is_(None)
+                    )
+                    if status:
+                        query = query.where(PropertyTourBooking.status == status)
+                    bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"⚠️  Error searching bookings by phone '{visitor_phone}': {e}")
         
-        bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
+        # Method 2: Search by name (fallback or if name provided)
+        if not bookings and visitor_name:
+            visitor_name_clean = visitor_name.strip().lower()
+            
+            query = select(PropertyTourBooking).where(
+                PropertyTourBooking.visitor_name.ilike(f"%{visitor_name_clean}%"),
+                PropertyTourBooking.deleted_at.is_(None)
+            )
+            
+            if status:
+                query = query.where(PropertyTourBooking.status == status)
+            
+            bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
         
-        return JSONResponse(content={
+        # Prepare response with helpful information
+        response_data = {
             "visitorPhone": visitor_phone,
+            "visitorName": visitor_name,
             "bookings": [{
                 "bookingId": b.booking_id,
                 "propertyId": b.property_id,
@@ -9114,88 +9272,194 @@ async def get_bookings_by_visitor_phone(
                 "proposedSlots": b.proposed_slots,
                 "requestedAt": b.requested_at.isoformat(),
                 "createdAt": b.created_at.isoformat(),
-                "updatedAt": b.updated_at.isoformat()
+                "updatedAt": b.updated_at.isoformat(),
+                "deletedAt": b.deleted_at.isoformat() if b.deleted_at else None,
+                "deletionReason": b.deletion_reason
             } for b in bookings]
-        })
+        }
+        
+        # Add helpful message if no bookings found
+        if not bookings:
+            search_terms = []
+            if visitor_phone:
+                search_terms.append(f"phone '{visitor_phone}'")
+            if visitor_name:
+                search_terms.append(f"name '{visitor_name}'")
+            
+            response_data["message"] = f"No bookings found for {', '.join(search_terms)}."
+            response_data["suggestions"] = [
+                "Check if the phone number or name is correct",
+                "Try searching with a different format (e.g., +1XXXXXXXXXX or (XXX) XXX-XXXX)",
+                "The booking might be under a different name or phone number"
+            ]
+        else:
+            response_data["message"] = f"Found {len(bookings)} booking(s)"
+        
+        return JSONResponse(content=response_data)
 
 
-# Cancel Booking by Visitor Phone (VAPI)
-@app.post("/vapi/bookings/cancel-by-visitor-phone")
-async def cancel_booking_by_visitor_phone(
-    visitor_phone: str = Body(...),
-    booking_id: Optional[int] = Body(None),  # Optional: specific booking to cancel
+# Cancel/Delete Booking by Visitor (VAPI) - Handles both bookings and pending requests
+@app.post("/vapi/bookings/cancel")
+async def cancel_booking_vapi(
+    request: Optional[VapiRequest] = None,
+    property_name: Optional[str] = Body(None),  # Property name/address (user-provided, optional)
+    visitor_phone: Optional[str] = Body(None),
+    visitor_name: Optional[str] = Body(None),
     reason: Optional[str] = Body(None),
-    # No auth required - VAPI can call this
+    http_request: Optional[Request] = None
 ):
     """
-    Cancel a booking by visitor phone number.
-    VAPI calls this when a visitor wants to cancel their booking.
-    If booking_id is not provided, cancels the most recent pending/approved booking.
+    Cancel or delete a booking/tour request by visitor information.
+    
+    Flow:
+    1. First checks for existing bookings (pending/approved) by visitor name and phone
+    2. If found, cancels them (soft delete with deleted_at)
+    3. If not found, checks for pending requests and deletes them permanently (soft delete)
+    4. Stores all cancellations in DB with reason so PM/realtor can see what was cancelled
+    
+    VAPI should call this when user wants to cancel a tour booking.
+    No property_id needed - only user-provided info (name, phone, property_name).
     """
+    # Extract parameters from VapiRequest if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name in ["cancelBooking", "cancelTour", "deleteTourRequest"]:
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {}
+                
+                property_name = property_name or args.get("property_name") or args.get("propertyName")
+                visitor_phone = visitor_phone or args.get("visitor_phone") or args.get("visitorPhone")
+                visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
+                reason = reason or args.get("reason")
+                break
+    
+    if not visitor_phone and not visitor_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Either visitor_phone or visitor_name must be provided."
+        )
+    
     with Session(engine) as session:
-        # Normalize phone number
-        normalized_phone = visitor_phone.replace("+", "").replace("-", "").replace(" ", "").strip()
+        # Normalize phone if provided
+        normalized_phone = None
+        if visitor_phone:
+            try:
+                normalized_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
+            except HTTPException:
+                raise
+            except Exception:
+                normalized_phone = visitor_phone.replace("+", "").replace("-", "").replace(" ", "").strip()
         
-        # Find booking(s)
-        if booking_id:
-            # Cancel specific booking
-            booking = session.get(PropertyTourBooking, booking_id)
-            if not booking:
-                raise HTTPException(status_code=404, detail="Booking not found")
-            
-            # Verify phone matches
-            booking_phone_normalized = booking.visitor_phone.replace("+", "").replace("-", "").replace(" ", "").strip()
-            if booking_phone_normalized != normalized_phone:
-                raise HTTPException(status_code=403, detail="Phone number does not match booking")
-            
-            bookings_to_cancel = [booking]
-        else:
-            # Find most recent pending or approved booking
-            booking = session.exec(
-                select(PropertyTourBooking).where(
-                    or_(
-                        PropertyTourBooking.visitor_phone == visitor_phone,
-                        PropertyTourBooking.visitor_phone.like(f"%{normalized_phone}%")
-                    ),
-                    PropertyTourBooking.status.in_(["pending", "approved"])
-                ).order_by(PropertyTourBooking.start_at.desc()).limit(1)
-            ).first()
-            
-            if not booking:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No pending or approved booking found for this phone number"
+        # Step 1: Check for existing bookings (pending or approved) by name and phone
+        bookings_query = select(PropertyTourBooking).where(
+            PropertyTourBooking.deleted_at.is_(None)  # Not already deleted
+        )
+        
+        if normalized_phone:
+            bookings_query = bookings_query.where(
+                or_(
+                    PropertyTourBooking.visitor_phone == normalized_phone,
+                    PropertyTourBooking.visitor_phone.like(f"%{normalized_phone[-10:]}%")
                 )
-            
-            bookings_to_cancel = [booking]
+            )
+        
+        if visitor_name:
+            visitor_name_clean = visitor_name.strip().lower()
+            bookings_query = bookings_query.where(
+                PropertyTourBooking.visitor_name.ilike(f"%{visitor_name_clean}%")
+            )
+        
+        # Filter by property if provided
+        if property_name:
+            # Find property first
+            property_listing, found_property_id, _ = _find_property_robust(session, None, property_name, None)
+            if found_property_id:
+                bookings_query = bookings_query.where(PropertyTourBooking.property_id == found_property_id)
+        
+        # Get pending or approved bookings
+        bookings_query = bookings_query.where(
+            PropertyTourBooking.status.in_(["pending", "approved"])
+        ).order_by(PropertyTourBooking.start_at.desc())
+        
+        bookings = session.exec(bookings_query).all()
         
         cancelled_bookings = []
-        for booking in bookings_to_cancel:
-            if booking.status in ["cancelled", "denied"]:
-                continue  # Skip already cancelled/denied bookings
+        deleted_requests = []
+        
+        if bookings:
+            # Step 2: Cancel existing bookings (soft delete)
+            for booking in bookings:
+                if booking.status in ["cancelled", "denied"]:
+                    continue
+                
+                old_status = booking.status
+                booking.status = "cancelled"
+                booking.deleted_at = datetime.utcnow()
+                booking.deletion_reason = reason or "Cancelled by visitor via VAPI"
+                booking.deleted_by = "visitor"
+                booking.updated_at = datetime.utcnow()
+                _add_audit_log(booking, None, "cancelled_by_visitor", reason or "Cancelled via VAPI")
+                
+                # If booking was approved, remove the blocking slot
+                if old_status == "approved":
+                    blocking_slot = session.exec(
+                        select(AvailabilitySlot).where(
+                            AvailabilitySlot.booking_id == booking.booking_id,
+                            AvailabilitySlot.slot_type == "booking"
+                        )
+                    ).first()
+                    if blocking_slot:
+                        session.delete(blocking_slot)
+                
+                session.add(booking)
+                cancelled_bookings.append(booking)
+        else:
+            # Step 3: No bookings found - check for pending requests to delete
+            # (This handles the case where user wants to delete a pending request)
+            pending_query = select(PropertyTourBooking).where(
+                PropertyTourBooking.deleted_at.is_(None),
+                PropertyTourBooking.status == "pending"
+            )
             
-            old_status = booking.status
-            booking.status = "cancelled"
-            booking.updated_at = datetime.utcnow()
-            _add_audit_log(booking, None, "cancelled_by_visitor", reason or "Cancelled via VAPI")
-            
-            # If booking was approved, remove the blocking slot
-            if old_status == "approved":
-                blocking_slot = session.exec(
-                    select(AvailabilitySlot).where(
-                        AvailabilitySlot.booking_id == booking.booking_id,
-                        AvailabilitySlot.slot_type == "booking"
+            if normalized_phone:
+                pending_query = pending_query.where(
+                    or_(
+                        PropertyTourBooking.visitor_phone == normalized_phone,
+                        PropertyTourBooking.visitor_phone.like(f"%{normalized_phone[-10:]}%")
                     )
-                ).first()
-                if blocking_slot:
-                    session.delete(blocking_slot)
+                )
             
-            session.add(booking)
-            cancelled_bookings.append(booking)
+            if visitor_name:
+                visitor_name_clean = visitor_name.strip().lower()
+                pending_query = pending_query.where(
+                    PropertyTourBooking.visitor_name.ilike(f"%{visitor_name_clean}%")
+                )
+            
+            if property_name:
+                property_listing, found_property_id, _ = _find_property_robust(session, None, property_name, None)
+                if found_property_id:
+                    pending_query = pending_query.where(PropertyTourBooking.property_id == found_property_id)
+            
+            pending_requests = session.exec(pending_query.order_by(PropertyTourBooking.start_at.desc())).all()
+            
+            for request_booking in pending_requests:
+                # Soft delete the pending request
+                request_booking.deleted_at = datetime.utcnow()
+                request_booking.deletion_reason = reason or "Deleted by visitor via VAPI"
+                request_booking.deleted_by = "visitor"
+                request_booking.updated_at = datetime.utcnow()
+                _add_audit_log(request_booking, None, "deleted_by_visitor", reason or "Deleted via VAPI")
+                
+                session.add(request_booking)
+                deleted_requests.append(request_booking)
         
         session.commit()
         
-        # Notify approver
+        # Notify approver for cancelled bookings
         for booking in cancelled_bookings:
             if booking.assigned_to_user_type == "property_manager":
                 approver = session.get(PropertyManager, booking.assigned_to_user_id)
@@ -9212,14 +9476,55 @@ async def cancel_booking_by_visitor_phone(
                 notification_msg = f"Tour booking cancelled by {booking.visitor_name} ({booking.visitor_phone}) for {property_address} on {booking.start_at.strftime('%Y-%m-%d %H:%M')}. {reason or ''}"
                 _send_sms_notification(approver.contact, notification_msg)
         
-        return JSONResponse(content={
-            "message": f"Successfully cancelled {len(cancelled_bookings)} booking(s)",
+        # Prepare response
+        total_processed = len(cancelled_bookings) + len(deleted_requests)
+        
+        if total_processed == 0:
+            search_info = []
+            if visitor_phone:
+                search_info.append(f"phone '{visitor_phone}'")
+            if visitor_name:
+                search_info.append(f"name '{visitor_name}'")
+            if property_name:
+                search_info.append(f"property '{property_name}'")
+            
+            raise HTTPException(
+                status_code=404,
+                detail=f"No pending or approved bookings found for {', '.join(search_info)}. Please check the information and try again."
+            )
+        
+        # Get property addresses for response
+        for booking in cancelled_bookings + deleted_requests:
+            property_listing = session.get(ApartmentListing, booking.property_id)
+            if property_listing:
+                meta = property_listing.listing_metadata or {}
+                booking.property_address = meta.get("address", "Unknown")
+            else:
+                booking.property_address = "Unknown"
+        
+        response = {
+            "message": f"Successfully processed {total_processed} booking(s)",
             "cancelledBookings": [{
                 "bookingId": b.booking_id,
                 "status": b.status,
-                "propertyId": b.property_id
-            } for b in cancelled_bookings]
-        })
+                "propertyId": b.property_id,
+                "propertyName": getattr(b, 'property_address', 'Unknown'),
+                "action": "cancelled",
+                "deletedAt": b.deleted_at.isoformat() if b.deleted_at else None,
+                "deletionReason": b.deletion_reason
+            } for b in cancelled_bookings],
+            "deletedRequests": [{
+                "bookingId": b.booking_id,
+                "status": b.status,
+                "propertyId": b.property_id,
+                "propertyName": getattr(b, 'property_address', 'Unknown'),
+                "action": "deleted",
+                "deletedAt": b.deleted_at.isoformat() if b.deleted_at else None,
+                "deletionReason": b.deletion_reason
+            } for b in deleted_requests]
+        }
+        
+        return JSONResponse(content=response)
 
 
 if __name__ == "__main__":

@@ -2301,14 +2301,16 @@ The property tour booking system allows tenants to schedule property tours via V
 **What VAPI sends:**
 ```json
 {
-  "property_id": 123,  // Optional: use if you have property_id from searchApartments
-  "property_name": "123 Main St, Apt 3B",  // Optional: use property name/address instead
+  "property_name": "123 Main St, Apt 3B",  // REQUIRED: property name/address (user-provided)
   "requested_start_at": "2025-12-01T16:00:00Z",
   "requested_end_at": "2025-12-01T16:30:00Z"
 }
 ```
 
-**Note:** You can send EITHER `property_id` OR `property_name`. If both are provided, `property_id` takes precedence. If `property_name` is provided, backend will search for the property using semantic search.
+**Important:** 
+- **NO property_id needed** - VAPI should only send `property_name` (what the user tells it)
+- Backend will search for the property using semantic search
+- VAPI can only do POST requests, not GET
 
 **What Backend returns (if requested time is AVAILABLE):**
 ```json
@@ -2379,11 +2381,20 @@ The property tour booking system allows tenants to schedule property tours via V
 
 #### 2a. Check Assigned User Availability (Alternative - Get All Slots)
 
-**Endpoint:** `GET /vapi/properties/{property_id}/availability?from={ISO_DATE}&to={ISO_DATE}`  
+**Endpoint:** `POST /vapi/properties/availability`  
 **What VAPI sends:**
-- `property_id`: Property ID from search results (path parameter)
-- `from`: Start date in ISO format (e.g., `2025-12-01T00:00:00Z`)
-- `to`: End date in ISO format (e.g., `2025-12-07T00:00:00Z`)
+```json
+{
+  "property_name": "123 Main St, Apt 3B",  // REQUIRED: property name/address (user-provided)
+  "from_date": "2025-12-01T00:00:00Z",  // Optional: defaults to now
+  "to_date": "2025-12-07T00:00:00Z"  // Optional: defaults to 2 weeks from now
+}
+```
+
+**Important:**
+- **NO property_id needed** - only `property_name` (what the user tells it)
+- If `from_date`/`to_date` not provided, defaults to next 2 weeks
+- VAPI can only do POST requests, not GET
 
 **What Backend returns:**
 ```json
@@ -2413,21 +2424,24 @@ The property tour booking system allows tenants to schedule property tours via V
 ---
 
 #### 3. Create Pending Booking Request
-**Endpoint:** `POST /api/bookings/request`  
+**Endpoint:** `POST /vapi/bookings/request`  
 **What VAPI sends:**
 ```json
 {
-  "property_id": 123,
+  "property_name": "123 Main St, Apt 3B",  // REQUIRED: property name/address (user-provided)
   "visitor_name": "John Doe",
   "visitor_phone": "+14125551234",
   "visitor_email": "john@example.com",
   "requested_start_at": "2025-12-01T16:00:00Z",
   "requested_end_at": "2025-12-01T16:30:00Z",
   "timezone": "America/New_York",
-  "created_by": "vapi",
   "notes": "Interested in 2-bedroom unit"
 }
 ```
+
+**Important:**
+- **NO property_id needed** - only `property_name` (what the user tells it)
+- Backend automatically sets `created_by` to "vapi"
 
 **What Backend returns:**
 ```json
@@ -2447,11 +2461,20 @@ The property tour booking system allows tenants to schedule property tours via V
 
 ---
 
-#### 4. Get Booking Details by Visitor Phone
-**Endpoint:** `GET /vapi/bookings/by-visitor-phone?visitor_phone={phone}&status={optional_status}`  
+#### 4. Get Booking Details by Visitor
+**Endpoint:** `POST /vapi/bookings/by-visitor`  
 **What VAPI sends:**
-- `visitor_phone`: Visitor's phone number (e.g., `+14125551234`)
-- `status` (optional): Filter by status (`pending`, `approved`, `denied`, `cancelled`, `rescheduled`)
+```json
+{
+  "visitor_phone": "+14125551234",  // Optional: use phone OR name
+  "visitor_name": "John Doe",  // Optional: use name OR phone
+  "status": "pending"  // Optional: filter by status
+}
+```
+
+**Important:**
+- VAPI can send EITHER `visitor_phone` OR `visitor_name` (or both)
+- VAPI can only do POST requests, not GET
 
 **What Backend returns:**
 ```json
@@ -2490,16 +2513,28 @@ The property tour booking system allows tenants to schedule property tours via V
 
 ---
 
-#### 5. Cancel Booking by Visitor Phone
-**Endpoint:** `POST /vapi/bookings/cancel-by-visitor-phone`  
+#### 5. Cancel/Delete Booking by Visitor
+**Endpoint:** `POST /vapi/bookings/cancel`  
 **What VAPI sends:**
 ```json
 {
-  "visitor_phone": "+14125551234",
-  "booking_id": 1,  // Optional: if not provided, cancels most recent pending/approved booking
-  "reason": "Changed my mind"  // Optional
+  "property_name": "123 Main St, Apt 3B",  // Optional: helps identify the specific booking
+  "visitor_phone": "+14125551234",  // Required: use phone OR name
+  "visitor_name": "John Doe",  // Required: use name OR phone
+  "reason": "Changed my mind"  // Optional: reason for cancellation
 }
 ```
+
+**How it works:**
+1. **First checks** for existing bookings (pending/approved) by visitor name and phone
+2. **If found:** Cancels them (soft delete - stored in DB with `deleted_at` timestamp)
+3. **If not found:** Checks for pending requests and deletes them (soft delete)
+4. **All cancellations stored** in DB so PM/realtor can see what was cancelled and why
+
+**Important:**
+- **NO booking_id needed** - VAPI should only send user-provided info (name, phone, property_name)
+- Backend automatically finds and cancels the correct booking
+- All cancelled/deleted bookings are stored in DB with `deleted_at`, `deletion_reason`, and `deleted_by` fields
 
 **What Backend returns:**
 ```json
@@ -2545,16 +2580,15 @@ VAPI checks:
 User says: "I'd like to tour this property tomorrow at 2 PM"
 VAPI → POST /vapi/properties/validate-tour-request
   {
-    "property_id": 123,  // Optional: if you have it from searchApartments
-    "property_name": "123 Main St, Apt 3B",  // OR use property name/address
+    "property_name": "123 Main St, Apt 3B",  // REQUIRED: what user told VAPI
     "requested_start_at": "2025-12-01T14:00:00Z",
     "requested_end_at": "2025-12-01T14:30:00Z"
   }
-  (You can send EITHER property_id OR property_name - both work!)
+  (NO property_id needed - only property_name from user)
   
 Backend → Returns:
-  - If available: {isAvailable: true, canBook: true}
-  - If not available: {isAvailable: false, suggestedSlots: [2-3 alternatives]}
+  - If available: {isAvailable: true, canBook: true, propertyId, propertyName}
+  - If not available: {isAvailable: false, suggestedSlots: [2-3 alternatives], propertyId, propertyName}
 
 VAPI → 
   - If available: "Great! That time works. I'll submit your booking request."
@@ -2564,16 +2598,15 @@ VAPI →
 **3. User confirms a time slot:**
 ```
 VAPI collects: visitor name, phone, email (optional)
-VAPI → POST /api/bookings/request with booking details
+VAPI → POST /vapi/bookings/request with booking details
   {
-    "property_id": 123,  // From searchApartments result
+    "property_name": "123 Main St, Apt 3B",  // What user told VAPI (NO property_id)
     "visitor_name": "John Doe",
     "visitor_phone": "+14125551234",
     "visitor_email": "john@example.com",
     "requested_start_at": "2025-12-01T16:00:00Z",
     "requested_end_at": "2025-12-01T16:30:00Z",
-    "timezone": "America/New_York",
-    "created_by": "vapi"
+    "timezone": "America/New_York"
   }
 Backend → Returns { bookingId, status: "pending" }
 VAPI tells user: "Your booking request has been submitted. You'll receive a confirmation once it's approved."
@@ -2581,24 +2614,37 @@ VAPI tells user: "Your booking request has been submitted. You'll receive a conf
 
 **4. User calls back to check status:**
 ```
-VAPI → GET /vapi/bookings/by-visitor-phone?visitor_phone={phone}
-Backend → Returns all bookings for that phone number
+VAPI → POST /vapi/bookings/by-visitor
+  {
+    "visitor_phone": "+14125551234",  // OR "visitor_name": "John Doe"
+    "status": "pending"  // Optional: filter by status
+  }
+Backend → Returns all bookings for that phone/name
 VAPI → Tells user current status and details:
   - If status === "pending": "Your booking request is still pending approval."
   - If status === "approved": "Your booking is confirmed for [date/time]."
   - If status === "denied": "Unfortunately, your booking request was not approved."
   - If status === "rescheduled": "Your booking has been rescheduled. Please select from: [proposed slots]"
+  - If status === "cancelled": "Your booking has been cancelled."
 ```
 
 **5. User wants to cancel:**
 ```
-VAPI → POST /vapi/bookings/cancel-by-visitor-phone
+VAPI → POST /vapi/bookings/cancel
   {
-    "visitor_phone": "+14125551234",
-    "booking_id": 1,  // Optional: if not provided, cancels most recent
-    "reason": "Changed my mind"
+    "property_name": "123 Main St, Apt 3B",  // Optional: helps identify specific booking
+    "visitor_phone": "+14125551234",  // OR "visitor_name": "John Doe"
+    "reason": "Changed my mind"  // Optional
   }
-Backend → Returns confirmation of cancellation
+  (NO booking_id needed - backend finds booking by name/phone)
+
+Backend Flow:
+  1. First checks for existing bookings (pending/approved) by name and phone
+  2. If found: Cancels them (soft delete - stored in DB with deleted_at)
+  3. If not found: Checks for pending requests and deletes them (soft delete)
+  4. All cancellations stored in DB so PM/realtor can see what was cancelled and why
+
+Backend → Returns confirmation with cancelled/deleted bookings
 VAPI → Tells user: "Your booking has been cancelled."
 ```
 
@@ -2616,15 +2662,17 @@ VAPI → Tells user: "Your booking has been cancelled."
 
 ### Important VAPI Rules
 
+✅ **VAPI can only do POST requests** - all endpoints are POST (no GET requests)  
+✅ **NO property_id needed** - VAPI should only send `property_name` (what the user tells it)  
 ✅ **Use existing `searchApartments` tool** - it now includes booking availability automatically  
 ✅ **Check `listing_status === "available"`** before offering booking  
 ✅ **Check `availability.hasAvailability === true`** to know if tour slots exist  
 ✅ **Always** create bookings with `status: "pending"` - never auto-approve  
 ✅ **Always** inform users that bookings are "pending approval"  
 ✅ **Never** tell users a booking is "confirmed" unless `status === "approved"`  
-✅ Use visitor phone number to lookup bookings (not booking_id)  
+✅ Use visitor phone number OR name to lookup bookings (not booking_id)  
 ✅ Backend automatically identifies PM/Realtor from call's destination number - no need to send it  
-✅ Use `property_id` from `searchApartments` result when calling booking endpoints
+✅ **Cancellation flow:** First checks for bookings, then deletes pending requests - all stored in DB with reason
 
 ### VAPI Tool Configuration
 
@@ -2639,53 +2687,61 @@ VAPI → Tells user: "Your booking has been cancelled."
 - **Endpoint:** `POST /vapi/properties/validate-tour-request`
 - **Description:** Validate a specific tour time request and get alternatives if not available
 - **Parameters:**
-  - `property_id` (body, optional): Property ID from searchApartments result
-  - `property_name` (body, optional): Property name/address (e.g., "123 Main St, Apt 3B")
+  - `property_name` (body, required): Property name/address (e.g., "123 Main St, Apt 3B") - **NO property_id needed**
   - `requested_start_at` (body, required): Requested start time in ISO format
   - `requested_end_at` (body, required): Requested end time in ISO format
-- **Note:** Send EITHER `property_id` OR `property_name`. If both are provided, `property_id` takes precedence.
 - **Returns:** 
   - If available: `{isAvailable: true, canBook: true, propertyId, propertyName}`
   - If not: `{isAvailable: false, suggestedSlots: [2-3 alternatives], propertyId, propertyName}`
 
 **2a. checkPropertyAvailability (Alternative - Add to VAPI)**
 - **Tool Name:** `checkPropertyAvailability`
-- **Endpoint:** `GET /vapi/properties/{property_id}/availability?from={ISO_DATE}&to={ISO_DATE}`
+- **Endpoint:** `POST /vapi/properties/availability`
 - **Description:** Get all available time slots for a property's assigned user
 - **Parameters:**
-  - `property_id` (path): Property ID from searchApartments result
-  - `from` (query): Start date in ISO format
-  - `to` (query): End date in ISO format
+  - `property_name` (body, required): Property name/address - **NO property_id needed**
+  - `from_date` (body, optional): Start date in ISO format (defaults to now)
+  - `to_date` (body, optional): End date in ISO format (defaults to 2 weeks from now)
 
 **3. createBookingRequest (NEW - Add to VAPI)**
 - **Tool Name:** `createBookingRequest`
-- **Endpoint:** `POST /api/bookings/request`
+- **Endpoint:** `POST /vapi/bookings/request`
 - **Description:** Create a pending booking request for a property tour
 - **Parameters:**
-  - `property_id`: Property ID from searchApartments
+  - `property_name` (required): Property name/address - **NO property_id needed**
   - `visitor_name`: Visitor's name
   - `visitor_phone`: Visitor's phone number
   - `visitor_email`: Visitor's email (optional)
   - `requested_start_at`: Start time in ISO format
   - `requested_end_at`: End time in ISO format
-  - `timezone`: Timezone (e.g., "America/New_York")
+  - `timezone`: Timezone (e.g., "America/New_York", defaults to "America/New_York")
   - `notes`: Additional notes (optional)
 
 **4. getBookingStatus (NEW - Add to VAPI)**
 - **Tool Name:** `getBookingStatus`
-- **Endpoint:** `GET /vapi/bookings/by-visitor-phone?visitor_phone={phone}`
+- **Endpoint:** `POST /vapi/bookings/by-visitor`
 - **Description:** Get booking status and details for a visitor
 - **Parameters:**
-  - `visitor_phone`: Visitor's phone number
+  - `visitor_phone` (optional): Visitor's phone number
+  - `visitor_name` (optional): Visitor's name
+  - `status` (optional): Filter by status
+- **Note:** Send EITHER `visitor_phone` OR `visitor_name` (or both)
 
 **5. cancelBooking (NEW - Add to VAPI)**
 - **Tool Name:** `cancelBooking`
-- **Endpoint:** `POST /vapi/bookings/cancel-by-visitor-phone`
-- **Description:** Cancel a booking by visitor phone number
+- **Endpoint:** `POST /vapi/bookings/cancel`
+- **Description:** Cancel or delete a booking/tour request by visitor information
 - **Parameters:**
-  - `visitor_phone`: Visitor's phone number
-  - `booking_id`: Booking ID (optional - cancels most recent if not provided)
-  - `reason`: Cancellation reason (optional)
+  - `property_name` (optional): Property name/address (helps identify specific booking)
+  - `visitor_phone` (required): Visitor's phone number (or use visitor_name)
+  - `visitor_name` (required): Visitor's name (or use visitor_phone)
+  - `reason` (optional): Cancellation reason
+- **Flow:**
+  1. First checks for existing bookings (pending/approved) by name and phone
+  2. If found: Cancels them (soft delete - stored in DB)
+  3. If not found: Checks for pending requests and deletes them (soft delete)
+  4. All cancellations stored in DB so PM/realtor can see what was cancelled and why
+- **Note:** **NO booking_id needed** - backend finds booking by name/phone
 
 ### Dashboard Endpoints (PM/Realtor)
 
