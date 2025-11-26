@@ -111,7 +111,141 @@ async function bookDemo(formData) {
     "id": 1,
     "name": "John Smith",
     "email": "john@example.com",
-    "company_name": "ABC Properties"  // Only for property_manager
+    "company_name": "ABC Properties",  // Only for property_manager
+    "timezone": "America/New_York",
+    "calendar_preferences": {
+      "defaultSlotLengthMins": 30,
+      "workingHours": {
+        "start": "09:00",
+        "end": "17:00"
+      }
+    }
+  }
+}
+```
+
+**Note:** The user profile now includes calendar preferences (timezone, working hours, slot length) for easy access in the dashboard.
+
+### Get Calendar Preferences
+
+**Endpoint:** `GET /api/users/{user_id}/calendar-preferences?user_type={user_type}`  
+**Auth:** Required
+
+**Response:**
+```json
+{
+  "timezone": "America/New_York",
+  "defaultSlotLengthMins": 30,
+  "workingHours": {
+    "start": "09:00",
+    "end": "17:00"
+  }
+}
+```
+
+### Update Calendar Preferences
+
+**Endpoint:** `PATCH /api/users/{user_id}/calendar-preferences?user_type={user_type}`  
+**Auth:** Required
+
+**Request Body (all fields optional - only send fields you want to update):**
+```json
+{
+  "timezone": "America/New_York",  // Optional: IANA timezone string (e.g., "America/New_York", "America/Los_Angeles")
+  "default_slot_length_mins": 30,  // Optional: Integer between 15-120
+  "working_hours_start": "09:00",  // Optional: HH:MM format (24-hour)
+  "working_hours_end": "17:00",    // Optional: HH:MM format (24-hour)
+  "working_days": [0, 1, 2, 3, 4]  // Optional: Array of day numbers (0=Monday, 1=Tuesday, ..., 6=Sunday). Default: [0,1,2,3,4] (Mon-Fri)
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Calendar preferences updated successfully",
+  "preferences": {
+    "timezone": "America/New_York",
+    "defaultSlotLengthMins": 30,
+    "workingHours": {
+      "start": "09:00",
+      "end": "17:00"
+    }
+  }
+}
+```
+
+**Error Responses:**
+- `400 Bad Request`: Invalid time format, slot length out of range, or end time before start time
+- `403 Forbidden`: User can only update their own preferences
+- `404 Not Found`: User not found
+
+**Example Usage:**
+```javascript
+// Update working hours only
+async function updateWorkingHours(userId, userType, start, end) {
+  const response = await fetch(
+    `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        working_hours_start: start,  // e.g., "09:00"
+        working_hours_end: end        // e.g., "17:00"
+      })
+    }
+  );
+  
+  if (response.ok) {
+    const data = await response.json();
+    console.log('Updated preferences:', data.preferences);
+    return data.preferences;
+  } else {
+    const error = await response.json();
+    throw new Error(error.detail);
+  }
+}
+
+// Update timezone only
+async function updateTimezone(userId, userType, timezone) {
+  const response = await fetch(
+    `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ timezone })
+    }
+  );
+  return response.json();
+}
+
+// Update working days (e.g., Monday-Friday = [0,1,2,3,4], All week = [0,1,2,3,4,5,6])
+async function updateWorkingDays(userId, userType, days) {
+  // days should be an array like [0, 1, 2, 3, 4] for Monday-Friday
+  // 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
+  const response = await fetch(
+    `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ working_days: days })
+    }
+  );
+  
+  if (response.ok) {
+    const data = await response.json();
+    return data.preferences;
+  } else {
+    const error = await response.json();
+    throw new Error(error.detail);
   }
 }
 ```
@@ -3105,7 +3239,8 @@ async function getCalendarEvents(fromDate, toDate) {
 - Allow users to set default working hours (e.g., 9 AM - 5 PM)
 - Set timezone preference
 - Set default slot length (15, 30, 45, 60 minutes)
-- Apply to all days or customize per day of week
+- Set working days (e.g., Monday-Friday, or all week)
+- **Note:** Working hours apply to all selected working days (same hours for all days)
 
 **Manual Availability Blocking:**
 - **Mark Unavailable:** Block specific time slots (personal time, meetings)
@@ -3119,52 +3254,224 @@ async function getCalendarEvents(fromDate, toDate) {
 - Show booked slots in blue
 - Show pending bookings in yellow
 
+**Calendar Preferences Endpoints:**
+
+**Get Calendar Preferences:**
+- **Endpoint:** `GET /api/users/{user_id}/calendar-preferences?user_type={user_type}`
+- **Auth:** Required
+- **Response:**
+```json
+{
+  "timezone": "America/New_York",
+  "defaultSlotLengthMins": 30,
+  "workingHours": {
+    "start": "09:00",
+    "end": "17:00"
+  }
+}
+```
+
+**Update Calendar Preferences:**
+- **Endpoint:** `PATCH /api/users/{user_id}/calendar-preferences?user_type={user_type}`
+- **Auth:** Required
+- **Request Body (all fields optional):**
+```json
+{
+  "timezone": "America/New_York",  // Optional: IANA timezone string
+  "default_slot_length_mins": 30,  // Optional: 15-120 minutes
+  "working_hours_start": "09:00",  // Optional: HH:MM format
+  "working_hours_end": "17:00",    // Optional: HH:MM format
+  "working_days": [0, 1, 2, 3, 4]  // Optional: Array of day numbers (0=Monday, 6=Sunday)
+}
+```
+- **Response:**
+```json
+{
+  "message": "Calendar preferences updated successfully",
+  "preferences": {
+    "timezone": "America/New_York",
+    "defaultSlotLengthMins": 30,
+    "workingHours": {
+      "start": "09:00",
+      "end": "17:00"
+    }
+  }
+}
+```
+
+**Important Notes:**
+- You can update individual fields (e.g., just `working_hours_start` and `working_hours_end`)
+- `working_hours_end` must be after `working_hours_start`
+- `default_slot_length_mins` must be between 15 and 120
+- Time format must be `HH:MM` (24-hour format, e.g., "09:00", "17:00")
+- `working_days` is an array of integers: 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
+- Default `working_days` is `[0, 1, 2, 3, 4]` (Monday-Friday)
+- Changes are saved immediately and persist across sessions
+
 **Implementation:**
 ```javascript
 function AvailabilityManager({ userId, userType }) {
-  const [workingHours, setWorkingHours] = useState({
-    start: '09:00',
-    end: '17:00',
+  const [preferences, setPreferences] = useState({
     timezone: 'America/New_York',
-    defaultSlotLength: 30
+    defaultSlotLengthMins: 30,
+    workingHours: {
+      start: '09:00',
+      end: '17:00'
+    }
   });
   
   const [unavailableSlots, setUnavailableSlots] = useState([]);
   
+  // Fetch calendar preferences on mount
+  useEffect(() => {
+    fetchCalendarPreferences();
+  }, [userId, userType]);
+  
+  async function fetchCalendarPreferences() {
+    const response = await fetch(
+      `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+      {
+        headers: { 'Authorization': `Bearer ${token}` }
+      }
+    );
+    const data = await response.json();
+    setPreferences(data);
+  }
+  
   // Update calendar preferences
-  async function updateWorkingHours(newHours) {
-    await fetch(`/api/users/${userId}/calendar-preferences`, {
-      method: 'PATCH',
-      headers: { 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ calendar_preferences: newHours })
-    });
+  async function updateWorkingHours(start, end) {
+    const response = await fetch(
+      `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          working_hours_start: start,
+          working_hours_end: end
+        })
+      }
+    );
+    
+    if (response.ok) {
+      const data = await response.json();
+      setPreferences(data.preferences);
+      // Show success message
+      alert('Working hours updated successfully!');
+    } else {
+      const error = await response.json();
+      alert(`Error: ${error.detail}`);
+    }
+  }
+  
+  // Update timezone
+  async function updateTimezone(timezone) {
+    const response = await fetch(
+      `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ timezone })
+      }
+    );
+    
+    if (response.ok) {
+      const data = await response.json();
+      setPreferences(data.preferences);
+    }
+  }
+  
+  // Update slot length
+  async function updateSlotLength(minutes) {
+    if (minutes < 15 || minutes > 120) {
+      alert('Slot length must be between 15 and 120 minutes');
+      return;
+    }
+    
+    const response = await fetch(
+      `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          default_slot_length_mins: minutes
+        })
+      }
+    );
+    
+    if (response.ok) {
+      const data = await response.json();
+      setPreferences(data.preferences);
+    }
   }
   
   // Create unavailable slot
   async function blockTimeSlot(startAt, endAt, reason) {
-    await fetch(`/api/users/${userId}/availability`, {
+    const response = await fetch(`/api/users/${userId}/availability`, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         user_type: userType,
         start_at: startAt,
         end_at: endAt,
         slot_type: 'unavailable',
-        reason: reason
+        notes: reason
       })
     });
+    
+    if (response.ok) {
+      // Refresh unavailable slots
+      fetchUnavailableSlots();
+    }
   }
   
   return (
     <div className="availability-manager">
       <WorkingHoursConfig 
-        hours={workingHours}
-        onChange={updateWorkingHours}
+        preferences={preferences}
+        onUpdateWorkingHours={updateWorkingHours}
+        onUpdateTimezone={updateTimezone}
+        onUpdateSlotLength={updateSlotLength}
       />
       <TimeSlotBlocker onBlock={blockTimeSlot} />
       <UnavailableSlotsList slots={unavailableSlots} />
     </div>
   );
+}
+```
+
+**User Profile Endpoint (includes calendar preferences):**
+- **Endpoint:** `GET /user-profile`
+- **Auth:** Required
+- **Response:**
+```json
+{
+  "user": {
+    "user_type": "property_manager",
+    "id": 12,
+    "name": "John Smith",
+    "email": "john@example.com",
+    "company_name": "ABC Properties",
+    "timezone": "America/New_York",
+    "calendar_preferences": {
+      "defaultSlotLengthMins": 30,
+      "workingHours": {
+        "start": "09:00",
+        "end": "17:00"
+      }
+    }
+  }
 }
 ```
 

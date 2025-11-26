@@ -3337,6 +3337,7 @@ async def update_calendar_preferences(
     default_slot_length_mins: Optional[int] = Body(None),
     working_hours_start: Optional[str] = Body(None),  # Format: "HH:MM"
     working_hours_end: Optional[str] = Body(None),  # Format: "HH:MM"
+    working_days: Optional[List[int]] = Body(None),  # List of day numbers: 0=Monday, 6=Sunday
     user_data: dict = Depends(get_current_user_data)
 ):
     """Update user's calendar preferences (timezone, working hours, slot length)."""
@@ -3411,6 +3412,27 @@ async def update_calendar_preferences(
                 )
             
             prefs["workingHours"] = working_hours
+        
+        # Update working days if provided
+        if working_days is not None:
+            # Validate working_days is a list
+            if not isinstance(working_days, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="working_days must be a list of integers (0=Monday, 6=Sunday)"
+                )
+            
+            # Validate all values are integers between 0-6
+            valid_days = set(range(7))  # 0-6
+            if not all(isinstance(day, int) and day in valid_days for day in working_days):
+                raise HTTPException(
+                    status_code=400,
+                    detail="working_days must contain integers between 0 (Monday) and 6 (Sunday)"
+                )
+            
+            # Remove duplicates and sort
+            working_days_unique = sorted(list(set(working_days)))
+            prefs["workingDays"] = working_days_unique
         
         # Update calendar_preferences
         user.calendar_preferences = prefs
@@ -7740,14 +7762,16 @@ def _get_user_calendar_preferences(session: Session, user_id: int, user_type: st
         return {
             "timezone": "America/New_York",
             "defaultSlotLengthMins": 30,
-            "workingHours": {"start": "09:00", "end": "17:00"}
+            "workingHours": {"start": "09:00", "end": "17:00"},
+            "workingDays": [0, 1, 2, 3, 4]  # Default: Monday-Friday
         }
     
     if not user:
         return {
             "timezone": "America/New_York",
             "defaultSlotLengthMins": 30,
-            "workingHours": {"start": "09:00", "end": "17:00"}
+            "workingHours": {"start": "09:00", "end": "17:00"},
+            "workingDays": [0, 1, 2, 3, 4]  # Default: Monday-Friday
         }
     
     prefs = user.calendar_preferences or {}
@@ -7756,7 +7780,8 @@ def _get_user_calendar_preferences(session: Session, user_id: int, user_type: st
     return {
         "timezone": timezone,
         "defaultSlotLengthMins": prefs.get("defaultSlotLengthMins", 30),
-        "workingHours": prefs.get("workingHours", {"start": "09:00", "end": "17:00"})
+        "workingHours": prefs.get("workingHours", {"start": "09:00", "end": "17:00"}),
+        "workingDays": prefs.get("workingDays", [0, 1, 2, 3, 4])  # Default: Monday-Friday
     }
 
 
