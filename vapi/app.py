@@ -7980,6 +7980,7 @@ async def create_availability_slot(
 # Create Booking Request (VAPI) - No property_id, only property_name
 @app.post("/vapi/bookings/request")
 async def create_booking_request_vapi(
+    http_request: Request,  # FastAPI will inject this - must be first (no default)
     request: Optional[VapiRequest] = None,
     property_name: str = Body(...),  # Required: property name/address (user-provided)
     visitor_name: str = Body(...),
@@ -7988,8 +7989,7 @@ async def create_booking_request_vapi(
     requested_start_at: str = Body(...),  # ISO format
     requested_end_at: str = Body(...),  # ISO format
     timezone: str = Body(default="America/New_York"),
-    notes: Optional[str] = Body(None),
-    http_request: Request  # FastAPI will inject this
+    notes: Optional[str] = Body(None)
 ):
     """
     Create a booking request (called by VAPI).
@@ -8697,11 +8697,11 @@ async def lookup_user(
 # Get Availability for Property's Assigned User (VAPI) - POST only, no property_id needed
 @app.post("/vapi/properties/availability")
 async def get_property_availability_vapi(
+    http_request: Request,  # FastAPI will inject this - must be first (no default)
     request: Optional[VapiRequest] = None,
     property_name: str = Body(...),  # Required: property name/address (user-provided)
     from_date: Optional[str] = Body(None),  # ISO format (defaults to now)
-    to_date: Optional[str] = Body(None),  # ISO format (defaults to 2 weeks from now)
-    http_request: Request  # FastAPI will inject this
+    to_date: Optional[str] = Body(None)  # ISO format (defaults to 2 weeks from now)
 ):
     """
     Get availability for the user assigned to a property.
@@ -8979,11 +8979,11 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
 # Validate Tour Request and Get Alternatives
 @app.post("/vapi/properties/validate-tour-request")
 async def validate_tour_request(
+    http_request: Request,  # FastAPI will inject this - must be first (no default)
     request: Optional[VapiRequest] = None,
     property_name: str = Body(...),  # Required: property name/address (user-provided)
     requested_start_at: str = Body(...),  # ISO format
-    requested_end_at: str = Body(...),  # ISO format
-    http_request: Request  # FastAPI will inject this
+    requested_end_at: str = Body(...)  # ISO format
 ):
     """
     Validate a tour request for a specific time slot.
@@ -9222,11 +9222,11 @@ async def validate_tour_request(
 # Get Bookings by Visitor (VAPI) - POST only, no property_id needed
 @app.post("/vapi/bookings/by-visitor")
 async def get_bookings_by_visitor_vapi(
+    http_request: Request,  # FastAPI will inject this - must be first (no default)
     request: Optional[VapiRequest] = None,
     visitor_phone: Optional[str] = Body(None),
     visitor_name: Optional[str] = Body(None),  # Alternative: search by name
-    status: Optional[str] = Body(None),  # Filter by status
-    http_request: Request  # FastAPI will inject this
+    status: Optional[str] = Body(None)  # Filter by status
 ):
     """
     Get bookings for a visitor by their phone number or name.
@@ -9355,12 +9355,12 @@ async def get_bookings_by_visitor_vapi(
 # Cancel/Delete Booking by Visitor (VAPI) - Handles both bookings and pending requests
 @app.post("/vapi/bookings/cancel")
 async def cancel_booking_vapi(
+    http_request: Request,  # FastAPI will inject this - must be first (no default)
     request: Optional[VapiRequest] = None,
     property_name: Optional[str] = Body(None),  # Property name/address (user-provided, optional)
     visitor_phone: Optional[str] = Body(None),
     visitor_name: Optional[str] = Body(None),
-    reason: Optional[str] = Body(None),
-    http_request: Request  # FastAPI will inject this
+    reason: Optional[str] = Body(None)
 ):
     """
     Cancel or delete a booking/tour request by visitor information.
