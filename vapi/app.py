@@ -8979,11 +8979,11 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
 # Validate Tour Request and Get Alternatives
 @app.post("/vapi/properties/validate-tour-request")
 async def validate_tour_request(
-    property_id: Optional[int] = Body(None),  # Optional: use if available
-    property_name: Optional[str] = Body(None),  # Optional: property name/address
+    request: Optional[VapiRequest] = None,
+    property_name: str = Body(...),  # Required: property name/address (user-provided)
     requested_start_at: str = Body(...),  # ISO format
     requested_end_at: str = Body(...),  # ISO format
-    http_request: Request
+    http_request: Optional[Request] = None
 ):
     """
     Validate a tour request for a specific time slot.
@@ -9002,24 +9002,78 @@ async def validate_tour_request(
     """
     from DB.vapi_helpers import identify_user_from_vapi_request
     
+    # Extract parameters from VapiRequest if provided
+    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name in ["validateTourRequest", "checkTourAvailability", "validateTour"]:
+                args = tool_call.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        args = {}
+                
+                property_name = property_name or args.get("property_name") or args.get("propertyName")
+                requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
+                requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
+                break
+    
+    # Validate property_name is provided
+    if not property_name or not property_name.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="property_name is required. Please provide the property name or address."
+        )
+    
+    # Robust datetime parsing
     try:
-        requested_start = datetime.fromisoformat(requested_start_at.replace("Z", "+00:00"))
-        requested_end = datetime.fromisoformat(requested_end_at.replace("Z", "+00:00"))
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format (e.g., 2025-12-01T16:00:00Z)")
+        requested_start = _parse_datetime_robust(requested_start_at, "requested_start_at")
+        requested_end = _parse_datetime_robust(requested_end_at, "requested_end_at")
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error parsing dates: {str(e)}. Please use ISO format (e.g., 2025-12-01T16:00:00Z)"
+        )
     
     # Validate time range (must be within 2 weeks)
-    now = datetime.utcnow()
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
     two_weeks_from_now = now + timedelta(days=14)
     
     if requested_start < now:
-        raise HTTPException(status_code=400, detail="Requested time cannot be in the past")
+        hours_ago = (now - requested_start).total_seconds() / 3600
+        raise HTTPException(
+            status_code=400,
+            detail=f"Requested time cannot be in the past. The requested time was {hours_ago:.1f} hours ago. Please select a future time."
+        )
     
     if requested_start > two_weeks_from_now:
-        raise HTTPException(status_code=400, detail="Tour requests must be within 2 weeks from now")
+        days_ahead = (requested_start - now).days
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tour requests must be within 2 weeks from now. The requested time is {days_ahead} days away. Please select a time within the next 14 days."
+        )
     
     if requested_end <= requested_start:
-        raise HTTPException(status_code=400, detail="End time must be after start time")
+        duration = (requested_end - requested_start).total_seconds() / 60
+        raise HTTPException(
+            status_code=400,
+            detail=f"End time must be after start time. The duration is {duration:.0f} minutes. Please ensure end time is after start time."
+        )
+    
+    # Validate duration (reasonable tour duration: 15 minutes to 2 hours)
+    duration_minutes = (requested_end - requested_start).total_seconds() / 60
+    if duration_minutes < 15:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tour duration is too short ({duration_minutes:.0f} minutes). Minimum duration is 15 minutes."
+        )
+    if duration_minutes > 120:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tour duration is too long ({duration_minutes:.0f} minutes). Maximum duration is 2 hours."
+        )
     
     with Session(engine) as session:
         # Try to identify user for data isolation
