@@ -48,7 +48,7 @@ from google_auth_oauthlib.flow import Flow
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from sqlmodel import select, Session
-from sqlalchemy import update, func, or_
+from sqlalchemy import update, func, or_, and_
 from sqlalchemy.orm.attributes import flag_modified
 
 # Local imports
@@ -8239,38 +8239,88 @@ async def get_booking_details(
 @app.get("/api/users/{user_id}/bookings")
 async def get_user_bookings(
     user_id: int,
-    user_type: str,
     status: Optional[str] = None,
     from_date: Optional[str] = None,
     user_data: dict = Depends(get_current_user_data)
 ):
-    """Get bookings for a user (for dashboards)."""
+    """
+    Get bookings for a user (for dashboards).
+    Derives user_type from authenticated user_data instead of requiring it as parameter.
+    """
+    # Get user_type from authenticated user data
+    user_type = user_data["user_type"]
+    authenticated_user_id = user_data["id"]
+    
     # Verify user can only view their own bookings
-    if user_data["user_type"] != user_type or user_data["id"] != user_id:
-        raise HTTPException(status_code=403, detail="You can only view your own bookings")
+    if authenticated_user_id != user_id:
+        raise HTTPException(
+            status_code=403, 
+            detail="You can only view your own bookings"
+        )
     
     with Session(engine) as session:
+        # Build query - filter by assigned user
         query = select(PropertyTourBooking).where(
             PropertyTourBooking.assigned_to_user_id == user_id,
-            PropertyTourBooking.assigned_to_user_type == user_type
+            PropertyTourBooking.assigned_to_user_type == user_type,
+            PropertyTourBooking.deleted_at.is_(None)  # Exclude deleted bookings
         )
+        
+        # If PM, also include bookings for properties they manage (even if assigned to realtor)
+        if user_type == "property_manager":
+            # Get all properties managed by this PM
+            properties = session.exec(
+                select(ApartmentListing).join(Source).where(
+                    Source.property_manager_id == user_id
+                )
+            ).all()
+            property_ids = [p.id for p in properties]
+            
+            if property_ids:
+                # Include bookings for PM's properties, even if assigned to a realtor
+                query = select(PropertyTourBooking).where(
+                    or_(
+                        # Bookings assigned directly to PM
+                        and_(
+                            PropertyTourBooking.assigned_to_user_id == user_id,
+                            PropertyTourBooking.assigned_to_user_type == "property_manager"
+                        ),
+                        # Bookings for PM's properties (assigned to realtors)
+                        and_(
+                            PropertyTourBooking.property_id.in_(property_ids),
+                            PropertyTourBooking.assigned_to_user_type == "realtor"
+                        )
+                    ),
+                    PropertyTourBooking.deleted_at.is_(None)
+                )
         
         if status:
             query = query.where(PropertyTourBooking.status == status)
         
         if from_date:
             try:
-                from_dt = datetime.fromisoformat(from_date.replace("Z", "+00:00"))
+                from_dt = _parse_datetime_robust(from_date, "from_date")
                 query = query.where(PropertyTourBooking.start_at >= from_dt)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid from_date format")
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid from_date format. Use ISO format (e.g., 2025-12-01T00:00:00Z)")
         
         bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
         
-        return JSONResponse(content={
-            "bookings": [{
+        # Get property details for each booking
+        result_bookings = []
+        for b in bookings:
+            property_listing = session.get(ApartmentListing, b.property_id)
+            property_address = None
+            if property_listing:
+                meta = property_listing.listing_metadata or {}
+                property_address = meta.get("address", "Unknown")
+            
+            result_bookings.append({
                 "bookingId": b.booking_id,
                 "propertyId": b.property_id,
+                "propertyAddress": property_address,
                 "visitor": {
                     "name": b.visitor_name,
                     "phone": b.visitor_phone,
@@ -8278,10 +8328,22 @@ async def get_user_bookings(
                 },
                 "startAt": b.start_at.isoformat(),
                 "endAt": b.end_at.isoformat(),
+                "timezone": b.timezone,
                 "status": b.status,
                 "createdBy": b.created_by,
-                "notes": b.notes
-            } for b in bookings]
+                "notes": b.notes,
+                "assignedTo": {
+                    "userId": b.assigned_to_user_id,
+                    "userType": b.assigned_to_user_type
+                },
+                "requestedAt": b.requested_at.isoformat() if b.requested_at else None,
+                "createdAt": b.created_at.isoformat() if b.created_at else None,
+                "updatedAt": b.updated_at.isoformat() if b.updated_at else None
+            })
+        
+        return JSONResponse(content={
+            "bookings": result_bookings,
+            "total": len(result_bookings)
         })
 
 
@@ -8695,6 +8757,22 @@ async def lookup_user(
 # VAPI will have: property_id, visitor phone, and can identify PM/Realtor from call
 
 # Get Availability for Property's Assigned User (VAPI) - POST only, no property_id needed
+# Also support check-availability endpoint name for VAPI compatibility
+@app.post("/vapi/properties/check-availability")
+async def check_property_availability_vapi(
+    http_request: Request,  # FastAPI will inject this - must be first (no default)
+    request: Optional[VapiRequest] = None,
+    property_name: str = Body(...),  # Required: property name/address (user-provided)
+    from_date: Optional[str] = Body(None),  # ISO format (defaults to now)
+    to_date: Optional[str] = Body(None)  # ISO format (defaults to 2 weeks from now)
+):
+    """
+    Alias for /vapi/properties/availability - VAPI compatibility endpoint.
+    """
+    # Call the main availability endpoint function
+    return await get_property_availability_vapi(http_request, request, property_name, from_date, to_date)
+
+
 @app.post("/vapi/properties/availability")
 async def get_property_availability_vapi(
     http_request: Request,  # FastAPI will inject this - must be first (no default)
