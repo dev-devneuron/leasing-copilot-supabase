@@ -21,6 +21,7 @@ twilio
 sqlmodel
 psycopg2-binary
 pgvector
+pytz
 sqlalchemy
 supabase
 google-generativeai

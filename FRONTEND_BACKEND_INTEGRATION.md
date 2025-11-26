@@ -16,7 +16,8 @@ Complete API documentation for integrating the frontend with the Leasap Backend 
 8. [Call Forwarding Controls](#-call-forwarding-controls-pm--realtor)
 9. [Call Records & Transcripts](#-call-records--transcripts)
 10. [Maintenance Request Logging](#-maintenance-request-logging)
-11. [Admin Endpoints](#-admin-endpoints-tech-team)
+11. [Property Tour Booking System](#-property-tour-booking-system)
+12. [Admin Endpoints](#-admin-endpoints-tech-team)
 
 ---
 
@@ -2177,6 +2178,1326 @@ The bot identifies tenants by:
 
 ---
 
+## 🏠 Property Tour Booking System
+
+### Overview
+
+The property tour booking system allows tenants to schedule property tours via VAPI AI or through the dashboard. The system manages availability, approval workflows, and notifications.
+
+**Key Features:**
+- VAPI integration for automated booking requests
+- In-app calendar management (no external calendars required)
+- Approval workflow (bookings start as "pending")
+- Conflict detection and prevention
+- SMS notifications for booking lifecycle events
+- Property assignment to realtors with audit trail
+
+### VAPI Integration Endpoints
+
+**These endpoints are designed for VAPI to call (no authentication required):**
+
+#### 1. Search Properties (REUSE EXISTING `searchApartments` TOOL)
+
+**✅ VAPI Already Has This Tool:** `searchApartments`  
+**Endpoint:** `POST /search_apartments/`  
+**VAPI Tool Name:** `searchApartments`
+
+**What VAPI sends:**
+```json
+{
+  "query": "Looking for a 2 bed apartment in Mountain View CA under $2000"
+}
+```
+
+**What Backend returns (ENHANCED with booking info):**
+```json
+{
+  "results": [{
+    "toolCallId": "...",
+    "result": [
+      {
+        // Original listing data
+        "id": 123,
+        "address": "123 Main St, Apt 3B",
+        "bedrooms": 2,
+        "bathrooms": 1.5,
+        "price": 1800,
+        "square_feet": 1200,
+        "property_type": "Apartment",
+        "features": ["Parking", "Laundry"],
+        
+        // NEW: Booking-related fields (automatically added)
+        "property_id": 123,
+        "listing_status": "available",  // "available" | "rented" | "offline"
+        "is_available_for_tours": true,  // true if listing_status === "available"
+        "assigned_to": {
+          "user_id": 5,
+          "user_type": "realtor",
+          "name": "Sarah Johnson",
+          "phone": "+14125551234",
+          "email": "sarah@example.com"
+        },
+        "availability": {
+          "hasAvailability": true,
+          "nextAvailableSlot": {
+            "startAt": "2025-12-01T16:00:00Z",
+            "endAt": "2025-12-01T16:30:00Z"
+          },
+          "totalSlots": 15
+        }
+      }
+    ]
+  }]
+}
+```
+
+**VAPI Action:** 
+- Check `listing_status === "available"` or `is_available_for_tours === true` before offering booking
+- Use `availability.hasAvailability` to know if time slots exist
+- If `availability.hasAvailability === false`, inform user that property is available but no tour slots are currently open
+- If `listing_status === "rented"`, inform user that property is no longer available
+
+**Important:** The existing `searchApartments` tool now automatically includes booking availability information. No need to create a new tool or endpoint!
+
+**Example VAPI Response from `searchApartments`:**
+```json
+{
+  "results": [{
+    "toolCallId": "abc123",
+    "result": [
+      {
+        "id": 123,
+        "address": "123 Main St, Apt 3B",
+        "bedrooms": 2,
+        "bathrooms": 1.5,
+        "price": 1800,
+        "listing_status": "available",
+        "is_available_for_tours": true,
+        "property_id": 123,
+        "assigned_to": {
+          "user_id": 5,
+          "user_type": "realtor",
+          "name": "Sarah Johnson"
+        },
+        "availability": {
+          "hasAvailability": true,
+          "nextAvailableSlot": {
+            "startAt": "2025-12-01T16:00:00Z",
+            "endAt": "2025-12-01T16:30:00Z"
+          },
+          "totalSlots": 15
+        }
+      }
+    ]
+  }]
+}
+```
+
+---
+
+#### 2. Validate Tour Request (RECOMMENDED - Use This Instead of #2a)
+
+**Endpoint:** `POST /vapi/properties/validate-tour-request`  
+**What VAPI sends:**
+```json
+{
+  "property_id": 123,  // Optional: use if you have property_id from searchApartments
+  "property_name": "123 Main St, Apt 3B",  // Optional: use property name/address instead
+  "requested_start_at": "2025-12-01T16:00:00Z",
+  "requested_end_at": "2025-12-01T16:30:00Z"
+}
+```
+
+**Note:** You can send EITHER `property_id` OR `property_name`. If both are provided, `property_id` takes precedence. If `property_name` is provided, backend will search for the property using semantic search.
+
+**What Backend returns (if requested time is AVAILABLE):**
+```json
+{
+  "isAvailable": true,
+  "canBook": true,
+  "requestedSlot": {
+    "startAt": "2025-12-01T16:00:00Z",
+    "endAt": "2025-12-01T16:30:00Z"
+  },
+  "assignedUser": {
+    "userId": 5,
+    "userType": "realtor",
+    "name": "Sarah Johnson"
+  },
+  "timezone": "America/New_York",
+  "message": "Requested time slot is available"
+}
+```
+
+**What Backend returns (if requested time is NOT AVAILABLE):**
+```json
+{
+  "isAvailable": false,
+  "canBook": false,
+  "propertyId": 123,
+  "propertyName": "123 Main St, Apt 3B",
+  "reason": "Requested time slot is not available",
+  "requestedSlot": {
+    "startAt": "2025-12-01T16:00:00Z",
+    "endAt": "2025-12-01T16:30:00Z"
+  },
+  "suggestedSlots": [
+    {
+      "startAt": "2025-12-01T17:00:00Z",
+      "endAt": "2025-12-01T17:30:00Z"
+    },
+    {
+      "startAt": "2025-12-02T14:00:00Z",
+      "endAt": "2025-12-02T14:30:00Z"
+    },
+    {
+      "startAt": "2025-12-02T15:00:00Z",
+      "endAt": "2025-12-02T15:30:00Z"
+    }
+  ],
+  "assignedUser": {
+    "userId": 5,
+    "userType": "realtor",
+    "name": "Sarah Johnson"
+  },
+  "timezone": "America/New_York",
+  "message": "Requested time is not available. Here are 3 alternative options."
+}
+```
+
+**VAPI Action:**
+- If `isAvailable === true`: Tell user "Great! That time works. I'll submit your booking request."
+- If `isAvailable === false`: Present the suggested slots to user: "That time isn't available, but I have these options: [list slots]. Which works for you?"
+
+**Important:**
+- Backend automatically identifies which PM/Realtor the call is for from the call's destination number
+- Only validates slots within 2 weeks from now
+- Returns 2-3 alternative slots closest to the requested time if not available
+- Checks property status and assigned user automatically
+
+---
+
+#### 2a. Check Assigned User Availability (Alternative - Get All Slots)
+
+**Endpoint:** `GET /vapi/properties/{property_id}/availability?from={ISO_DATE}&to={ISO_DATE}`  
+**What VAPI sends:**
+- `property_id`: Property ID from search results (path parameter)
+- `from`: Start date in ISO format (e.g., `2025-12-01T00:00:00Z`)
+- `to`: End date in ISO format (e.g., `2025-12-07T00:00:00Z`)
+
+**What Backend returns:**
+```json
+{
+  "propertyId": 123,
+  "assignedUser": {
+    "userId": 5,
+    "userType": "realtor",
+    "name": "Sarah Johnson"
+  },
+  "timezone": "America/New_York",
+  "availableSlots": [
+    {
+      "startAt": "2025-12-01T16:00:00Z",
+      "endAt": "2025-12-01T16:30:00Z"
+    },
+    {
+      "startAt": "2025-12-02T14:00:00Z",
+      "endAt": "2025-12-02T14:30:00Z"
+    }
+  ]
+}
+```
+
+**VAPI Action:** Use this if you want to show all available slots. Otherwise, use endpoint #2 above.
+
+---
+
+#### 3. Create Pending Booking Request
+**Endpoint:** `POST /api/bookings/request`  
+**What VAPI sends:**
+```json
+{
+  "property_id": 123,
+  "visitor_name": "John Doe",
+  "visitor_phone": "+14125551234",
+  "visitor_email": "john@example.com",
+  "requested_start_at": "2025-12-01T16:00:00Z",
+  "requested_end_at": "2025-12-01T16:30:00Z",
+  "timezone": "America/New_York",
+  "created_by": "vapi",
+  "notes": "Interested in 2-bedroom unit"
+}
+```
+
+**What Backend returns:**
+```json
+{
+  "bookingId": 1,
+  "status": "pending",
+  "message": "Booking request created successfully. Awaiting approval."
+}
+```
+
+**VAPI Action:** Inform user that booking request has been submitted and is pending approval. **Never** tell user the booking is confirmed - it's only pending.
+
+**Important:** 
+- Backend automatically determines the approver (realtor if property is assigned to realtor, else PM)
+- Backend automatically identifies which PM/Realtor the call is for from the call's destination number
+- SMS notifications are automatically sent to the approver
+
+---
+
+#### 4. Get Booking Details by Visitor Phone
+**Endpoint:** `GET /vapi/bookings/by-visitor-phone?visitor_phone={phone}&status={optional_status}`  
+**What VAPI sends:**
+- `visitor_phone`: Visitor's phone number (e.g., `+14125551234`)
+- `status` (optional): Filter by status (`pending`, `approved`, `denied`, `cancelled`, `rescheduled`)
+
+**What Backend returns:**
+```json
+{
+  "visitorPhone": "+14125551234",
+  "bookings": [
+    {
+      "bookingId": 1,
+      "propertyId": 123,
+      "visitor": {
+        "name": "John Doe",
+        "phone": "+14125551234",
+        "email": "john@example.com"
+      },
+      "startAt": "2025-12-01T16:00:00Z",
+      "endAt": "2025-12-01T16:30:00Z",
+      "timezone": "America/New_York",
+      "status": "pending",  // or "approved", "denied", "cancelled", "rescheduled"
+      "createdBy": "vapi",
+      "notes": "Interested in 2-bedroom unit",
+      "proposedSlots": null,  // Only set if status is "rescheduled"
+      "requestedAt": "2025-11-26T10:30:00Z",
+      "createdAt": "2025-11-26T10:30:00Z",
+      "updatedAt": "2025-11-26T10:30:00Z"
+    }
+  ]
+}
+```
+
+**VAPI Action:** 
+- If `status === "pending"`: "Your booking request is still pending approval."
+- If `status === "approved"`: "Your booking is confirmed for [date/time]."
+- If `status === "denied"`: "Unfortunately, your booking request was not approved."
+- If `status === "rescheduled"`: "Your booking has been rescheduled. Please select from: [proposed slots]"
+- If `status === "cancelled"`: "Your booking has been cancelled."
+
+---
+
+#### 5. Cancel Booking by Visitor Phone
+**Endpoint:** `POST /vapi/bookings/cancel-by-visitor-phone`  
+**What VAPI sends:**
+```json
+{
+  "visitor_phone": "+14125551234",
+  "booking_id": 1,  // Optional: if not provided, cancels most recent pending/approved booking
+  "reason": "Changed my mind"  // Optional
+}
+```
+
+**What Backend returns:**
+```json
+{
+  "message": "Successfully cancelled 1 booking(s)",
+  "cancelledBookings": [
+    {
+      "bookingId": 1,
+      "status": "cancelled",
+      "propertyId": 123
+    }
+  ]
+}
+```
+
+**VAPI Action:** Confirm cancellation to user. If no booking found, inform user they have no active bookings.
+
+---
+
+### Complete VAPI Integration Flow
+
+**1. User asks about a property:**
+```
+VAPI → Uses existing searchApartments tool → POST /search_apartments/
+Backend → Returns properties with ALL original data PLUS:
+  - listing_status ("available" | "rented" | "offline")
+  - is_available_for_tours (boolean)
+  - assigned_to (user info)
+  - availability (hasAvailability, nextAvailableSlot, totalSlots)
+
+VAPI checks: 
+  if (property.listing_status === "available" && property.availability?.hasAvailability === true) {
+    // Property is available and has tour slots - offer booking
+  } else if (property.listing_status === "available" && property.availability?.hasAvailability === false) {
+    // Property is available but no slots - inform user
+  } else if (property.listing_status === "rented") {
+    // Property is rented - inform user it's no longer available
+  }
+```
+
+**2. User wants to book a tour:**
+```
+User says: "I'd like to tour this property tomorrow at 2 PM"
+VAPI → POST /vapi/properties/validate-tour-request
+  {
+    "property_id": 123,  // Optional: if you have it from searchApartments
+    "property_name": "123 Main St, Apt 3B",  // OR use property name/address
+    "requested_start_at": "2025-12-01T14:00:00Z",
+    "requested_end_at": "2025-12-01T14:30:00Z"
+  }
+  (You can send EITHER property_id OR property_name - both work!)
+  
+Backend → Returns:
+  - If available: {isAvailable: true, canBook: true}
+  - If not available: {isAvailable: false, suggestedSlots: [2-3 alternatives]}
+
+VAPI → 
+  - If available: "Great! That time works. I'll submit your booking request."
+  - If not available: "That time isn't available, but I have these options: [list slots]. Which works for you?"
+```
+
+**3. User confirms a time slot:**
+```
+VAPI collects: visitor name, phone, email (optional)
+VAPI → POST /api/bookings/request with booking details
+  {
+    "property_id": 123,  // From searchApartments result
+    "visitor_name": "John Doe",
+    "visitor_phone": "+14125551234",
+    "visitor_email": "john@example.com",
+    "requested_start_at": "2025-12-01T16:00:00Z",
+    "requested_end_at": "2025-12-01T16:30:00Z",
+    "timezone": "America/New_York",
+    "created_by": "vapi"
+  }
+Backend → Returns { bookingId, status: "pending" }
+VAPI tells user: "Your booking request has been submitted. You'll receive a confirmation once it's approved."
+```
+
+**4. User calls back to check status:**
+```
+VAPI → GET /vapi/bookings/by-visitor-phone?visitor_phone={phone}
+Backend → Returns all bookings for that phone number
+VAPI → Tells user current status and details:
+  - If status === "pending": "Your booking request is still pending approval."
+  - If status === "approved": "Your booking is confirmed for [date/time]."
+  - If status === "denied": "Unfortunately, your booking request was not approved."
+  - If status === "rescheduled": "Your booking has been rescheduled. Please select from: [proposed slots]"
+```
+
+**5. User wants to cancel:**
+```
+VAPI → POST /vapi/bookings/cancel-by-visitor-phone
+  {
+    "visitor_phone": "+14125551234",
+    "booking_id": 1,  // Optional: if not provided, cancels most recent
+    "reason": "Changed my mind"
+  }
+Backend → Returns confirmation of cancellation
+VAPI → Tells user: "Your booking has been cancelled."
+```
+
+### VAPI Integration Summary
+
+**Quick Reference - What VAPI Should Call:**
+
+| Action | Endpoint | Method | Auth Required |
+|--------|----------|--------|---------------|
+| **Search Properties** | `POST /search_apartments/` | POST | No (uses existing `searchApartments` tool) |
+| **Check Availability** | `GET /vapi/properties/{property_id}/availability` | GET | No |
+| **Create Booking** | `POST /api/bookings/request` | POST | No |
+| **Check Booking Status** | `GET /vapi/bookings/by-visitor-phone` | GET | No |
+| **Cancel Booking** | `POST /vapi/bookings/cancel-by-visitor-phone` | POST | No |
+
+### Important VAPI Rules
+
+✅ **Use existing `searchApartments` tool** - it now includes booking availability automatically  
+✅ **Check `listing_status === "available"`** before offering booking  
+✅ **Check `availability.hasAvailability === true`** to know if tour slots exist  
+✅ **Always** create bookings with `status: "pending"` - never auto-approve  
+✅ **Always** inform users that bookings are "pending approval"  
+✅ **Never** tell users a booking is "confirmed" unless `status === "approved"`  
+✅ Use visitor phone number to lookup bookings (not booking_id)  
+✅ Backend automatically identifies PM/Realtor from call's destination number - no need to send it  
+✅ Use `property_id` from `searchApartments` result when calling booking endpoints
+
+### VAPI Tool Configuration
+
+**1. searchApartments (Already Configured - No Changes Needed)**
+- **Tool Name:** `searchApartments`
+- **Endpoint:** `POST /search_apartments/`
+- **Description:** Search for properties. Now automatically includes booking availability info.
+- **Returns:** Property listings with `listing_status`, `is_available_for_tours`, `assigned_to`, and `availability` fields
+
+**2. validateTourRequest (NEW - Add to VAPI) - RECOMMENDED**
+- **Tool Name:** `validateTourRequest`
+- **Endpoint:** `POST /vapi/properties/validate-tour-request`
+- **Description:** Validate a specific tour time request and get alternatives if not available
+- **Parameters:**
+  - `property_id` (body, optional): Property ID from searchApartments result
+  - `property_name` (body, optional): Property name/address (e.g., "123 Main St, Apt 3B")
+  - `requested_start_at` (body, required): Requested start time in ISO format
+  - `requested_end_at` (body, required): Requested end time in ISO format
+- **Note:** Send EITHER `property_id` OR `property_name`. If both are provided, `property_id` takes precedence.
+- **Returns:** 
+  - If available: `{isAvailable: true, canBook: true, propertyId, propertyName}`
+  - If not: `{isAvailable: false, suggestedSlots: [2-3 alternatives], propertyId, propertyName}`
+
+**2a. checkPropertyAvailability (Alternative - Add to VAPI)**
+- **Tool Name:** `checkPropertyAvailability`
+- **Endpoint:** `GET /vapi/properties/{property_id}/availability?from={ISO_DATE}&to={ISO_DATE}`
+- **Description:** Get all available time slots for a property's assigned user
+- **Parameters:**
+  - `property_id` (path): Property ID from searchApartments result
+  - `from` (query): Start date in ISO format
+  - `to` (query): End date in ISO format
+
+**3. createBookingRequest (NEW - Add to VAPI)**
+- **Tool Name:** `createBookingRequest`
+- **Endpoint:** `POST /api/bookings/request`
+- **Description:** Create a pending booking request for a property tour
+- **Parameters:**
+  - `property_id`: Property ID from searchApartments
+  - `visitor_name`: Visitor's name
+  - `visitor_phone`: Visitor's phone number
+  - `visitor_email`: Visitor's email (optional)
+  - `requested_start_at`: Start time in ISO format
+  - `requested_end_at`: End time in ISO format
+  - `timezone`: Timezone (e.g., "America/New_York")
+  - `notes`: Additional notes (optional)
+
+**4. getBookingStatus (NEW - Add to VAPI)**
+- **Tool Name:** `getBookingStatus`
+- **Endpoint:** `GET /vapi/bookings/by-visitor-phone?visitor_phone={phone}`
+- **Description:** Get booking status and details for a visitor
+- **Parameters:**
+  - `visitor_phone`: Visitor's phone number
+
+**5. cancelBooking (NEW - Add to VAPI)**
+- **Tool Name:** `cancelBooking`
+- **Endpoint:** `POST /vapi/bookings/cancel-by-visitor-phone`
+- **Description:** Cancel a booking by visitor phone number
+- **Parameters:**
+  - `visitor_phone`: Visitor's phone number
+  - `booking_id`: Booking ID (optional - cancels most recent if not provided)
+  - `reason`: Cancellation reason (optional)
+
+### Dashboard Endpoints (PM/Realtor)
+
+These endpoints require authentication and are for the dashboard UI:
+
+- `GET /api/users/{user_id}/bookings` - Get user's bookings
+- `POST /api/bookings/{booking_id}/approve` - Approve booking
+- `POST /api/bookings/{booking_id}/deny` - Deny booking
+- `POST /api/bookings/{booking_id}/reschedule` - Reschedule booking
+- `POST /api/bookings/{booking_id}/cancel` - Cancel booking (by approver)
+- `POST /api/properties/{property_id}/assign` - Assign property to realtor
+
+See the full documentation above for details on these endpoints.
+
+---
+
+## 📅 Dashboard Calendar & Booking Management UI Guide
+
+### Overview
+
+This section provides comprehensive guidance for building the dashboard calendar interface for Property Managers and Realtors to manage property tour bookings, availability, and scheduling.
+
+### Core Features to Implement
+
+#### 1. Calendar View
+
+**Multiple View Options:**
+- **Day View:** Show all bookings and availability for a single day
+- **Week View:** Show 7-day calendar with time slots
+- **Month View:** Show monthly overview with booking indicators
+- **List View:** Show upcoming bookings in a list format
+
+**Calendar Display Requirements:**
+- Color-code bookings by status:
+  - 🟡 **Pending** - Yellow/Orange (needs action)
+  - 🟢 **Approved** - Green (confirmed)
+  - 🔴 **Denied** - Red (cancelled)
+  - 🔵 **Rescheduled** - Blue (awaiting confirmation)
+  - ⚫ **Cancelled** - Gray (inactive)
+- Show property address on each booking
+- Show visitor name and phone number
+- Display time slots clearly
+- Highlight current day/time
+- Show timezone information
+
+**Implementation Example:**
+```javascript
+// Calendar component structure
+function BookingCalendar({ userId, userType, view = 'week' }) {
+  const [bookings, setBookings] = useState([]);
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  
+  useEffect(() => {
+    // Fetch bookings for the selected date range
+    fetchBookings(userId, userType, selectedDate, view);
+  }, [userId, userType, selectedDate, view]);
+  
+  return (
+    <div className="calendar-container">
+      {/* View selector */}
+      <ViewSelector view={view} onChange={setView} />
+      
+      {/* Calendar grid */}
+      <CalendarGrid 
+        bookings={bookings}
+        selectedDate={selectedDate}
+        onDateSelect={setSelectedDate}
+        onBookingClick={handleBookingClick}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+#### 2. Booking Management Panel
+
+**Pending Bookings Queue:**
+- Show all pending bookings in a prominent section
+- Display:
+  - Property address
+  - Visitor name, phone, email
+  - Requested date/time
+  - Time since request (e.g., "2 hours ago")
+  - Quick action buttons: Approve, Deny, Reschedule
+- Sort by: Request time (newest first) or Requested date (soonest first)
+- Filter by: Property, Date range, Visitor name
+
+**Approved Bookings:**
+- Show upcoming approved bookings
+- Display confirmation details
+- Allow cancellation
+- Show property details and visitor contact info
+
+**Implementation:**
+```javascript
+function PendingBookingsPanel({ userId, userType }) {
+  const [pendingBookings, setPendingBookings] = useState([]);
+  
+  useEffect(() => {
+    fetchUserBookings(userId, userType, 'pending').then(setPendingBookings);
+  }, [userId, userType]);
+  
+  return (
+    <div className="pending-bookings-panel">
+      <h2>Pending Bookings ({pendingBookings.length})</h2>
+      {pendingBookings.map(booking => (
+        <BookingCard 
+          key={booking.bookingId}
+          booking={booking}
+          onApprove={() => handleApprove(booking.bookingId)}
+          onDeny={() => handleDeny(booking.bookingId)}
+          onReschedule={() => handleReschedule(booking.bookingId)}
+        />
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+#### 3. Availability Management
+
+**Working Hours Configuration:**
+- Allow users to set default working hours (e.g., 9 AM - 5 PM)
+- Set timezone preference
+- Set default slot length (15, 30, 45, 60 minutes)
+- Apply to all days or customize per day of week
+
+**Manual Availability Blocking:**
+- **Mark Unavailable:** Block specific time slots (personal time, meetings)
+- **Mark Busy:** Mark as busy but allow override for urgent bookings
+- **Bulk Block:** Block entire days or date ranges
+- **Recurring Blocks:** Set recurring unavailable times (e.g., every Monday 12-1 PM)
+
+**Visual Availability Indicator:**
+- Show available slots in green
+- Show blocked/unavailable slots in red
+- Show booked slots in blue
+- Show pending bookings in yellow
+
+**Implementation:**
+```javascript
+function AvailabilityManager({ userId, userType }) {
+  const [workingHours, setWorkingHours] = useState({
+    start: '09:00',
+    end: '17:00',
+    timezone: 'America/New_York',
+    defaultSlotLength: 30
+  });
+  
+  const [unavailableSlots, setUnavailableSlots] = useState([]);
+  
+  // Update calendar preferences
+  async function updateWorkingHours(newHours) {
+    await fetch(`/api/users/${userId}/calendar-preferences`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ calendar_preferences: newHours })
+    });
+  }
+  
+  // Create unavailable slot
+  async function blockTimeSlot(startAt, endAt, reason) {
+    await fetch(`/api/users/${userId}/availability`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({
+        user_type: userType,
+        start_at: startAt,
+        end_at: endAt,
+        slot_type: 'unavailable',
+        reason: reason
+      })
+    });
+  }
+  
+  return (
+    <div className="availability-manager">
+      <WorkingHoursConfig 
+        hours={workingHours}
+        onChange={updateWorkingHours}
+      />
+      <TimeSlotBlocker onBlock={blockTimeSlot} />
+      <UnavailableSlotsList slots={unavailableSlots} />
+    </div>
+  );
+}
+```
+
+---
+
+#### 4. Booking Detail Modal/Card
+
+**When user clicks on a booking, show:**
+- **Visitor Information:**
+  - Name, phone, email
+  - Contact buttons (call, email, SMS)
+- **Property Information:**
+  - Address
+  - Property details (bedrooms, bathrooms, price)
+  - Link to property details page
+- **Booking Details:**
+  - Requested date/time
+  - Status and status history
+  - Timezone
+  - Notes from visitor
+  - Audit log (who did what and when)
+- **Actions (based on status):**
+  - **Pending:** Approve, Deny, Reschedule buttons
+  - **Approved:** Cancel, View Property, Contact Visitor
+  - **Rescheduled:** Show proposed slots, Approve Reschedule
+  - **Denied/Cancelled:** View details only
+
+**Implementation:**
+```javascript
+function BookingDetailModal({ booking, onClose, onAction }) {
+  return (
+    <Modal onClose={onClose}>
+      <div className="booking-detail">
+        <h2>Booking #{booking.bookingId}</h2>
+        
+        {/* Visitor Info */}
+        <section>
+          <h3>Visitor</h3>
+          <p>{booking.visitor.name}</p>
+          <p>{booking.visitor.phone}</p>
+          <p>{booking.visitor.email}</p>
+          <button onClick={() => callVisitor(booking.visitor.phone)}>Call</button>
+          <button onClick={() => emailVisitor(booking.visitor.email)}>Email</button>
+        </section>
+        
+        {/* Property Info */}
+        <section>
+          <h3>Property</h3>
+          <p>{booking.propertyAddress}</p>
+          <Link to={`/properties/${booking.propertyId}`}>View Property</Link>
+        </section>
+        
+        {/* Booking Info */}
+        <section>
+          <h3>Booking Details</h3>
+          <p>Date: {formatDate(booking.startAt)}</p>
+          <p>Time: {formatTime(booking.startAt)} - {formatTime(booking.endAt)}</p>
+          <p>Status: <StatusBadge status={booking.status} /></p>
+          {booking.notes && <p>Notes: {booking.notes}</p>}
+        </section>
+        
+        {/* Actions */}
+        <section className="booking-actions">
+          {booking.status === 'pending' && (
+            <>
+              <button onClick={() => onAction('approve', booking.bookingId)}>
+                Approve
+              </button>
+              <button onClick={() => onAction('deny', booking.bookingId)}>
+                Deny
+              </button>
+              <button onClick={() => onAction('reschedule', booking.bookingId)}>
+                Reschedule
+              </button>
+            </>
+          )}
+          {booking.status === 'approved' && (
+            <button onClick={() => onAction('cancel', booking.bookingId)}>
+              Cancel Booking
+            </button>
+          )}
+        </section>
+        
+        {/* Audit Log */}
+        {booking.auditLog && (
+          <section>
+            <h3>History</h3>
+            <AuditLogTimeline log={booking.auditLog} />
+          </section>
+        )}
+      </div>
+    </Modal>
+  );
+}
+```
+
+---
+
+#### 5. Quick Actions & Bulk Operations
+
+**Quick Approve/Deny:**
+- Show approve/deny buttons directly on calendar items
+- Confirmation dialogs for destructive actions
+- Toast notifications for success/error
+
+**Bulk Actions:**
+- Select multiple pending bookings
+- Bulk approve/deny (with confirmation)
+- Export bookings to CSV/PDF
+
+**Keyboard Shortcuts:**
+- `A` - Approve selected booking
+- `D` - Deny selected booking
+- `R` - Reschedule selected booking
+- `C` - Cancel selected booking
+- `←/→` - Navigate days
+- `↑/↓` - Navigate weeks
+
+---
+
+#### 6. Notifications & Alerts
+
+**Real-time Notifications:**
+- Show toast/popup when new booking request arrives
+- Badge count on "Pending Bookings" tab
+- Sound notification (optional, user preference)
+- Browser push notifications (if supported)
+
+**Notification Types:**
+- 🆕 **New Booking Request:** "New tour request from John Doe for 123 Main St"
+- ✅ **Booking Approved:** "Your booking for 123 Main St has been approved"
+- ❌ **Booking Denied:** "Your booking request was not approved"
+- 🔄 **Booking Rescheduled:** "Your booking has been rescheduled - please confirm new time"
+- 🚫 **Booking Cancelled:** "Booking cancelled by visitor"
+
+**Implementation:**
+```javascript
+// Real-time notifications using WebSocket or polling
+function useBookingNotifications(userId, userType) {
+  const [notifications, setNotifications] = useState([]);
+  
+  useEffect(() => {
+    // Poll for new bookings every 30 seconds
+    const interval = setInterval(async () => {
+      const response = await fetch(`/api/users/${userId}/bookings?status=pending`);
+      const data = await response.json();
+      
+      // Check for new bookings
+      const newBookings = data.bookings.filter(b => 
+        !notifications.some(n => n.bookingId === b.bookingId)
+      );
+      
+      if (newBookings.length > 0) {
+        newBookings.forEach(booking => {
+          showNotification({
+            type: 'new_booking',
+            message: `New booking request from ${booking.visitor.name}`,
+            booking: booking
+          });
+        });
+      }
+    }, 30000);
+    
+    return () => clearInterval(interval);
+  }, [userId, userType]);
+  
+  return notifications;
+}
+```
+
+---
+
+#### 7. Property Assignment Interface (PM Only)
+
+**Property Assignment Panel:**
+- List all properties
+- Show current assignment (PM or Realtor)
+- Quick assign/unassign buttons
+- Bulk assign multiple properties to a realtor
+- Filter by: Assigned/Unassigned, Realtor, Property status
+
+**Assignment Workflow:**
+1. PM selects property(ies)
+2. PM selects realtor from dropdown
+3. PM adds reason (optional)
+4. System updates assignment and sends notification to realtor
+
+**Implementation:**
+```javascript
+function PropertyAssignmentPanel({ pmId }) {
+  const [properties, setProperties] = useState([]);
+  const [realtors, setRealtors] = useState([]);
+  const [selectedProperties, setSelectedProperties] = useState([]);
+  
+  async function assignProperties(realtorId, propertyIds, reason) {
+    for (const propertyId of propertyIds) {
+      await fetch(`/api/properties/${propertyId}/assign`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          to_user_id: realtorId,
+          to_user_type: 'realtor',
+          reason: reason
+        })
+      });
+    }
+    
+    // Refresh properties list
+    fetchProperties();
+  }
+  
+  return (
+    <div className="property-assignment-panel">
+      <h2>Property Assignment</h2>
+      
+      {/* Realtor selector */}
+      <RealtorSelector 
+        realtors={realtors}
+        onSelect={setSelectedRealtor}
+      />
+      
+      {/* Properties list with checkboxes */}
+      <PropertiesList 
+        properties={properties}
+        selected={selectedProperties}
+        onSelect={setSelectedProperties}
+      />
+      
+      {/* Assign button */}
+      <button 
+        onClick={() => assignProperties(selectedRealtor, selectedProperties)}
+        disabled={!selectedRealtor || selectedProperties.length === 0}
+      >
+        Assign {selectedProperties.length} Properties
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+#### 8. Reschedule Workflow
+
+**Reschedule Interface:**
+- Show current booking details
+- Show calendar with available slots
+- Allow approver to select multiple alternative slots
+- Add reason/note for reschedule
+- Preview proposed slots before submitting
+- Send notification to visitor with proposed slots
+
+**Implementation:**
+```javascript
+function RescheduleModal({ booking, onClose, onReschedule }) {
+  const [proposedSlots, setProposedSlots] = useState([]);
+  const [availableSlots, setAvailableSlots] = useState([]);
+  const [reason, setReason] = useState('');
+  
+  useEffect(() => {
+    // Fetch available slots for next 7 days
+    fetch(`/vapi/properties/${booking.propertyId}/availability?from=${getNextWeekStart()}&to=${getNextWeekEnd()}`)
+      .then(res => res.json())
+      .then(data => setAvailableSlots(data.availableSlots));
+  }, [booking.propertyId]);
+  
+  function handleReschedule() {
+    onReschedule(booking.bookingId, {
+      proposed_slots: proposedSlots,
+      reason: reason
+    });
+  }
+  
+  return (
+    <Modal onClose={onClose}>
+      <h2>Reschedule Booking</h2>
+      <p>Current booking: {formatDateTime(booking.startAt)}</p>
+      
+      <h3>Select Alternative Time Slots</h3>
+      <AvailableSlotsCalendar 
+        slots={availableSlots}
+        selected={proposedSlots}
+        onSelect={setProposedSlots}
+        multiple={true}
+      />
+      
+      <textarea 
+        placeholder="Reason for reschedule (optional)"
+        value={reason}
+        onChange={e => setReason(e.target.value)}
+      />
+      
+      <button 
+        onClick={handleReschedule}
+        disabled={proposedSlots.length === 0}
+      >
+        Propose Reschedule
+      </button>
+    </Modal>
+  );
+}
+```
+
+---
+
+#### 9. Statistics & Analytics Dashboard
+
+**Key Metrics to Display:**
+- **Total Bookings:** All-time and this month
+- **Pending Bookings:** Count requiring action
+- **Approval Rate:** Percentage of approved vs denied
+- **Average Response Time:** Time to approve/deny bookings
+- **Upcoming Bookings:** Next 7 days
+- **Cancellation Rate:** Percentage of cancelled bookings
+
+**Charts & Visualizations:**
+- Bookings by status (pie chart)
+- Bookings over time (line chart)
+- Most requested properties (bar chart)
+- Peak booking times (heatmap)
+
+**Implementation:**
+```javascript
+function BookingStatistics({ userId, userType }) {
+  const [stats, setStats] = useState({});
+  
+  useEffect(() => {
+    // Calculate statistics from bookings
+    fetchUserBookings(userId, userType).then(bookings => {
+      const stats = {
+        total: bookings.length,
+        pending: bookings.filter(b => b.status === 'pending').length,
+        approved: bookings.filter(b => b.status === 'approved').length,
+        denied: bookings.filter(b => b.status === 'denied').length,
+        cancelled: bookings.filter(b => b.status === 'cancelled').length,
+        approvalRate: calculateApprovalRate(bookings),
+        avgResponseTime: calculateAvgResponseTime(bookings)
+      };
+      setStats(stats);
+    });
+  }, [userId, userType]);
+  
+  return (
+    <div className="statistics-dashboard">
+      <StatCard label="Total Bookings" value={stats.total} />
+      <StatCard label="Pending" value={stats.pending} color="warning" />
+      <StatCard label="Approved" value={stats.approved} color="success" />
+      <StatCard label="Approval Rate" value={`${stats.approvalRate}%`} />
+      
+      <BookingChart data={bookings} />
+    </div>
+  );
+}
+```
+
+---
+
+#### 10. Search & Filtering
+
+**Search Functionality:**
+- Search by visitor name, phone, email
+- Search by property address
+- Search by booking ID
+- Full-text search across all booking fields
+
+**Filtering Options:**
+- **By Status:** Pending, Approved, Denied, Cancelled, Rescheduled
+- **By Date Range:** Today, This Week, This Month, Custom Range
+- **By Property:** Filter by specific property
+- **By Realtor:** (PM only) Filter by assigned realtor
+- **By Time:** Morning, Afternoon, Evening
+
+**Sorting Options:**
+- Date (newest/oldest first)
+- Request time (newest/oldest first)
+- Visitor name (A-Z, Z-A)
+- Property address (A-Z, Z-A)
+
+**Implementation:**
+```javascript
+function BookingFilters({ onFilterChange }) {
+  const [filters, setFilters] = useState({
+    status: null,
+    dateRange: null,
+    propertyId: null,
+    search: ''
+  });
+  
+  function handleFilterChange(key, value) {
+    const newFilters = { ...filters, [key]: value };
+    setFilters(newFilters);
+    onFilterChange(newFilters);
+  }
+  
+  return (
+    <div className="booking-filters">
+      <input 
+        type="text"
+        placeholder="Search bookings..."
+        value={filters.search}
+        onChange={e => handleFilterChange('search', e.target.value)}
+      />
+      
+      <select 
+        value={filters.status || ''}
+        onChange={e => handleFilterChange('status', e.target.value || null)}
+      >
+        <option value="">All Statuses</option>
+        <option value="pending">Pending</option>
+        <option value="approved">Approved</option>
+        <option value="denied">Denied</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+      
+      <DateRangePicker 
+        value={filters.dateRange}
+        onChange={range => handleFilterChange('dateRange', range)}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+#### 11. Mobile Responsive Design
+
+**Mobile-Specific Features:**
+- Swipe gestures: Swipe left to approve, swipe right to deny
+- Touch-friendly buttons (minimum 44x44px)
+- Simplified calendar view for small screens
+- Bottom sheet modals instead of center modals
+- Quick action buttons at bottom of screen
+
+**Responsive Breakpoints:**
+- **Mobile:** < 768px - List view, simplified calendar
+- **Tablet:** 768px - 1024px - Week view, side panel
+- **Desktop:** > 1024px - Full calendar, multiple panels
+
+---
+
+#### 12. Export & Reporting
+
+**Export Options:**
+- **CSV Export:** All bookings with filters applied
+- **PDF Report:** Formatted booking report
+- **Calendar Export:** iCal format for external calendars
+- **Email Summary:** Daily/weekly booking summary
+
+**Report Types:**
+- Daily booking summary
+- Weekly booking report
+- Monthly statistics report
+- Property performance report
+
+---
+
+### UI/UX Best Practices
+
+#### Color Coding
+- Use consistent colors for status throughout the app
+- Ensure sufficient contrast for accessibility
+- Consider colorblind-friendly palettes
+
+#### Loading States
+- Show skeleton loaders while fetching bookings
+- Display "No bookings" state when empty
+- Show error states with retry options
+
+#### Confirmation Dialogs
+- Always confirm destructive actions (deny, cancel)
+- Show impact of action (e.g., "This will notify the visitor")
+- Allow cancellation of confirmation
+
+#### Error Handling
+- Show user-friendly error messages
+- Provide actionable error messages
+- Log errors for debugging
+
+#### Performance Optimization
+- Paginate booking lists (50 per page)
+- Lazy load calendar events
+- Cache frequently accessed data
+- Debounce search inputs
+
+---
+
+### Recommended Dashboard Layout
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Header: Logo, User Menu, Notifications                 │
+├──────────────┬──────────────────────────────────────────┤
+│              │  Calendar View (Week/Month/Day)          │
+│  Sidebar:    │  ┌────────────────────────────────────┐ │
+│  - Stats     │  │  Mon  Tue  Wed  Thu  Fri  Sat  Sun│ │
+│  - Filters   │  │  ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐│ │
+│  - Properties│  │  │  │ │  │ │  │ │  │ │  │ │  │ │  ││ │
+│              │  │  └──┘ └──┘ └──┘ └──┘ └──┘ └──┘ └──┘│ │
+│              │  └────────────────────────────────────┘ │
+│              │                                          │
+│              │  Pending Bookings Panel                  │
+│              │  ┌────────────────────────────────────┐ │
+│              │  │ 🟡 John Doe - 123 Main St         │ │
+│              │  │    Dec 1, 4:00 PM                 │ │
+│              │  │    [Approve] [Deny] [Reschedule]  │ │
+│              │  └────────────────────────────────────┘ │
+└──────────────┴──────────────────────────────────────────┘
+```
+
+---
+
+### Implementation Checklist
+
+- [ ] Calendar view (day/week/month)
+- [ ] Pending bookings queue
+- [ ] Booking detail modal
+- [ ] Approve/Deny/Reschedule actions
+- [ ] Availability management
+- [ ] Working hours configuration
+- [ ] Property assignment (PM only)
+- [ ] Search and filtering
+- [ ] Notifications system
+- [ ] Statistics dashboard
+- [ ] Export functionality
+- [ ] Mobile responsive design
+- [ ] Keyboard shortcuts
+- [ ] Real-time updates (polling or WebSocket)
+
+---
+
+### Example Complete Dashboard Component
+
+```javascript
+function BookingDashboard({ userId, userType }) {
+  const [view, setView] = useState('week');
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [bookings, setBookings] = useState([]);
+  const [filters, setFilters] = useState({});
+  
+  // Fetch bookings
+  useEffect(() => {
+    fetchUserBookings(userId, userType, filters.status, filters.dateRange)
+      .then(setBookings);
+  }, [userId, userType, filters]);
+  
+  // Handle booking actions
+  async function handleApprove(bookingId) {
+    const response = await fetch(`/api/bookings/${bookingId}/approve`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ approver_id: userId })
+    });
+    
+    if (response.ok) {
+      showNotification('Booking approved successfully');
+      refreshBookings();
+    }
+  }
+  
+  return (
+    <div className="booking-dashboard">
+      {/* Header */}
+      <DashboardHeader 
+        view={view}
+        onViewChange={setView}
+        selectedDate={selectedDate}
+        onDateChange={setSelectedDate}
+      />
+      
+      <div className="dashboard-content">
+        {/* Sidebar */}
+        <Sidebar>
+          <BookingStatistics bookings={bookings} />
+          <BookingFilters onFilterChange={setFilters} />
+          {userType === 'property_manager' && (
+            <PropertyAssignmentPanel pmId={userId} />
+          )}
+        </Sidebar>
+        
+        {/* Main Content */}
+        <MainContent>
+          {/* Pending Bookings Queue */}
+          <PendingBookingsPanel 
+            bookings={bookings.filter(b => b.status === 'pending')}
+            onApprove={handleApprove}
+            onDeny={handleDeny}
+            onReschedule={handleReschedule}
+          />
+          
+          {/* Calendar View */}
+          <BookingCalendar 
+            view={view}
+            bookings={bookings}
+            selectedDate={selectedDate}
+            onBookingClick={handleBookingClick}
+          />
+        </MainContent>
+      </div>
+      
+      {/* Booking Detail Modal */}
+      {selectedBooking && (
+        <BookingDetailModal 
+          booking={selectedBooking}
+          onClose={() => setSelectedBooking(null)}
+          onAction={handleBookingAction}
+        />
+      )}
+    </div>
+  );
+}
+```
+
+This provides a complete guide for building a comprehensive booking management dashboard!
+
+---
+
 ## 📝 Key Points
 
 - ✅ **Authentication:** All endpoints (except `/book-demo` and `/vapi/webhook`) require JWT token
@@ -2331,4 +3652,22 @@ ADD COLUMN IF NOT EXISTS carrier TEXT;
 - If carrier is not set, backend defaults to AT&T (GSM) codes, but frontend should prompt for carrier selection
 
 **See `migration_add_carrier_column.sql` for the complete migration script.**
+
+### Migration 3: Property Tour Booking System
+
+To enable the property tour booking system, run `migration_property_tour_booking.sql`:
+
+```sql
+-- See migration_property_tour_booking.sql for complete migration
+-- This adds:
+-- - PropertyTourBooking table
+-- - AvailabilitySlot table
+-- - PropertyAssignment table
+-- - timezone and calendar_preferences columns to PropertyManager and Realtor
+```
+
+**Note:**
+- The migration creates all necessary tables and indexes
+- Calendar preferences default to 9 AM - 5 PM working hours, 30-minute slots
+- Users can customize their timezone and working hours after migration
 

@@ -118,6 +118,13 @@ class PropertyManager(SQLModel, table=True):
     forwarding_failure_reason: Optional[str] = None
     last_forwarding_update: Optional[datetime] = None
     
+    # Calendar preferences for tour booking
+    timezone: Optional[str] = Field(default="America/New_York")  # User's timezone
+    calendar_preferences: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)
+    )  # { defaultSlotLengthMins: 30, workingHours: { start: '09:00', end: '17:00' } }
+    
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -176,6 +183,13 @@ class Realtor(SQLModel, table=True):
     forwarding_failure_reason: Optional[str] = None
     last_forwarding_update: Optional[datetime] = None
     
+    # Calendar preferences for tour booking
+    timezone: Optional[str] = Field(default="America/New_York")  # User's timezone
+    calendar_preferences: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)
+    )  # { defaultSlotLengthMins: 30, workingHours: { start: '09:00', end: '17:00' } }
+    
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -213,6 +227,7 @@ class ChatSession(SQLModel, table=True):
 
 
 class Booking(SQLModel, table=True):
+    """Legacy booking model - kept for backward compatibility."""
     id: Optional[int] = Field(default=None, primary_key=True)
     address: str
     date: date
@@ -228,6 +243,135 @@ class Booking(SQLModel, table=True):
         sa_relationship_kwargs={"foreign_keys": "[Booking.cust_id]"},
     )
     realtor: Optional[Realtor] = Relationship(back_populates="bookings")
+
+
+class PropertyTourBooking(SQLModel, table=True):
+    """
+    Property tour booking for in-app scheduling system.
+    
+    Tracks tour requests from tenants/visitors, approval workflow, and scheduling.
+    """
+    booking_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Property relationship
+    property_id: int = Field(
+        foreign_key="apartmentlisting.id",
+        index=True
+    )
+    
+    # Assigned approver (realtor if assigned, else PM)
+    assigned_to_user_id: int = Field(index=True)  # Can be PM or Realtor ID
+    assigned_to_user_type: str = Field(index=True)  # 'property_manager' | 'realtor'
+    
+    # Visitor information
+    visitor_name: str
+    visitor_phone: str = Field(index=True)
+    visitor_email: Optional[str] = None
+    
+    # Booking timing
+    requested_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    start_at: datetime = Field(index=True)  # UTC
+    end_at: datetime = Field(index=True)  # UTC
+    timezone: str = Field(default="America/New_York")  # Visitor's timezone
+    
+    # Status and workflow
+    status: str = Field(
+        default="pending",
+        index=True
+    )  # 'pending' | 'approved' | 'denied' | 'cancelled' | 'rescheduled'
+    
+    # Source of booking
+    created_by: str = Field(default="vapi")  # 'vapi' | 'ui' | 'phone'
+    
+    # Notes and metadata
+    notes: Optional[str] = None
+    audit_log: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)
+    )  # Array of {actorId, action, timestamp, reason?}
+    
+    # Reschedule information
+    proposed_slots: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        sa_column=Column(JSONB)
+    )  # Array of {startAt, endAt} for reschedule proposals
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    property: Optional["ApartmentListing"] = Relationship()
+
+
+class AvailabilitySlot(SQLModel, table=True):
+    """
+    User-specific availability slots for calendar management.
+    
+    Stores when a user has explicitly marked availability or unavailability.
+    Used to compute free slots by subtracting from working hours.
+    """
+    slot_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # User relationship (can be PM or Realtor)
+    user_id: int = Field(index=True)
+    user_type: str = Field(index=True)  # 'property_manager' | 'realtor'
+    
+    # Time slot
+    start_at: datetime = Field(index=True)  # UTC
+    end_at: datetime = Field(index=True)  # UTC
+    
+    # Slot type
+    slot_type: str = Field(index=True)  # 'available' | 'unavailable' | 'busy' | 'personal' | 'booking'
+    
+    # Source of slot
+    source: str = Field(default="manual")  # 'manual' | 'booking' | 'system'
+    
+    # Reference to booking if this slot was created from a booking
+    booking_id: Optional[int] = Field(
+        default=None,
+        foreign_key="propertytourbooking.booking_id"
+    )
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    booking: Optional["PropertyTourBooking"] = Relationship()
+
+
+class PropertyAssignment(SQLModel, table=True):
+    """
+    Audit trail for property assignment changes.
+    
+    Tracks when properties are assigned/unassigned between PMs and Realtors.
+    """
+    assignment_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Property relationship
+    property_id: int = Field(
+        foreign_key="apartmentlisting.id",
+        index=True
+    )
+    
+    # Assignment details
+    from_user_id: Optional[int] = None  # Previous assignee (PM or Realtor)
+    from_user_type: Optional[str] = None  # 'property_manager' | 'realtor'
+    to_user_id: Optional[int] = None  # New assignee (PM or Realtor)
+    to_user_type: Optional[str] = None  # 'property_manager' | 'realtor'
+    
+    # Reason for assignment change
+    reason: Optional[str] = None
+    
+    # Actor who made the change
+    changed_by_user_id: int
+    changed_by_user_type: str  # 'property_manager' | 'realtor' | 'admin'
+    
+    # Timestamp
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    
+    # Relationships
+    property: Optional["ApartmentListing"] = Relationship()
 
 
 class RuleChunk(SQLModel, table=True):
@@ -251,6 +395,8 @@ class ApartmentListing(SQLModel, table=True):
     source: Optional["Source"] = Relationship(back_populates="listings")
     tenants: List["Tenant"] = Relationship()
     maintenance_requests: List["MaintenanceRequest"] = Relationship()
+    tour_bookings: List["PropertyTourBooking"] = Relationship()
+    assignment_history: List["PropertyAssignment"] = Relationship()
 
 
 class Source(SQLModel, table=True):
