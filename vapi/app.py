@@ -3434,8 +3434,8 @@ async def update_calendar_preferences(
             working_days_unique = sorted(list(set(working_days)))
             prefs["workingDays"] = working_days_unique
         
-        # Update calendar_preferences
-        user.calendar_preferences = prefs
+        # Update calendar_preferences - create a new dict to ensure change detection
+        user.calendar_preferences = dict(prefs)
         
         # Mark JSONB field as modified (required for SQLAlchemy to detect changes)
         flag_modified(user, "calendar_preferences")
@@ -3445,6 +3445,15 @@ async def update_calendar_preferences(
             session.commit()
             session.refresh(user)
             
+            # Expire the object to force a fresh query
+            session.expire(user)
+            
+            # Re-fetch the user to ensure we have the latest data
+            if user_type == "property_manager":
+                user = session.get(PropertyManager, user_id)
+            elif user_type == "realtor":
+                user = session.get(Realtor, user_id)
+            
             # Return updated preferences
             updated_prefs = _get_user_calendar_preferences(session, user_id, user_type)
             return JSONResponse(content={
@@ -3453,10 +3462,13 @@ async def update_calendar_preferences(
             })
         except Exception as e:
             session.rollback()
-            print(f"⚠️  Error updating calendar preferences: {str(e)}")
+            error_msg = str(e) if isinstance(e, (str, Exception)) else repr(e)
+            print(f"⚠️  Error updating calendar preferences: {error_msg}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to update calendar preferences: {str(e)}"
+                detail=f"Failed to update calendar preferences: {error_msg}"
             )
 
 
@@ -8180,10 +8192,10 @@ async def get_user_properties_for_dropdown(
 @app.post("/api/users/{user_id}/availability")
 async def create_availability_slot(
     user_id: int,
-    user_type: str,
-    start_at: str,  # ISO format
-    end_at: str,  # ISO format
-    slot_type: str,  # 'available' | 'unavailable' | 'busy' | 'personal' | 'holiday' | 'off_day'
+    user_type: str = Body(...),
+    start_at: str = Body(...),  # ISO format
+    end_at: str = Body(...),  # ISO format
+    slot_type: str = Body(...),  # 'available' | 'unavailable' | 'busy' | 'personal' | 'holiday' | 'off_day'
     is_full_day: Optional[bool] = Body(False),  # If true, spans entire day(s)
     notes: Optional[str] = Body(None),  # Optional notes/reason
     user_data: dict = Depends(get_current_user_data)
@@ -8277,19 +8289,22 @@ async def create_availability_slot(
             })
         except Exception as e:
             session.rollback()
-            print(f"⚠️  Error creating availability slot: {str(e)}")
+            error_msg = str(e) if isinstance(e, (str, Exception)) else repr(e)
+            print(f"⚠️  Error creating availability slot: {error_msg}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to create availability slot: {str(e)}"
+                detail=f"Failed to create availability slot: {error_msg}"
             )
 
 
 # Create Manual Booking/Tour (from dashboard)
 @app.post("/api/bookings/manual")
 async def create_manual_booking(
-    property_id: int,
-    visitor_name: str,
-    visitor_phone: str,
+    property_id: int = Body(...),
+    visitor_name: str = Body(...),
+    visitor_phone: str = Body(...),
     visitor_email: Optional[str] = Body(None),
     start_at: str = Body(...),  # ISO format
     end_at: str = Body(...),  # ISO format
@@ -8303,8 +8318,20 @@ async def create_manual_booking(
     PM/Realtor can manually create a booking for a property.
     The booking is automatically approved (status='approved') since it's created by the approver.
     """
-    user_type = user_data["user_type"]
-    user_id = user_data["id"]
+    user_type = user_data.get("user_type")
+    user_id = user_data.get("id")
+    
+    # Validate required fields
+    if not property_id:
+        raise HTTPException(status_code=400, detail="property_id is required")
+    if not visitor_name or not visitor_name.strip():
+        raise HTTPException(status_code=400, detail="visitor_name is required and cannot be empty")
+    if not visitor_phone or not visitor_phone.strip():
+        raise HTTPException(status_code=400, detail="visitor_phone is required and cannot be empty")
+    if not start_at or not start_at.strip():
+        raise HTTPException(status_code=400, detail="start_at is required and cannot be empty")
+    if not end_at or not end_at.strip():
+        raise HTTPException(status_code=400, detail="end_at is required and cannot be empty")
     
     try:
         start_dt = _parse_datetime_robust(start_at, "start_at")
@@ -8312,9 +8339,10 @@ async def create_manual_booking(
     except HTTPException:
         raise
     except Exception as e:
+        error_msg = str(e) if isinstance(e, (str, Exception)) else repr(e)
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid date format: {str(e)}. Use ISO format (e.g., 2025-12-01T16:00:00Z)"
+            detail=f"Invalid date format: {error_msg}. Use ISO format (e.g., 2025-12-01T16:00:00Z)"
         )
     
     if end_dt <= start_dt:
@@ -8336,6 +8364,12 @@ async def create_manual_booking(
         normalized_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
     except HTTPException:
         raise
+    except Exception as e:
+        error_msg = str(e) if isinstance(e, (str, Exception)) else repr(e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid phone number format: {error_msg}"
+        )
     
     with Session(engine) as session:
         # Verify property exists and user has access
@@ -8412,22 +8446,34 @@ async def create_manual_booking(
                 "timestamp": datetime.utcnow().isoformat()
             }]
         )
-        session.add(booking)
-        session.commit()
-        session.refresh(booking)
-        
-        # Create blocking availability slot
-        blocking_slot = AvailabilitySlot(
-            user_id=assigned_user["user_id"],
-            user_type=assigned_user["user_type"],
-            start_at=start_dt,
-            end_at=end_dt,
-            slot_type="booking",
-            source="booking",
-            booking_id=booking.booking_id
-        )
-        session.add(blocking_slot)
-        session.commit()
+        try:
+            session.add(booking)
+            session.commit()
+            session.refresh(booking)
+            
+            # Create blocking availability slot
+            blocking_slot = AvailabilitySlot(
+                user_id=assigned_user["user_id"],
+                user_type=assigned_user["user_type"],
+                start_at=start_dt,
+                end_at=end_dt,
+                slot_type="booking",
+                source="booking",
+                booking_id=booking.booking_id
+            )
+            session.add(blocking_slot)
+            session.commit()
+            session.refresh(blocking_slot)
+        except Exception as db_error:
+            session.rollback()
+            error_msg = str(db_error) if isinstance(db_error, (str, Exception)) else repr(db_error)
+            print(f"⚠️  Error creating booking: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to create booking: {error_msg}"
+            )
         
         # Send notification to visitor (if phone/email provided)
         if normalized_phone:
@@ -8436,8 +8482,10 @@ async def create_manual_booking(
                 property_address = property_meta.get("address", f"Property {property_id}")
                 message = f"Your tour for {property_address} has been scheduled for {start_dt.strftime('%B %d, %Y at %I:%M %p')}."
                 _send_sms_notification(normalized_phone, message)
-            except:
-                pass  # Don't fail if SMS fails
+            except Exception as sms_error:
+                error_msg = str(sms_error) if isinstance(sms_error, (str, Exception)) else repr(sms_error)
+                print(f"⚠️  Failed to send SMS notification: {error_msg}")
+                # Don't fail if SMS fails - booking is already created
         
         return JSONResponse(content={
             "bookingId": booking.booking_id,
