@@ -3287,8 +3287,155 @@ async def add_realtor_endpoint(
 
 @app.get("/user-profile")
 async def get_user_profile(user_data: dict = Depends(get_current_user_data)):
-    """Get current user's profile information."""
-    return JSONResponse(content={"user": user_data})
+    """Get current user's profile information including calendar preferences."""
+    user_id = user_data["id"]
+    user_type = user_data["user_type"]
+    
+    with Session(engine) as session:
+        # Get calendar preferences
+        prefs = _get_user_calendar_preferences(session, user_id, user_type)
+        
+        # Return user data with calendar preferences
+        return JSONResponse(content={
+            "user": {
+                **user_data,
+                "timezone": prefs["timezone"],
+                "calendar_preferences": {
+                    "defaultSlotLengthMins": prefs["defaultSlotLengthMins"],
+                    "workingHours": prefs["workingHours"]
+                }
+            }
+        })
+
+
+# Get Calendar Preferences
+@app.get("/api/users/{user_id}/calendar-preferences")
+async def get_calendar_preferences(
+    user_id: int,
+    user_type: str,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Get user's calendar preferences (timezone, working hours, slot length)."""
+    # Verify user can only access their own preferences
+    if user_data.get("user_type") != user_type or user_data.get("id") != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only access your own calendar preferences"
+        )
+    
+    with Session(engine) as session:
+        prefs = _get_user_calendar_preferences(session, user_id, user_type)
+        return JSONResponse(content=prefs)
+
+
+# Update Calendar Preferences
+@app.patch("/api/users/{user_id}/calendar-preferences")
+async def update_calendar_preferences(
+    user_id: int,
+    user_type: str,
+    timezone: Optional[str] = Body(None),
+    default_slot_length_mins: Optional[int] = Body(None),
+    working_hours_start: Optional[str] = Body(None),  # Format: "HH:MM"
+    working_hours_end: Optional[str] = Body(None),  # Format: "HH:MM"
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Update user's calendar preferences (timezone, working hours, slot length)."""
+    # Verify user can only update their own preferences
+    if user_data.get("user_type") != user_type or user_data.get("id") != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only update your own calendar preferences"
+        )
+    
+    with Session(engine) as session:
+        # Get user
+        if user_type == "property_manager":
+            user = session.get(PropertyManager, user_id)
+        elif user_type == "realtor":
+            user = session.get(Realtor, user_id)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid user_type")
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Update timezone if provided
+        if timezone is not None:
+            user.timezone = timezone
+        
+        # Get or initialize calendar_preferences
+        prefs = user.calendar_preferences or {}
+        
+        # Update default slot length if provided
+        if default_slot_length_mins is not None:
+            if default_slot_length_mins < 15 or default_slot_length_mins > 120:
+                raise HTTPException(
+                    status_code=400,
+                    detail="default_slot_length_mins must be between 15 and 120 minutes"
+                )
+            prefs["defaultSlotLengthMins"] = default_slot_length_mins
+        
+        # Update working hours if provided
+        if working_hours_start is not None or working_hours_end is not None:
+            working_hours = prefs.get("workingHours", {"start": "09:00", "end": "17:00"})
+            
+            if working_hours_start is not None:
+                # Validate format
+                try:
+                    datetime.strptime(working_hours_start, "%H:%M")
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="working_hours_start must be in HH:MM format (e.g., '09:00')"
+                    )
+                working_hours["start"] = working_hours_start
+            
+            if working_hours_end is not None:
+                # Validate format
+                try:
+                    datetime.strptime(working_hours_end, "%H:%M")
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="working_hours_end must be in HH:MM format (e.g., '17:00')"
+                    )
+                working_hours["end"] = working_hours_end
+            
+            # Validate that end is after start
+            start_time = datetime.strptime(working_hours["start"], "%H:%M").time()
+            end_time = datetime.strptime(working_hours["end"], "%H:%M").time()
+            if end_time <= start_time:
+                raise HTTPException(
+                    status_code=400,
+                    detail="working_hours_end must be after working_hours_start"
+                )
+            
+            prefs["workingHours"] = working_hours
+        
+        # Update calendar_preferences
+        user.calendar_preferences = prefs
+        
+        # Mark JSONB field as modified (required for SQLAlchemy to detect changes)
+        flag_modified(user, "calendar_preferences")
+        
+        try:
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            
+            # Return updated preferences
+            updated_prefs = _get_user_calendar_preferences(session, user_id, user_type)
+            return JSONResponse(content={
+                "message": "Calendar preferences updated successfully",
+                "preferences": updated_prefs
+            })
+        except Exception as e:
+            session.rollback()
+            print(f"⚠️  Error updating calendar preferences: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to update calendar preferences: {str(e)}"
+            )
 
 
 @app.get("/property-manager/properties-by-realtor")
@@ -8025,14 +8172,42 @@ async def create_availability_slot(
     - Busy periods, personal time, etc.
     """
     # Verify user can only update their own calendar
-    if user_data["user_type"] != user_type or user_data["id"] != user_id:
-        raise HTTPException(status_code=403, detail="You can only update your own calendar")
+    if user_data.get("user_type") != user_type or user_data.get("id") != user_id:
+        raise HTTPException(
+            status_code=403, 
+            detail="You can only update your own calendar"
+        )
     
+    # Validate required fields
+    if not start_at or not start_at.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="start_at is required and cannot be empty"
+        )
+    
+    if not end_at or not end_at.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="end_at is required and cannot be empty"
+        )
+    
+    if not slot_type or not slot_type.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="slot_type is required and cannot be empty"
+        )
+    
+    # Robust datetime parsing
     try:
-        start_dt = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
-        end_dt = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format.")
+        start_dt = _parse_datetime_robust(start_at, "start_at")
+        end_dt = _parse_datetime_robust(end_at, "end_at")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error parsing dates: {str(e)}. Please use ISO format (e.g., 2025-12-01T16:00:00Z)."
+        )
     
     if slot_type not in ["available", "unavailable", "busy", "personal", "holiday", "off_day"]:
         raise HTTPException(
@@ -8054,26 +8229,34 @@ async def create_availability_slot(
         )
     
     with Session(engine) as session:
-        slot = AvailabilitySlot(
-            user_id=user_id,
-            user_type=user_type,
-            start_at=start_dt,
-            end_at=end_dt,
-            slot_type=slot_type,
-            source="manual"
-        )
-        session.add(slot)
-        session.commit()
-        session.refresh(slot)
-        
-        return JSONResponse(content={
-            "slotId": slot.slot_id,
-            "startAt": slot.start_at.isoformat(),
-            "endAt": slot.end_at.isoformat(),
-            "slotType": slot.slot_type,
-            "isFullDay": is_full_day,
-            "message": "Availability slot created successfully"
-        })
+        try:
+            slot = AvailabilitySlot(
+                user_id=user_id,
+                user_type=user_type,
+                start_at=start_dt,
+                end_at=end_dt,
+                slot_type=slot_type,
+                source="manual"
+            )
+            session.add(slot)
+            session.commit()
+            session.refresh(slot)
+            
+            return JSONResponse(content={
+                "slotId": slot.slot_id,
+                "startAt": slot.start_at.isoformat(),
+                "endAt": slot.end_at.isoformat(),
+                "slotType": slot.slot_type,
+                "isFullDay": is_full_day,
+                "message": "Availability slot created successfully"
+            })
+        except Exception as e:
+            session.rollback()
+            print(f"⚠️  Error creating availability slot: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to create availability slot: {str(e)}"
+            )
 
 
 # Create Manual Booking/Tour (from dashboard)
@@ -8267,6 +8450,17 @@ async def create_booking_request_vapi(
     
     No property_id needed - only property_name (user-provided).
     """
+    # Parse request body once (can only be read once)
+    request_body = {}
+    request_headers = {}
+    if http_request:
+        try:
+            request_body = await http_request.json()
+            request_headers = dict(http_request.headers)
+        except Exception as e:
+            print(f"⚠️  Error parsing request body: {e}")
+            # Continue with empty body if parsing fails
+    
     # Extract parameters from VapiRequest toolCalls if provided
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
@@ -8288,20 +8482,27 @@ async def create_booking_request_vapi(
                 notes = notes or args.get("notes")
                 break
     
+    # Parse request body once (can only be read once)
+    request_body = {}
+    request_headers = {}
+    if http_request:
+        try:
+            request_body = await http_request.json()
+            request_headers = dict(http_request.headers)
+        except Exception as e:
+            print(f"⚠️  Error parsing request body: {e}")
+            # Continue with empty body if parsing fails
+    
     # If still missing, try to get from request body directly
     if not property_name or not visitor_name or not visitor_phone:
-        try:
-            body = await http_request.json()
-            property_name = property_name or body.get("property_name") or body.get("propertyName")
-            visitor_name = visitor_name or body.get("visitor_name") or body.get("visitorName")
-            visitor_phone = visitor_phone or body.get("visitor_phone") or body.get("visitorPhone")
-            visitor_email = visitor_email or body.get("visitor_email") or body.get("visitorEmail")
-            requested_start_at = requested_start_at or body.get("requested_start_at") or body.get("requestedStartAt")
-            requested_end_at = requested_end_at or body.get("requested_end_at") or body.get("requestedEndAt")
-            timezone = timezone or body.get("timezone") or "America/New_York"
-            notes = notes or body.get("notes")
-        except:
-            pass  # Body might not be JSON or already consumed
+        property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
+        visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
+        visitor_phone = visitor_phone or request_body.get("visitor_phone") or request_body.get("visitorPhone")
+        visitor_email = visitor_email or request_body.get("visitor_email") or request_body.get("visitorEmail")
+        requested_start_at = requested_start_at or request_body.get("requested_start_at") or request_body.get("requestedStartAt")
+        requested_end_at = requested_end_at or request_body.get("requested_end_at") or request_body.get("requestedEndAt")
+        timezone = timezone or request_body.get("timezone") or "America/New_York"
+        notes = notes or request_body.get("notes")
     
     # Set defaults
     if not timezone:
@@ -8376,16 +8577,15 @@ async def create_booking_request_vapi(
         raise
     
     with Session(engine) as session:
-        # Get source_ids for property search if needed
+        # Get source_ids for property search if needed (using already parsed body)
         source_ids = None
         if http_request:
             try:
                 from DB.vapi_helpers import identify_user_from_vapi_request
-                body = await http_request.json() if hasattr(http_request, 'json') else {}
-                headers = dict(http_request.headers) if http_request else {}
-                user_info = identify_user_from_vapi_request(body, headers)
+                user_info = identify_user_from_vapi_request(request_body, request_headers)
                 source_ids = user_info.get("source_ids") if user_info else None
-            except:
+            except Exception as e:
+                print(f"⚠️  Error identifying user from VAPI request: {e}")
                 pass
         
         # Robust property finding - only use property_name (no property_id)
@@ -8421,8 +8621,8 @@ async def create_booking_request_vapi(
         
         if http_request:
             try:
-                headers = dict(http_request.headers)
-                header_keys_lower = {k.lower(): v for k, v in headers.items()}
+                # Use already parsed headers
+                header_keys_lower = {k.lower(): v for k, v in request_headers.items()}
                 
                 # Extract call_id from headers
                 vapi_call_id = header_keys_lower.get("x-call-id") or header_keys_lower.get("x-vapi-call-id")
@@ -8471,16 +8671,24 @@ async def create_booking_request_vapi(
         session.commit()
         session.refresh(booking)
         
-        # Notify assigned user
-        notification_msg = f"New tour booking request from {visitor_name} ({normalized_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
-        _send_sms_notification(assigned_user["phone"], notification_msg)
+        # Notify assigned user (don't fail booking creation if SMS fails)
+        try:
+            if assigned_user.get("phone"):
+                notification_msg = f"New tour booking request from {visitor_name} ({normalized_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
+                _send_sms_notification(assigned_user["phone"], notification_msg)
+        except Exception as e:
+            print(f"⚠️  Failed to send SMS notification: {str(e)}")
         
         # Also notify PM if different from assigned user
-        source = session.get(Source, property_listing.source_id)
-        if source and source.property_manager_id != assigned_user["user_id"]:
-            pm = session.get(PropertyManager, source.property_manager_id)
-            if pm:
-                _send_sms_notification(pm.contact, notification_msg)
+        try:
+            source = session.get(Source, property_listing.source_id)
+            if source and source.property_manager_id != assigned_user["user_id"]:
+                pm = session.get(PropertyManager, source.property_manager_id)
+                if pm and pm.contact:
+                    notification_msg = f"New tour booking request from {visitor_name} ({normalized_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
+                    _send_sms_notification(pm.contact, notification_msg)
+        except Exception as e:
+            print(f"⚠️  Failed to send PM SMS notification: {str(e)}")
         
         return JSONResponse(content={
             "bookingId": booking.booking_id,
