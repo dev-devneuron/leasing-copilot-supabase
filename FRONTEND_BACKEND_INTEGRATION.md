@@ -2865,7 +2865,241 @@ function PendingBookingsPanel({ userId, userType }) {
 
 ---
 
-#### 3. Availability Management
+#### 3. Manual Event Creation & Calendar Management
+
+**Features:**
+- Create manual bookings/tours from dashboard
+- Add holidays, off days, and busy periods
+- Select properties from dropdown or properties view
+- View all calendar events (bookings + availability slots) in one place
+
+**Endpoints:**
+
+**1. Get Properties for Dropdown**
+- **Endpoint:** `GET /api/users/{user_id}/properties`
+- **Description:** Get list of properties for dropdown when creating manual events
+- **Response:**
+```json
+{
+  "properties": [
+    {
+      "id": 123,
+      "address": "123 Main St, Berkeley, CA",
+      "price": 2500,
+      "bedrooms": 2,
+      "bathrooms": 1,
+      "listing_status": "available"
+    }
+  ],
+  "total": 1
+}
+```
+
+**2. Create Manual Booking/Tour**
+- **Endpoint:** `POST /api/bookings/manual`
+- **Description:** Create a manual booking/tour from dashboard (auto-approved)
+- **Body:**
+```json
+{
+  "property_id": 123,
+  "visitor_name": "John Doe",
+  "visitor_phone": "+15409773737",
+  "visitor_email": "john@example.com",
+  "start_at": "2025-12-01T16:00:00Z",
+  "end_at": "2025-12-01T17:00:00Z",
+  "timezone": "America/New_York",
+  "notes": "Manual booking created from dashboard"
+}
+```
+- **Response:**
+```json
+{
+  "bookingId": 456,
+  "status": "approved",
+  "propertyId": 123,
+  "visitorName": "John Doe",
+  "startAt": "2025-12-01T16:00:00Z",
+  "endAt": "2025-12-01T17:00:00Z",
+  "message": "Manual booking created and approved successfully"
+}
+```
+- **Note:** Manual bookings are automatically approved since created by the approver
+
+**3. Create Availability Slot (Enhanced)**
+- **Endpoint:** `POST /api/users/{user_id}/availability`
+- **Description:** Create manual availability/unavailability slot, including full-day events
+- **Body:**
+```json
+{
+  "user_type": "property_manager",
+  "start_at": "2025-12-25T00:00:00Z",
+  "end_at": "2025-12-25T23:59:59Z",
+  "slot_type": "holiday",
+  "is_full_day": true,
+  "notes": "Christmas Day"
+}
+```
+- **Slot Types:**
+  - `available` - Mark time as available
+  - `unavailable` - Mark time as unavailable
+  - `busy` - Mark as busy
+  - `personal` - Personal time
+  - `holiday` - Holiday (full day)
+  - `off_day` - Day off (full day)
+- **Full-Day Events:** Set `is_full_day: true` to mark entire day(s) as holiday/off day
+
+**4. Get All Calendar Events**
+- **Endpoint:** `GET /api/users/{user_id}/calendar-events?from_date={ISO_DATE}&to_date={ISO_DATE}`
+- **Description:** Get all calendar events (bookings + availability slots) for calendar display
+- **Response:**
+```json
+{
+  "userId": 12,
+  "userType": "property_manager",
+  "fromDate": "2025-12-01T00:00:00Z",
+  "toDate": "2025-12-31T23:59:59Z",
+  "events": [
+    {
+      "id": "booking_456",
+      "type": "booking",
+      "bookingId": 456,
+      "propertyId": 123,
+      "propertyAddress": "123 Main St",
+      "visitorName": "John Doe",
+      "visitorPhone": "+15409773737",
+      "startAt": "2025-12-01T16:00:00Z",
+      "endAt": "2025-12-01T17:00:00Z",
+      "status": "approved",
+      "callRecord": {
+        "vapiCallId": "call_abc123",
+        "callTranscript": "Full transcript...",
+        "callRecordingUrl": "https://..."
+      }
+    },
+    {
+      "id": "slot_789",
+      "type": "availability_slot",
+      "slotId": 789,
+      "startAt": "2025-12-25T00:00:00Z",
+      "endAt": "2025-12-25T23:59:59Z",
+      "slotType": "holiday",
+      "isFullDay": true
+    }
+  ],
+  "bookings": [...],
+  "availabilitySlots": [...],
+  "total": 2
+}
+```
+
+**Implementation Guide:**
+
+**Manual Booking Creation Flow:**
+1. User clicks "Add Event" or "Create Tour" button
+2. Modal/form opens with:
+   - Property dropdown (populated from `/api/users/{user_id}/properties`)
+   - OR: Click on property from properties view → pre-fills property_id
+   - Visitor name, phone, email fields
+   - Date/time picker for start and end times
+   - Optional notes field
+3. On submit, call `POST /api/bookings/manual`
+4. Show success message and refresh calendar
+
+**Adding Holidays/Off Days:**
+1. User selects a day in calendar (or date picker)
+2. Modal opens with:
+   - Date pre-filled
+   - Slot type dropdown: Holiday, Off Day, Busy, etc.
+   - Optional notes/reason
+3. Set `is_full_day: true` in request
+4. Backend automatically sets time to 00:00:00 - 23:59:59 for that day
+5. Call `POST /api/users/{user_id}/availability`
+
+**Call Record Linking:**
+- Bookings created via VAPI phone calls are automatically linked to their call recordings and transcripts
+- The backend extracts `x-call-id` header from VAPI requests and links to the `CallRecord` table
+- When viewing a booking in the dashboard:
+  - If `callRecord` is present, display:
+    - Audio player for call recording (`callRecordingUrl`)
+    - Full call transcript (`callTranscript`)
+    - Call ID for reference (`vapiCallId`)
+  - This allows PMs/Realtors to review the original conversation that led to the booking
+- The call record information is included in:
+  - `GET /api/bookings/{booking_id}` - Single booking details
+  - `GET /api/users/{user_id}/calendar-events` - All calendar events
+  - `GET /api/users/{user_id}/bookings` - User's bookings list
+
+**Calendar Display:**
+- Use `GET /api/users/{user_id}/calendar-events` to fetch all events
+- Display bookings with different colors by status
+- Display availability slots (holidays, off days) as background colors or overlays
+- Full-day events should span entire day in calendar view
+- Show call record indicator (📞 icon) on bookings that have linked call recordings
+
+**Example Implementation:**
+```javascript
+// Manual booking creation
+async function createManualBooking(propertyId, visitorInfo, startAt, endAt) {
+  const response = await fetch(`/api/bookings/manual`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      property_id: propertyId,
+      visitor_name: visitorInfo.name,
+      visitor_phone: visitorInfo.phone,
+      visitor_email: visitorInfo.email,
+      start_at: startAt,
+      end_at: endAt,
+      timezone: 'America/New_York',
+      notes: visitorInfo.notes
+    })
+  });
+  return response.json();
+}
+
+// Add holiday/off day
+async function addHoliday(date, slotType, notes) {
+  const startOfDay = new Date(date);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(date);
+  endOfDay.setHours(23, 59, 59, 999);
+  
+  const response = await fetch(`/api/users/${userId}/availability`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      user_type: userType,
+      start_at: startOfDay.toISOString(),
+      end_at: endOfDay.toISOString(),
+      slot_type: slotType, // 'holiday' or 'off_day'
+      is_full_day: true,
+      notes: notes
+    })
+  });
+  return response.json();
+}
+
+// Get all calendar events
+async function getCalendarEvents(fromDate, toDate) {
+  const response = await fetch(
+    `/api/users/${userId}/calendar-events?from_date=${fromDate}&to_date=${toDate}`,
+    {
+      headers: { 'Authorization': `Bearer ${token}` }
+    }
+  );
+  return response.json();
+}
+```
+
+---
+
+#### 4. Availability Management
 
 **Working Hours Configuration:**
 - Allow users to set default working hours (e.g., 9 AM - 5 PM)
@@ -2952,6 +3186,11 @@ function AvailabilityManager({ userId, userType }) {
   - Timezone
   - Notes from visitor
   - Audit log (who did what and when)
+- **Call Record (if booking came from phone call):**
+  - **Call Recording:** Play button to listen to the call recording
+  - **Call Transcript:** Full transcript of the conversation
+  - **Call ID:** Link to view full call details
+  - Display prominently if `callRecord` is present in booking data
 - **Actions (based on status):**
   - **Pending:** Approve, Deny, Reschedule buttons
   - **Approved:** Cancel, View Property, Contact Visitor

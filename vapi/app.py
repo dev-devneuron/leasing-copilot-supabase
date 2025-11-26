@@ -7933,17 +7933,97 @@ async def get_user_availability(
         })
 
 
-# Create Manual Availability Slot
+# Get Properties List for Dropdown (for manual event creation)
+@app.get("/api/users/{user_id}/properties")
+async def get_user_properties_for_dropdown(
+    user_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Get list of properties for dropdown selection when creating manual events.
+    Returns properties accessible to the user (PM or Realtor).
+    """
+    authenticated_user_id = user_data["id"]
+    user_type = user_data["user_type"]
+    
+    # Verify user can only view their own properties
+    if authenticated_user_id != user_id:
+        raise HTTPException(
+            status_code=403, 
+            detail="You can only view your own properties"
+        )
+    
+    with Session(engine) as session:
+        properties = []
+        
+        if user_type == "property_manager":
+            # Get PM's own properties
+            pm_sources = session.exec(
+                select(Source).where(Source.property_manager_id == user_id)
+            ).all()
+            pm_source_ids = [s.source_id for s in pm_sources]
+            
+            # Get managed realtors' properties
+            realtors = session.exec(
+                select(Realtor).where(Realtor.property_manager_id == user_id)
+            ).all()
+            realtor_source_ids = []
+            for realtor in realtors:
+                realtor_sources = session.exec(
+                    select(Source).where(Source.realtor_id == realtor.realtor_id)
+                ).all()
+                realtor_source_ids.extend([s.source_id for s in realtor_sources])
+            
+            all_source_ids = pm_source_ids + realtor_source_ids
+        else:  # realtor
+            sources = session.exec(
+                select(Source).where(Source.realtor_id == user_id)
+            ).all()
+            all_source_ids = [s.source_id for s in sources]
+        
+        if all_source_ids:
+            apartments = session.exec(
+                select(ApartmentListing).where(ApartmentListing.source_id.in_(all_source_ids))
+            ).all()
+            
+            for apt in apartments:
+                meta = apt.listing_metadata or {}
+                address = meta.get("address") or f"Property {apt.id}"
+                properties.append({
+                    "id": apt.id,
+                    "address": address,
+                    "price": meta.get("price"),
+                    "bedrooms": meta.get("bedrooms"),
+                    "bathrooms": meta.get("bathrooms"),
+                    "listing_status": meta.get("listing_status", "unknown")
+                })
+        
+        return JSONResponse(content={
+            "properties": properties,
+            "total": len(properties)
+        })
+
+
+# Create Manual Availability Slot (including holidays/off days)
 @app.post("/api/users/{user_id}/availability")
 async def create_availability_slot(
     user_id: int,
     user_type: str,
     start_at: str,  # ISO format
     end_at: str,  # ISO format
-    slot_type: str,  # 'available' | 'unavailable' | 'busy'
+    slot_type: str,  # 'available' | 'unavailable' | 'busy' | 'personal' | 'holiday' | 'off_day'
+    is_full_day: Optional[bool] = Body(False),  # If true, spans entire day(s)
+    notes: Optional[str] = Body(None),  # Optional notes/reason
     user_data: dict = Depends(get_current_user_data)
 ):
-    """Create manual availability/unavailability slot (PM/Realtor updates their own calendar)."""
+    """
+    Create manual availability/unavailability slot (PM/Realtor updates their own calendar).
+    
+    Supports:
+    - Regular time slots (start_at to end_at)
+    - Full-day events (holidays, off days) - set is_full_day=true and provide date
+    - Busy periods, personal time, etc.
+    """
     # Verify user can only update their own calendar
     if user_data["user_type"] != user_type or user_data["id"] != user_id:
         raise HTTPException(status_code=403, detail="You can only update your own calendar")
@@ -7954,8 +8034,24 @@ async def create_availability_slot(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format.")
     
-    if slot_type not in ["available", "unavailable", "busy", "personal"]:
-        raise HTTPException(status_code=400, detail="Invalid slot_type")
+    if slot_type not in ["available", "unavailable", "busy", "personal", "holiday", "off_day"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid slot_type. Must be: available, unavailable, busy, personal, holiday, or off_day"
+        )
+    
+    # For full-day events, adjust to start of day and end of day
+    if is_full_day:
+        # Set start to beginning of day (00:00:00)
+        start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Set end to end of day (23:59:59)
+        end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    
+    if end_dt <= start_dt:
+        raise HTTPException(
+            status_code=400, 
+            detail="end_at must be after start_at"
+        )
     
     with Session(engine) as session:
         slot = AvailabilitySlot(
@@ -7972,8 +8068,178 @@ async def create_availability_slot(
         
         return JSONResponse(content={
             "slotId": slot.slot_id,
+            "startAt": slot.start_at.isoformat(),
+            "endAt": slot.end_at.isoformat(),
+            "slotType": slot.slot_type,
+            "isFullDay": is_full_day,
             "message": "Availability slot created successfully"
         })
+
+
+# Create Manual Booking/Tour (from dashboard)
+@app.post("/api/bookings/manual")
+async def create_manual_booking(
+    property_id: int,
+    visitor_name: str,
+    visitor_phone: str,
+    visitor_email: Optional[str] = Body(None),
+    start_at: str = Body(...),  # ISO format
+    end_at: str = Body(...),  # ISO format
+    timezone: Optional[str] = Body("America/New_York"),
+    notes: Optional[str] = Body(None),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Create a manual booking/tour from the dashboard.
+    
+    PM/Realtor can manually create a booking for a property.
+    The booking is automatically approved (status='approved') since it's created by the approver.
+    """
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    try:
+        start_dt = _parse_datetime_robust(start_at, "start_at")
+        end_dt = _parse_datetime_robust(end_at, "end_at")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid date format: {str(e)}. Use ISO format (e.g., 2025-12-01T16:00:00Z)"
+        )
+    
+    if end_dt <= start_dt:
+        raise HTTPException(
+            status_code=400,
+            detail="end_at must be after start_at"
+        )
+    
+    # Validate duration (max 8 hours)
+    duration_hours = (end_dt - start_dt).total_seconds() / 3600
+    if duration_hours > 8:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Booking duration ({duration_hours:.1f} hours) exceeds maximum allowed (8 hours)"
+        )
+    
+    # Normalize phone number
+    try:
+        normalized_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
+    except HTTPException:
+        raise
+    
+    with Session(engine) as session:
+        # Verify property exists and user has access
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found")
+        
+        # Check if user has access to this property
+        source = session.get(Source, property_listing.source_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="Property source not found")
+        
+        has_access = False
+        if user_type == "property_manager":
+            has_access = (source.property_manager_id == user_id)
+        elif user_type == "realtor":
+            has_access = (source.realtor_id == user_id)
+        
+        if not has_access:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have access to this property"
+            )
+        
+        # Get assigned user for the property
+        assigned_user = _get_property_assigned_user(session, property_id)
+        if not assigned_user:
+            raise HTTPException(
+                status_code=400,
+                detail="Property has no assigned PM or Realtor"
+            )
+        
+        # Check for conflicts (approved bookings or busy slots)
+        conflicting_bookings = session.exec(
+            select(PropertyTourBooking).where(
+                PropertyTourBooking.assigned_to_user_id == assigned_user["user_id"],
+                PropertyTourBooking.assigned_to_user_type == assigned_user["user_type"],
+                PropertyTourBooking.status == "approved",
+                PropertyTourBooking.deleted_at.is_(None),
+                or_(
+                    and_(
+                        PropertyTourBooking.start_at < end_dt,
+                        PropertyTourBooking.end_at > start_dt
+                    )
+                )
+            )
+        ).first()
+        
+        if conflicting_bookings:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Time slot conflicts with existing approved booking (ID: {conflicting_bookings.booking_id})"
+            )
+        
+        # Create the booking (automatically approved since created by approver)
+        booking = PropertyTourBooking(
+            property_id=property_id,
+            assigned_to_user_id=assigned_user["user_id"],
+            assigned_to_user_type=assigned_user["user_type"],
+            visitor_name=visitor_name,
+            visitor_phone=normalized_phone,
+            visitor_email=visitor_email,
+            requested_at=datetime.utcnow(),
+            start_at=start_dt,
+            end_at=end_dt,
+            timezone=timezone or "America/New_York",
+            status="approved",  # Auto-approved since created by approver
+            created_by="ui",  # Manual creation from UI
+            notes=notes,
+            audit_log=[{
+                "action": "created_manually",
+                "actor_id": user_id,
+                "actor_type": user_type,
+                "timestamp": datetime.utcnow().isoformat()
+            }]
+        )
+        session.add(booking)
+        session.commit()
+        session.refresh(booking)
+        
+        # Create blocking availability slot
+        blocking_slot = AvailabilitySlot(
+            user_id=assigned_user["user_id"],
+            user_type=assigned_user["user_type"],
+            start_at=start_dt,
+            end_at=end_dt,
+            slot_type="booking",
+            source="booking",
+            booking_id=booking.booking_id
+        )
+        session.add(blocking_slot)
+        session.commit()
+        
+        # Send notification to visitor (if phone/email provided)
+        if normalized_phone:
+            try:
+                property_meta = property_listing.listing_metadata or {}
+                property_address = property_meta.get("address", f"Property {property_id}")
+                message = f"Your tour for {property_address} has been scheduled for {start_dt.strftime('%B %d, %Y at %I:%M %p')}."
+                _send_sms_notification(normalized_phone, message)
+            except:
+                pass  # Don't fail if SMS fails
+        
+        return JSONResponse(content={
+            "bookingId": booking.booking_id,
+            "status": booking.status,
+            "propertyId": property_id,
+            "visitorName": visitor_name,
+            "startAt": booking.start_at.isoformat(),
+            "endAt": booking.end_at.isoformat(),
+            "message": "Manual booking created and approved successfully"
+        }, status_code=201)
 
 
 # Create Booking Request
@@ -8103,12 +8369,33 @@ async def create_booking_request_vapi(
             detail=f"Tour duration is too long ({duration_minutes:.0f} minutes). Maximum is 2 hours."
         )
     
-    # Validate created_by
-    if created_by not in ["vapi", "ui", "phone"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid created_by value: '{created_by}'. Must be one of: 'vapi', 'ui', 'phone'"
-        )
+    # Extract call record information from headers (if booking came from VAPI call)
+    vapi_call_id = None
+    call_transcript = None
+    call_recording_url = None
+    
+    if http_request:
+        try:
+            headers = dict(http_request.headers)
+            header_keys_lower = {k.lower(): v for k, v in headers.items()}
+            
+            # Extract call_id from headers
+            vapi_call_id = header_keys_lower.get("x-call-id") or header_keys_lower.get("x-vapi-call-id")
+            
+            # If we have a call_id, try to get call record from database
+            if vapi_call_id:
+                with Session(engine) as temp_session:
+                    call_record = temp_session.exec(
+                        select(CallRecord).where(CallRecord.call_id == vapi_call_id)
+                    ).first()
+                    
+                    if call_record:
+                        call_transcript = call_record.transcript
+                        call_recording_url = call_record.recording_url
+                        print(f"✅ Linked booking to call record: {vapi_call_id}")
+        except Exception as e:
+            print(f"⚠️  Error extracting call record info: {e}")
+            # Don't fail the booking creation if call record linking fails
     
     # Robust phone normalization
     try:
@@ -8155,6 +8442,33 @@ async def create_booking_request_vapi(
                 detail="Property has no assigned PM or Realtor. Please assign a user to the property before creating bookings."
             )
         
+        # Extract call record information from headers (if booking came from VAPI call)
+        vapi_call_id = None
+        call_transcript = None
+        call_recording_url = None
+        
+        if http_request:
+            try:
+                headers = dict(http_request.headers)
+                header_keys_lower = {k.lower(): v for k, v in headers.items()}
+                
+                # Extract call_id from headers
+                vapi_call_id = header_keys_lower.get("x-call-id") or header_keys_lower.get("x-vapi-call-id")
+                
+                # If we have a call_id, try to get call record from database
+                if vapi_call_id:
+                    call_record = session.exec(
+                        select(CallRecord).where(CallRecord.call_id == vapi_call_id)
+                    ).first()
+                    
+                    if call_record:
+                        call_transcript = call_record.transcript
+                        call_recording_url = call_record.recording_url
+                        print(f"✅ Linked booking to call record: {vapi_call_id}")
+        except Exception as e:
+            print(f"⚠️  Error extracting call record info: {e}")
+            # Don't fail the booking creation if call record linking fails
+        
         # Create booking
         booking = PropertyTourBooking(
             property_id=property_id,
@@ -8170,6 +8484,9 @@ async def create_booking_request_vapi(
             status="pending",
             created_by="vapi",  # Always "vapi" for VAPI endpoint
             notes=notes,
+            vapi_call_id=vapi_call_id,
+            call_transcript=call_transcript,
+            call_recording_url=call_recording_url,
             audit_log=[{
                 "actorId": None,
                 "action": "created",
@@ -8253,8 +8570,145 @@ async def get_booking_details(
             "notes": booking.notes,
             "proposedSlots": booking.proposed_slots,
             "auditLog": booking.audit_log,
+            "callRecord": {
+                "vapiCallId": booking.vapi_call_id,
+                "callTranscript": booking.call_transcript,
+                "callRecordingUrl": booking.call_recording_url
+            } if booking.vapi_call_id else None,
             "createdAt": booking.created_at.isoformat(),
             "updatedAt": booking.updated_at.isoformat()
+        })
+
+
+# Get All Calendar Events (Bookings + Availability Slots)
+@app.get("/api/users/{user_id}/calendar-events")
+async def get_calendar_events(
+    user_id: int,
+    from_date: str,  # ISO format
+    to_date: str,  # ISO format
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Get all calendar events for a user (bookings + availability slots).
+    Returns both bookings and manual availability slots for calendar display.
+    """
+    authenticated_user_id = user_data["id"]
+    user_type = user_data["user_type"]
+    
+    # Verify user can only view their own calendar
+    if authenticated_user_id != user_id:
+        raise HTTPException(
+            status_code=403, 
+            detail="You can only view your own calendar"
+        )
+    
+    try:
+        from_dt = datetime.fromisoformat(from_date.replace("Z", "+00:00"))
+        to_dt = datetime.fromisoformat(to_date.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format.")
+    
+    with Session(engine) as session:
+        # Get bookings
+        bookings_query = select(PropertyTourBooking).where(
+            PropertyTourBooking.assigned_to_user_id == user_id,
+            PropertyTourBooking.assigned_to_user_type == user_type,
+            PropertyTourBooking.deleted_at.is_(None),
+            PropertyTourBooking.start_at >= from_dt,
+            PropertyTourBooking.end_at <= to_dt
+        )
+        
+        # If PM, also include bookings for properties they manage
+        if user_type == "property_manager":
+            properties = session.exec(
+                select(ApartmentListing).join(Source).where(
+                    Source.property_manager_id == user_id
+                )
+            ).all()
+            property_ids = [p.id for p in properties]
+            if property_ids:
+                bookings_query = select(PropertyTourBooking).where(
+                    or_(
+                        and_(
+                            PropertyTourBooking.assigned_to_user_id == user_id,
+                            PropertyTourBooking.assigned_to_user_type == user_type
+                        ),
+                        PropertyTourBooking.property_id.in_(property_ids)
+                    ),
+                    PropertyTourBooking.deleted_at.is_(None),
+                    PropertyTourBooking.start_at >= from_dt,
+                    PropertyTourBooking.end_at <= to_dt
+                )
+        
+        bookings = session.exec(bookings_query).all()
+        
+        # Get availability slots (manual events, holidays, off days, etc.)
+        slots_query = select(AvailabilitySlot).where(
+            AvailabilitySlot.user_id == user_id,
+            AvailabilitySlot.user_type == user_type,
+            AvailabilitySlot.start_at >= from_dt,
+            AvailabilitySlot.end_at <= to_dt
+        )
+        slots = session.exec(slots_query).all()
+        
+        # Format bookings
+        booking_events = []
+        for booking in bookings:
+            property_listing = session.get(ApartmentListing, booking.property_id)
+            property_meta = property_listing.listing_metadata or {} if property_listing else {}
+            
+            booking_events.append({
+                "id": f"booking_{booking.booking_id}",
+                "type": "booking",
+                "bookingId": booking.booking_id,
+                "propertyId": booking.property_id,
+                "propertyAddress": property_meta.get("address", f"Property {booking.property_id}"),
+                "visitorName": booking.visitor_name,
+                "visitorPhone": booking.visitor_phone,
+                "visitorEmail": booking.visitor_email,
+                "startAt": booking.start_at.isoformat(),
+                "endAt": booking.end_at.isoformat(),
+                "status": booking.status,
+                "timezone": booking.timezone,
+                "notes": booking.notes,
+                "createdBy": booking.created_by,
+                "callRecord": {
+                    "vapiCallId": booking.vapi_call_id,
+                    "callTranscript": booking.call_transcript,
+                    "callRecordingUrl": booking.call_recording_url
+                } if booking.vapi_call_id else None
+            })
+        
+        # Format availability slots
+        slot_events = []
+        for slot in slots:
+            slot_events.append({
+                "id": f"slot_{slot.slot_id}",
+                "type": "availability_slot",
+                "slotId": slot.slot_id,
+                "startAt": slot.start_at.isoformat(),
+                "endAt": slot.end_at.isoformat(),
+                "slotType": slot.slot_type,
+                "source": slot.source,
+                "isFullDay": (
+                    slot.start_at.hour == 0 and slot.start_at.minute == 0 and
+                    slot.end_at.hour == 23 and slot.end_at.minute == 59
+                )
+            })
+        
+        # Combine and sort by start time
+        all_events = booking_events + slot_events
+        all_events.sort(key=lambda x: x["startAt"])
+        
+        return JSONResponse(content={
+            "userId": user_id,
+            "userType": user_type,
+            "fromDate": from_date,
+            "toDate": to_date,
+            "events": all_events,
+            "bookings": booking_events,
+            "availabilitySlots": slot_events,
+            "total": len(all_events)
         })
 
 
@@ -8783,11 +9237,7 @@ async def lookup_user(
 # Also support check-availability endpoint name for VAPI compatibility
 @app.post("/vapi/properties/check-availability")
 async def check_property_availability_vapi(
-    http_request: Request,  # FastAPI will inject this - must be first
-    request: Optional[VapiRequest] = None,
-    property_name: Optional[str] = Body(None),
-    from_date: Optional[str] = Body(None),
-    to_date: Optional[str] = Body(None)
+    http_request: Request  # FastAPI will inject this - must be first
 ):
     """
     VAPI endpoint to check property availability.
@@ -8795,31 +9245,50 @@ async def check_property_availability_vapi(
     1. VapiRequest format with toolCalls (from VAPI)
     2. Regular JSON body with direct parameters (from other clients)
     """
-    # Extract parameters from VapiRequest toolCalls if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
-        for tool_call in request.message.toolCalls:
-            if tool_call.function.name in ["checkPropertyAvailability", "getAvailability", "checkAvailability", "getPropertyAvailability"]:
-                args = tool_call.function.arguments
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except:
-                        args = {}
-                
-                property_name = property_name or args.get("property_name") or args.get("propertyName")
-                from_date = from_date or args.get("from_date") or args.get("fromDate")
-                to_date = to_date or args.get("to_date") or args.get("toDate")
-                break
+    # Parse the request body manually
+    property_name = None
+    from_date = None
+    to_date = None
     
-    # If still missing, try to get from request body directly
-    if not property_name:
-        try:
-            body = await http_request.json()
-            property_name = property_name or body.get("property_name") or body.get("propertyName")
-            from_date = from_date or body.get("from_date") or body.get("fromDate")
-            to_date = to_date or body.get("to_date") or body.get("toDate")
-        except:
-            pass  # Body might not be JSON or already consumed
+    try:
+        body = await http_request.json()
+        
+        # Check if body has message.toolCalls structure (VAPI format)
+        if body.get("message") and body["message"].get("toolCalls"):
+            tool_calls = body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                func = tool_call.get("function", {})
+                func_name = func.get("name", "")
+                
+                if func_name in ["checkPropertyAvailability", "getAvailability", "checkAvailability", "getPropertyAvailability"]:
+                    args = func.get("arguments", {})
+                    
+                    # Handle both string and object formats
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except:
+                            args = {}
+                    elif not isinstance(args, dict):
+                        args = {}
+                    
+                    property_name = args.get("property_name") or args.get("propertyName")
+                    from_date = args.get("from_date") or args.get("fromDate")
+                    to_date = args.get("to_date") or args.get("toDate")
+                    break
+        
+        # If not found in toolCalls, try direct body parameters
+        if not property_name:
+            property_name = body.get("property_name") or body.get("propertyName")
+            from_date = body.get("from_date") or body.get("fromDate")
+            to_date = body.get("to_date") or body.get("toDate")
+            
+    except Exception as e:
+        print(f"⚠️  Error parsing request body: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid request format. Error: {str(e)}"
+        )
     
     if not property_name:
         raise HTTPException(
