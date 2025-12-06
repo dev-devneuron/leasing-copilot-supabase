@@ -9577,14 +9577,26 @@ async def check_property_availability_vapi(
         )
     
     # Call the shared handler function with extracted parameters and parsed body
-    result = await _handle_property_availability(http_request, property_name, from_date, to_date, body)
-    
-    # If we have a toolCallId and result is JSONResponse, convert to VAPI format
-    if tool_call_id and isinstance(result, JSONResponse):
-        result_data = json.loads(result.body.decode())
-        return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
-    
-    return result
+    try:
+        result = await _handle_property_availability(http_request, property_name, from_date, to_date, body)
+        
+        # If we have a toolCallId and result is JSONResponse, convert to VAPI format
+        if tool_call_id and isinstance(result, JSONResponse):
+            result_data = json.loads(result.body.decode())
+            return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
+        
+        return result
+    except HTTPException as e:
+        # Convert HTTPException to VAPI format if toolCallId is present
+        if tool_call_id:
+            error_result = {
+                "error": True,
+                "statusCode": e.status_code,
+                "message": e.detail
+            }
+            return {"results": [{"toolCallId": tool_call_id, "result": error_result}]}
+        # Re-raise if no toolCallId (non-VAPI client)
+        raise
 
 
 @app.post("/vapi/properties/availability")
@@ -9867,8 +9879,16 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
         rag = RAGEngine()
         
         try:
-            # Try exact search first
-            search_results = rag.search_apartments(property_name, source_ids=source_ids, k=3)
+            # Try search with source_ids restriction first (if provided)
+            # If that fails or source_ids is None, try without restriction
+            search_results = []
+            if source_ids:
+                search_results = rag.search_apartments(property_name, source_ids=source_ids, k=3)
+            
+            # If no results with source_ids restriction, try without restriction
+            # This allows VAPI calls to work even when user identification fails
+            if not search_results:
+                search_results = rag.search_apartments(property_name, source_ids=None, k=3)
             
             if search_results and len(search_results) > 0:
                 # Try to find exact match first
@@ -10093,6 +10113,15 @@ async def validate_tour_request(
         )
         
         if not property_listing:
+            # Return error in VAPI format if toolCallId is present
+            if tool_call_id:
+                error_result = {
+                    "error": True,
+                    "statusCode": 404,
+                    "message": error_msg or "Property not found.",
+                    "propertyName": property_name
+                }
+                return {"results": [{"toolCallId": tool_call_id, "result": error_result}]}
             raise HTTPException(status_code=404, detail=error_msg or "Property not found.")
         
         property_id = found_property_id  # Use found property_id
@@ -10106,7 +10135,9 @@ async def validate_tour_request(
                 "isAvailable": False,
                 "canBook": False,
                 "reason": f"Property is {listing_status} and not available for tours",
-                "suggestedSlots": []
+                "suggestedSlots": [],
+                "propertyId": property_id,
+                "propertyName": meta.get("address", property_name or "Unknown")
             }
             if tool_call_id:
                 return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
@@ -10120,7 +10151,9 @@ async def validate_tour_request(
                 "isAvailable": False,
                 "canBook": False,
                 "reason": "Property has no assigned PM or Realtor",
-                "suggestedSlots": []
+                "suggestedSlots": [],
+                "propertyId": property_id,
+                "propertyName": meta.get("address", property_name or "Unknown")
             }
             if tool_call_id:
                 return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
