@@ -35,7 +35,7 @@ from pydantic import BaseModel
 import re
 import uuid
 from typing import Union, Optional, Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 import json
 import os
@@ -8527,10 +8527,17 @@ async def create_booking_request_vapi(
     # Parse request body once (can only be read once)
     request_body = {}
     request_headers = {}
+    tool_call_id = None
+    
     if http_request:
         try:
             request_body = await http_request.json()
             request_headers = dict(http_request.headers)
+            # Extract toolCallId from body if present
+            if request_body.get("message") and request_body["message"].get("toolCalls"):
+                tool_calls = request_body["message"]["toolCalls"]
+                if tool_calls and len(tool_calls) > 0:
+                    tool_call_id = tool_calls[0].get("id")
         except Exception as e:
             print(f"⚠️  Error parsing request body: {e}")
             # Continue with empty body if parsing fails
@@ -8539,6 +8546,7 @@ async def create_booking_request_vapi(
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
             if tool_call.function.name in ["createBooking", "requestTour", "bookTour", "createBookingRequest"]:
+                tool_call_id = tool_call.id
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -8556,18 +8564,7 @@ async def create_booking_request_vapi(
                 notes = notes or args.get("notes")
                 break
     
-    # Parse request body once (can only be read once)
-    request_body = {}
-    request_headers = {}
-    if http_request:
-        try:
-            request_body = await http_request.json()
-            request_headers = dict(http_request.headers)
-        except Exception as e:
-            print(f"⚠️  Error parsing request body: {e}")
-            # Continue with empty body if parsing fails
-    
-    # If still missing, try to get from request body directly
+    # If still missing, try to get from request body directly (already parsed above)
     if not property_name or not visitor_name or not visitor_phone:
         property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
         visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
@@ -8593,6 +8590,25 @@ async def create_booking_request_vapi(
         raise HTTPException(
             status_code=400,
             detail="visitor_name is required and cannot be empty."
+        )
+    
+    if not visitor_phone or not visitor_phone.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="visitor_phone is required. Please provide a valid phone number."
+        )
+    
+    # Validate required datetime fields
+    if not requested_start_at or not requested_start_at.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="requested_start_at is required. Please provide the requested start time in ISO format (e.g., 2025-12-01T16:00:00Z)."
+        )
+    
+    if not requested_end_at or not requested_end_at.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="requested_end_at is required. Please provide the requested end time in ISO format (e.g., 2025-12-01T16:30:00Z)."
         )
     
     # Robust datetime parsing
@@ -8764,11 +8780,17 @@ async def create_booking_request_vapi(
         except Exception as e:
             print(f"⚠️  Failed to send PM SMS notification: {str(e)}")
         
-        return JSONResponse(content={
+        result_data = {
             "bookingId": booking.booking_id,
             "status": "pending",
             "message": "Booking request created successfully. Awaiting approval."
-        }, status_code=201)
+        }
+        
+        # Return in VAPI format if toolCallId is present, otherwise return direct JSON
+        if tool_call_id:
+            return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
+        else:
+            return JSONResponse(content=result_data, status_code=201)
 
 
 # Get Booking Details
@@ -9503,6 +9525,7 @@ async def check_property_availability_vapi(
     property_name = None
     from_date = None
     to_date = None
+    body = None
     
     try:
         body = await http_request.json()
@@ -9550,8 +9573,8 @@ async def check_property_availability_vapi(
             detail="property_name is required. Please provide the property name or address."
         )
     
-    # Call the shared handler function with extracted parameters
-    return await _handle_property_availability(http_request, property_name, from_date, to_date)
+    # Call the shared handler function with extracted parameters and parsed body
+    return await _handle_property_availability(http_request, property_name, from_date, to_date, body)
 
 
 @app.post("/vapi/properties/availability")
@@ -9590,6 +9613,7 @@ async def get_property_availability_vapi(
                 break
     
     # If still no property_name, try to get from request body directly
+    body = None
     if not property_name:
         try:
             body = await http_request.json()
@@ -9600,7 +9624,7 @@ async def get_property_availability_vapi(
             pass  # Body might not be JSON or already consumed
     
     # Call shared handler function
-    return await _handle_property_availability(http_request, property_name, from_date, to_date)
+    return await _handle_property_availability(http_request, property_name, from_date, to_date, body)
 
 
 # Shared handler function for property availability logic
@@ -9608,7 +9632,8 @@ async def _handle_property_availability(
     http_request: Request,
     property_name: Optional[str],
     from_date: Optional[str],
-    to_date: Optional[str]
+    to_date: Optional[str],
+    body: Optional[dict] = None
 ):
     """
     Shared logic for handling property availability requests.
@@ -9660,9 +9685,15 @@ async def _handle_property_availability(
         if http_request:
             try:
                 from DB.vapi_helpers import identify_user_from_vapi_request
-                body = await http_request.json() if hasattr(http_request, 'json') else {}
+                # Use provided body if available, otherwise try to get from request
+                request_body = body
+                if request_body is None:
+                    try:
+                        request_body = await http_request.json() if hasattr(http_request, 'json') else {}
+                    except:
+                        request_body = {}
                 headers = dict(http_request.headers) if http_request else {}
-                user_info = identify_user_from_vapi_request(body, headers)
+                user_info = identify_user_from_vapi_request(request_body, headers)
                 source_ids = user_info.get("source_ids") if user_info else None
             except:
                 pass
@@ -9893,10 +9924,15 @@ async def validate_tour_request(
     """
     from DB.vapi_helpers import identify_user_from_vapi_request
     
+    # Parse request body once (can only be read once)
+    request_body = {}
+    tool_call_id = None
+    
     # Extract parameters from VapiRequest toolCalls if provided
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
             if tool_call.function.name in ["validateTourRequest", "checkTourAvailability", "validateTour"]:
+                tool_call_id = tool_call.id
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -9912,10 +9948,16 @@ async def validate_tour_request(
     # If still missing, try to get from request body directly
     if not property_name or not requested_start_at or not requested_end_at:
         try:
-            body = await http_request.json()
-            property_name = property_name or body.get("property_name") or body.get("propertyName")
-            requested_start_at = requested_start_at or body.get("requested_start_at") or body.get("requestedStartAt")
-            requested_end_at = requested_end_at or body.get("requested_end_at") or body.get("requestedEndAt")
+            request_body = await http_request.json()
+            # Extract toolCallId from body if present
+            if not tool_call_id and request_body.get("message") and request_body["message"].get("toolCalls"):
+                tool_calls = request_body["message"]["toolCalls"]
+                if tool_calls and len(tool_calls) > 0:
+                    tool_call_id = tool_calls[0].get("id")
+            
+            property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
+            requested_start_at = requested_start_at or request_body.get("requested_start_at") or request_body.get("requestedStartAt")
+            requested_end_at = requested_end_at or request_body.get("requested_end_at") or request_body.get("requestedEndAt")
         except:
             pass  # Body might not be JSON or already consumed
     
@@ -9924,6 +9966,19 @@ async def validate_tour_request(
         raise HTTPException(
             status_code=400,
             detail="property_name is required. Please provide the property name or address."
+        )
+    
+    # Validate required datetime fields
+    if not requested_start_at or not requested_start_at.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="requested_start_at is required. Please provide the requested start time in ISO format (e.g., 2025-12-01T16:00:00Z)."
+        )
+    
+    if not requested_end_at or not requested_end_at.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="requested_end_at is required. Please provide the requested end time in ISO format (e.g., 2025-12-01T16:30:00Z)."
         )
     
     # Robust datetime parsing
@@ -9981,12 +10036,14 @@ async def validate_tour_request(
         source_ids = None
         if http_request:
             try:
-                body = await http_request.json()
-            except:
-                body = {}
-            headers = dict(http_request.headers) if http_request else {}
-            user_info = identify_user_from_vapi_request(body, headers)
-            source_ids = user_info.get("source_ids") if user_info else None
+                # Use already parsed request_body if available
+                body = request_body if request_body else {}
+                headers = dict(http_request.headers) if http_request else {}
+                user_info = identify_user_from_vapi_request(body, headers)
+                source_ids = user_info.get("source_ids") if user_info else None
+            except Exception as e:
+                print(f"⚠️  Error identifying user: {e}")
+                pass
         
         # Robust property finding - only use property_name (no property_id)
         property_listing, found_property_id, error_msg = _find_property_robust(
@@ -10003,28 +10060,37 @@ async def validate_tour_request(
         listing_status = meta.get("listing_status", "unknown")
         
         if listing_status != "available":
-            return JSONResponse(content={
+            result_data = {
                 "isAvailable": False,
                 "canBook": False,
                 "reason": f"Property is {listing_status} and not available for tours",
                 "suggestedSlots": []
-            })
+            }
+            if tool_call_id:
+                return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
+            else:
+                return JSONResponse(content=result_data)
         
         # Get assigned user (realtor if assigned, else PM)
         assigned_user = _get_property_assigned_user(session, property_id)
         if not assigned_user:
-            return JSONResponse(content={
+            result_data = {
                 "isAvailable": False,
                 "canBook": False,
                 "reason": "Property has no assigned PM or Realtor",
                 "suggestedSlots": []
-            })
+            }
+            if tool_call_id:
+                return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
+            else:
+                return JSONResponse(content=result_data)
         
         # Verify the call is for the correct PM/Realtor (optional validation)
         # This ensures the booking is for the right person
         if http_request:
             try:
-                body = await http_request.json() if hasattr(http_request, 'json') else {}
+                # Use already parsed request_body if available, otherwise try to get from request
+                body = request_body if request_body else {}
                 headers = dict(http_request.headers)
                 user_info = identify_user_from_vapi_request(body, headers)
                 
@@ -10066,9 +10132,10 @@ async def validate_tour_request(
                 requested_slot_available = True
                 break
         
+        # Prepare result data
         if requested_slot_available:
             # Requested time is available - can book
-            return JSONResponse(content={
+            result_data = {
                 "isAvailable": True,
                 "canBook": True,
                 "propertyId": property_id,
@@ -10084,7 +10151,7 @@ async def validate_tour_request(
                 },
                 "timezone": prefs["timezone"],
                 "message": "Requested time slot is available"
-            })
+            }
         else:
             # Requested time is not available - suggest alternatives
             # Get 2-3 next available slots (prefer slots close to requested time)
@@ -10099,7 +10166,7 @@ async def validate_tour_request(
             # Take up to 3 suggestions
             suggested_slots = sorted_slots[:3]
             
-            return JSONResponse(content={
+            result_data = {
                 "isAvailable": False,
                 "canBook": False,
                 "propertyId": property_id,
@@ -10117,7 +10184,13 @@ async def validate_tour_request(
                 },
                 "timezone": prefs["timezone"],
                 "message": f"Requested time is not available. Here are {len(suggested_slots)} alternative options."
-            })
+            }
+        
+        # Return in VAPI format if toolCallId is present, otherwise return direct JSON
+        if tool_call_id:
+            return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
+        else:
+            return JSONResponse(content=result_data)
 
 
 # Get Bookings by Visitor (VAPI) - POST only, no property_id needed
@@ -10139,10 +10212,15 @@ async def get_bookings_by_visitor_vapi(
     VAPI calls this to check booking status or get booking details.
     No property_id needed - only user-provided info (name, phone).
     """
+    # Parse request body once
+    request_body = {}
+    tool_call_id = None
+    
     # Extract parameters from VapiRequest toolCalls if provided
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
             if tool_call.function.name in ["getBookingStatus", "checkBooking", "getBookings", "getBookingsByVisitor"]:
+                tool_call_id = tool_call.id
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -10158,10 +10236,16 @@ async def get_bookings_by_visitor_vapi(
     # If still missing, try to get from request body directly
     if not visitor_phone and not visitor_name:
         try:
-            body = await http_request.json()
-            visitor_phone = visitor_phone or body.get("visitor_phone") or body.get("visitorPhone")
-            visitor_name = visitor_name or body.get("visitor_name") or body.get("visitorName")
-            status = status or body.get("status")
+            request_body = await http_request.json()
+            # Extract toolCallId from body if present
+            if not tool_call_id and request_body.get("message") and request_body["message"].get("toolCalls"):
+                tool_calls = request_body["message"]["toolCalls"]
+                if tool_calls and len(tool_calls) > 0:
+                    tool_call_id = tool_calls[0].get("id")
+            
+            visitor_phone = visitor_phone or request_body.get("visitor_phone") or request_body.get("visitorPhone")
+            visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
+            status = status or request_body.get("status")
         except:
             pass  # Body might not be JSON or already consumed
     
@@ -10264,7 +10348,11 @@ async def get_bookings_by_visitor_vapi(
         else:
             response_data["message"] = f"Found {len(bookings)} booking(s)"
         
-        return JSONResponse(content=response_data)
+        # Return in VAPI format if toolCallId is present, otherwise return direct JSON
+        if tool_call_id:
+            return {"results": [{"toolCallId": tool_call_id, "result": response_data}]}
+        else:
+            return JSONResponse(content=response_data)
 
 
 # Cancel/Delete Booking by Visitor (VAPI) - Handles both bookings and pending requests
@@ -10293,10 +10381,15 @@ async def cancel_booking_vapi(
     VAPI should call this when user wants to cancel a tour booking.
     No property_id needed - only user-provided info (name, phone, property_name).
     """
+    # Parse request body once
+    request_body = {}
+    tool_call_id = None
+    
     # Extract parameters from VapiRequest toolCalls if provided
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
             if tool_call.function.name in ["cancelBooking", "cancelTour", "deleteTourRequest", "cancelBookingRequest"]:
+                tool_call_id = tool_call.id
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -10313,11 +10406,17 @@ async def cancel_booking_vapi(
     # If still missing, try to get from request body directly
     if not visitor_phone and not visitor_name:
         try:
-            body = await http_request.json()
-            property_name = property_name or body.get("property_name") or body.get("propertyName")
-            visitor_phone = visitor_phone or body.get("visitor_phone") or body.get("visitorPhone")
-            visitor_name = visitor_name or body.get("visitor_name") or body.get("visitorName")
-            reason = reason or body.get("reason")
+            request_body = await http_request.json()
+            # Extract toolCallId from body if present
+            if not tool_call_id and request_body.get("message") and request_body["message"].get("toolCalls"):
+                tool_calls = request_body["message"]["toolCalls"]
+                if tool_calls and len(tool_calls) > 0:
+                    tool_call_id = tool_calls[0].get("id")
+            
+            property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
+            visitor_phone = visitor_phone or request_body.get("visitor_phone") or request_body.get("visitorPhone")
+            visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
+            reason = reason or request_body.get("reason")
         except:
             pass  # Body might not be JSON or already consumed
     
@@ -10486,7 +10585,7 @@ async def cancel_booking_vapi(
             else:
                 booking.property_address = "Unknown"
         
-        response = {
+        response_data = {
             "message": f"Successfully processed {total_processed} booking(s)",
             "cancelledBookings": [{
                 "bookingId": b.booking_id,
@@ -10508,7 +10607,11 @@ async def cancel_booking_vapi(
             } for b in deleted_requests]
         }
         
-        return JSONResponse(content=response)
+        # Return in VAPI format if toolCallId is present, otherwise return direct JSON
+        if tool_call_id:
+            return {"results": [{"toolCallId": tool_call_id, "result": response_data}]}
+        else:
+            return JSONResponse(content=response_data)
 
 
 if __name__ == "__main__":
