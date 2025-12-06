@@ -8690,32 +8690,34 @@ async def create_booking_request_vapi(
         print(f"⚠️  Error in initial setup: {e}")
         # Continue with empty values
     
-    # Extract parameters from VapiRequest toolCalls if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
-        for tool_call in request.message.toolCalls:
-            if tool_call.function.name in ["createBooking", "requestTour", "bookTour", "createBookingRequest"]:
-                tool_call_id = tool_call.id
-                args = tool_call.function.arguments
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except:
-                        args = {}
-                
-                property_name = property_name or args.get("property_name") or args.get("propertyName")
-                visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
-                visitor_phone = visitor_phone or args.get("visitor_phone") or args.get("visitorPhone")
-                visitor_email = visitor_email or args.get("visitor_email") or args.get("visitorEmail")
-                requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
-                requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
-                timezone = timezone or args.get("timezone") or "America/New_York"
-                notes = notes or args.get("notes")
-                print(f"📋 Extracted from tool call: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={timezone}")
-                break
-    
-    # If still missing, try to get from request body directly (already parsed above)
-    if not property_name or not visitor_name or not visitor_phone:
-        property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
+    # Wrap main function body in try-except for error handling
+    try:
+        # Extract parameters from VapiRequest toolCalls if provided
+        if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
+            for tool_call in request.message.toolCalls:
+                if tool_call.function.name in ["createBooking", "requestTour", "bookTour", "createBookingRequest"]:
+                    tool_call_id = tool_call.id
+                    args = tool_call.function.arguments
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except:
+                            args = {}
+                    
+                    property_name = property_name or args.get("property_name") or args.get("propertyName")
+                    visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
+                    visitor_phone = visitor_phone or args.get("visitor_phone") or args.get("visitorPhone")
+                    visitor_email = visitor_email or args.get("visitor_email") or args.get("visitorEmail")
+                    requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
+                    requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
+                    timezone = timezone or args.get("timezone") or "America/New_York"
+                    notes = notes or args.get("notes")
+                    print(f"📋 Extracted from tool call: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={timezone}")
+                    break
+        
+        # If still missing, try to get from request body directly (already parsed above)
+        if not property_name or not visitor_name or not visitor_phone:
+            property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
         visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
         visitor_phone = visitor_phone or request_body.get("visitor_phone") or request_body.get("visitorPhone")
         visitor_email = visitor_email or request_body.get("visitor_email") or request_body.get("visitorEmail")
@@ -8723,238 +8725,285 @@ async def create_booking_request_vapi(
         requested_end_at = requested_end_at or request_body.get("requested_end_at") or request_body.get("requestedEndAt")
         timezone = timezone or request_body.get("timezone") or "America/New_York"
         notes = notes or request_body.get("notes")
-    
-    # Set defaults
-    if not timezone:
-        timezone = "America/New_York"
-    
-    # Validate required fields - property_name is required (no property_id from VAPI)
-    if not property_name or not property_name.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="property_name is required. Please provide the property name or address."
-        )
-    
-    if not visitor_name or not visitor_name.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="visitor_name is required and cannot be empty."
-        )
-    
-    if not visitor_phone or not visitor_phone.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="visitor_phone is required. Please provide a valid phone number."
-        )
-    
-    # Validate required datetime fields
-    if not requested_start_at or not requested_start_at.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="requested_start_at is required. Please provide the requested start time in ISO format (e.g., 2025-12-01T16:00:00Z)."
-        )
-    
-    if not requested_end_at or not requested_end_at.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="requested_end_at is required. Please provide the requested end time in ISO format (e.g., 2025-12-01T16:30:00Z)."
-        )
-    
-    # Robust datetime parsing
-    print(f"🔍 Parsing dates: requested_start_at='{requested_start_at}', requested_end_at='{requested_end_at}', timezone='{timezone}'")
-    try:
-        start_dt = _parse_datetime_robust(requested_start_at, "requested_start_at")
-        end_dt = _parse_datetime_robust(requested_end_at, "requested_end_at")
-        print(f"✅ Parsed dates: start_dt={start_dt} (tzinfo={start_dt.tzinfo}), end_dt={end_dt} (tzinfo={end_dt.tzinfo})")
-    except HTTPException as e:
-        print(f"❌ HTTPException parsing dates: {e.detail}")
-        raise
-    except Exception as e:
-        print(f"❌ Exception parsing dates: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=400,
-            detail=f"Error parsing dates: {str(e)}. Please use ISO format (e.g., 2025-12-01T16:00:00Z)"
-        )
-    
-    # Validate time constraints
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
-    two_weeks_from_now = now + timedelta(days=14)
-    print(f"🔍 Time validation: now={now}, start_dt={start_dt}, end_dt={end_dt}")
-    
-    # Ensure both datetimes are timezone-aware for comparison
-    if start_dt.tzinfo is None:
-        print(f"⚠️  start_dt is timezone-naive, assuming UTC")
-        start_dt = start_dt.replace(tzinfo=timezone.utc)
-    if end_dt.tzinfo is None:
-        print(f"⚠️  end_dt is timezone-naive, assuming UTC")
-        end_dt = end_dt.replace(tzinfo=timezone.utc)
-    
-    if start_dt < now:
-        hours_ago = (now - start_dt).total_seconds() / 3600
-        raise HTTPException(
-            status_code=400,
-            detail=f"Requested start time cannot be in the past. The time was {hours_ago:.1f} hours ago."
-        )
-    
-    if start_dt > two_weeks_from_now:
-        days_ahead = (start_dt - now).days
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tour requests must be within 2 weeks. The requested time is {days_ahead} days away."
-        )
-    
-    if end_dt <= start_dt:
-        raise HTTPException(
-            status_code=400,
-            detail="End time must be after start time."
-        )
-    
-    # Validate duration
-    duration_minutes = (end_dt - start_dt).total_seconds() / 60
-    if duration_minutes < 15:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tour duration is too short ({duration_minutes:.0f} minutes). Minimum is 15 minutes."
-        )
-    if duration_minutes > 120:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tour duration is too long ({duration_minutes:.0f} minutes). Maximum is 2 hours."
-        )
-    
-    # Robust phone normalization
-    try:
-        normalized_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
-    except HTTPException:
-        raise
-    
-    with Session(engine) as session:
-        # Get source_ids for property search if needed (using already parsed body)
-        source_ids = None
-        if http_request:
-            try:
-                from DB.vapi_helpers import identify_user_from_vapi_request
-                user_info = identify_user_from_vapi_request(request_body, request_headers)
-                source_ids = user_info.get("source_ids") if user_info else None
-            except Exception as e:
-                print(f"⚠️  Error identifying user from VAPI request: {e}")
-                pass
         
-        # Robust property finding - only use property_name (no property_id)
-        property_listing, found_property_id, error_msg = _find_property_robust(
-            session, None, property_name, source_ids  # No property_id, only property_name
-        )
+        # Set defaults
+        if not timezone:
+            timezone = "America/New_York"
         
-        if not property_listing:
-            raise HTTPException(status_code=404, detail=error_msg or "Property not found.")
-        
-        property_id = found_property_id  # Use found property_id
-        
-        meta = property_listing.listing_metadata or {}
-        listing_status = meta.get("listing_status", "unknown")
-        if listing_status != "available":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Property is not available for tours. Current status: {listing_status}. Only properties with status 'available' can accept tour bookings."
-            )
-        
-        # Get assigned user (realtor if assigned, else PM)
-        assigned_user = _get_property_assigned_user(session, property_id)
-        if not assigned_user:
+        # Validate required fields - property_name is required (no property_id from VAPI)
+        if not property_name or not property_name.strip():
             raise HTTPException(
                 status_code=400,
-                detail="Property has no assigned PM or Realtor. Please assign a user to the property before creating bookings."
+                detail="property_name is required. Please provide the property name or address."
             )
         
-        # Extract call record information from headers (if booking came from VAPI call)
-        vapi_call_id = None
-        call_transcript = None
-        call_recording_url = None
+        if not visitor_name or not visitor_name.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="visitor_name is required and cannot be empty."
+            )
         
-        if http_request:
-            try:
-                # Use already parsed headers
-                header_keys_lower = {k.lower(): v for k, v in request_headers.items()}
-                
-                # Extract call_id from headers
-                vapi_call_id = header_keys_lower.get("x-call-id") or header_keys_lower.get("x-vapi-call-id")
-                
-                # If we have a call_id, try to get call record from database
-                if vapi_call_id:
-                    call_record = session.exec(
-                        select(CallRecord).where(CallRecord.call_id == vapi_call_id)
-                    ).first()
+        if not visitor_phone or not visitor_phone.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="visitor_phone is required. Please provide a valid phone number."
+            )
+        
+        # Validate required datetime fields
+        if not requested_start_at or not requested_start_at.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="requested_start_at is required. Please provide the requested start time in ISO format (e.g., 2025-12-01T16:00:00Z)."
+            )
+        
+        if not requested_end_at or not requested_end_at.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="requested_end_at is required. Please provide the requested end time in ISO format (e.g., 2025-12-01T16:30:00Z)."
+            )
+        
+        # Robust datetime parsing
+        print(f"🔍 Parsing dates: requested_start_at='{requested_start_at}', requested_end_at='{requested_end_at}', timezone='{timezone}'")
+        try:
+            start_dt = _parse_datetime_robust(requested_start_at, "requested_start_at")
+            end_dt = _parse_datetime_robust(requested_end_at, "requested_end_at")
+            print(f"✅ Parsed dates: start_dt={start_dt} (tzinfo={start_dt.tzinfo}), end_dt={end_dt} (tzinfo={end_dt.tzinfo})")
+        except HTTPException as e:
+            print(f"❌ HTTPException parsing dates: {e.detail}")
+            raise
+        except Exception as e:
+            print(f"❌ Exception parsing dates: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error parsing dates: {str(e)}. Please use ISO format (e.g., 2025-12-01T16:00:00Z)"
+            )
+        
+        # Validate time constraints
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        two_weeks_from_now = now + timedelta(days=14)
+        print(f"🔍 Time validation: now={now}, start_dt={start_dt}, end_dt={end_dt}")
+        
+        # Ensure both datetimes are timezone-aware for comparison
+        if start_dt.tzinfo is None:
+            print(f"⚠️  start_dt is timezone-naive, assuming UTC")
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            print(f"⚠️  end_dt is timezone-naive, assuming UTC")
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        
+        if start_dt < now:
+            hours_ago = (now - start_dt).total_seconds() / 3600
+            raise HTTPException(
+                status_code=400,
+                detail=f"Requested start time cannot be in the past. The time was {hours_ago:.1f} hours ago."
+            )
+        
+        if start_dt > two_weeks_from_now:
+            days_ahead = (start_dt - now).days
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tour requests must be within 2 weeks. The requested time is {days_ahead} days away."
+            )
+        
+        if end_dt <= start_dt:
+            raise HTTPException(
+                status_code=400,
+                detail="End time must be after start time."
+            )
+        
+        # Validate duration
+        duration_minutes = (end_dt - start_dt).total_seconds() / 60
+        if duration_minutes < 15:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tour duration is too short ({duration_minutes:.0f} minutes). Minimum is 15 minutes."
+            )
+        if duration_minutes > 120:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tour duration is too long ({duration_minutes:.0f} minutes). Maximum is 2 hours."
+            )
+        
+        # Robust phone normalization
+        try:
+            normalized_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
+        except HTTPException:
+            raise
+        
+        with Session(engine) as session:
+            # Get source_ids for property search if needed (using already parsed body)
+            source_ids = None
+            if http_request:
+                try:
+                    from DB.vapi_helpers import identify_user_from_vapi_request
+                    user_info = identify_user_from_vapi_request(request_body, request_headers)
+                    source_ids = user_info.get("source_ids") if user_info else None
+                except Exception as e:
+                    print(f"⚠️  Error identifying user from VAPI request: {e}")
+                    pass
+            
+            # Robust property finding - only use property_name (no property_id)
+            property_listing, found_property_id, error_msg = _find_property_robust(
+                session, None, property_name, source_ids  # No property_id, only property_name
+            )
+            
+            if not property_listing:
+                raise HTTPException(status_code=404, detail=error_msg or "Property not found.")
+            
+            property_id = found_property_id  # Use found property_id
+            
+            meta = property_listing.listing_metadata or {}
+            listing_status = meta.get("listing_status", "unknown")
+            listing_status_lower = str(listing_status).lower().strip() if listing_status else ""
+            
+            # ULTRA LENIENT: Only block explicitly unavailable statuses
+            unavailable_statuses = ["sold", "rented", "closed", "withdrawn", "cancelled"]
+            is_unavailable = listing_status_lower in unavailable_statuses
+            
+            if is_unavailable:
+                error_result = {
+                    "error": True,
+                    "statusCode": 409,
+                    "message": f"Property is {listing_status} and not available for tours",
+                    "propertyName": property_name
+                }
+                if tool_call_id:
+                    return {"results": [{"toolCallId": tool_call_id, "result": error_result}]}
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Property is {listing_status} and not available for tours"
+                )
+            
+            # Get assigned user (realtor if assigned, else PM) - with fallbacks
+            assigned_user = _get_property_assigned_user(session, property_id)
+            
+            # Fallback: If no assigned user, try to find from source
+            if not assigned_user:
+                print(f"⚠️  No assigned user found - trying fallback strategies...")
+                source = session.get(Source, property_listing.source_id)
+                if source:
+                    if source.property_manager_id:
+                        pm = session.get(PropertyManager, source.property_manager_id)
+                        if pm:
+                            print(f"✅ Found fallback PM: {pm.name}")
+                            assigned_user = {
+                                "user_id": pm.property_manager_id,
+                                "user_type": "property_manager",
+                                "name": pm.name
+                            }
+                    if not assigned_user and source.realtor_id:
+                        realtor = session.get(Realtor, source.realtor_id)
+                        if realtor:
+                            print(f"✅ Found fallback Realtor: {realtor.name}")
+                            assigned_user = {
+                                "user_id": realtor.realtor_id,
+                                "user_type": "realtor",
+                                "name": realtor.name
+                            }
+            
+            if not assigned_user:
+                error_result = {
+                    "error": True,
+                    "statusCode": 400,
+                    "message": "Property has no assigned PM or Realtor. Please assign a user to the property before creating bookings.",
+                    "propertyName": property_name
+                }
+                if tool_call_id:
+                    return {"results": [{"toolCallId": tool_call_id, "result": error_result}]}
+                raise HTTPException(
+                    status_code=400,
+                    detail="Property has no assigned PM or Realtor. Please assign a user to the property before creating bookings."
+                )
+        
+            # Extract call record information from headers (if booking came from VAPI call)
+            vapi_call_id = None
+            call_transcript = None
+            call_recording_url = None
+            
+            if http_request:
+                try:
+                    # Use already parsed headers
+                    header_keys_lower = {k.lower(): v for k, v in request_headers.items()}
                     
-                    if call_record:
-                        call_transcript = call_record.transcript
-                        call_recording_url = call_record.recording_url
-                        print(f"✅ Linked booking to call record: {vapi_call_id}")
-            except Exception as e:
-                print(f"⚠️  Error extracting call record info: {e}")
-                # Don't fail the booking creation if call record linking fails
-        
-        # Create booking
-        booking = PropertyTourBooking(
-            property_id=property_id,
-            assigned_to_user_id=assigned_user["user_id"],
-            assigned_to_user_type=assigned_user["user_type"],
-            visitor_name=visitor_name,
-            visitor_phone=normalized_phone,
-            visitor_email=visitor_email,
-            requested_at=datetime.utcnow(),
-            start_at=start_dt,
-            end_at=end_dt,
-            timezone=timezone,
-            status="pending",
-            created_by="vapi",  # Always "vapi" for VAPI endpoint
-            notes=notes,
-            vapi_call_id=vapi_call_id,
-            call_transcript=call_transcript,
-            call_recording_url=call_recording_url,
-            audit_log=[{
-                "actorId": None,
-                "action": "created",
-                "timestamp": datetime.utcnow().isoformat(),
-                "reason": "Created by vapi"
-            }]
-        )
-        
-        session.add(booking)
-        session.commit()
-        session.refresh(booking)
-        
-        # Notify assigned user (don't fail booking creation if SMS fails)
-        try:
-            if assigned_user.get("phone"):
-                notification_msg = f"New tour booking request from {visitor_name} ({normalized_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
-                _send_sms_notification(assigned_user["phone"], notification_msg)
-        except Exception as e:
-            print(f"⚠️  Failed to send SMS notification: {str(e)}")
-        
-        # Also notify PM if different from assigned user
-        try:
-            source = session.get(Source, property_listing.source_id)
-            if source and source.property_manager_id != assigned_user["user_id"]:
-                pm = session.get(PropertyManager, source.property_manager_id)
-                if pm and pm.contact:
+                    # Extract call_id from headers
+                    vapi_call_id = header_keys_lower.get("x-call-id") or header_keys_lower.get("x-vapi-call-id")
+                    
+                    # If we have a call_id, try to get call record from database
+                    if vapi_call_id:
+                        call_record = session.exec(
+                            select(CallRecord).where(CallRecord.call_id == vapi_call_id)
+                        ).first()
+                        
+                        if call_record:
+                            call_transcript = call_record.transcript
+                            call_recording_url = call_record.recording_url
+                            print(f"✅ Linked booking to call record: {vapi_call_id}")
+                except Exception as e:
+                    print(f"⚠️  Error extracting call record info: {e}")
+                    # Don't fail the booking creation if call record linking fails
+            
+            # Create booking
+            booking = PropertyTourBooking(
+                property_id=property_id,
+                assigned_to_user_id=assigned_user["user_id"],
+                assigned_to_user_type=assigned_user["user_type"],
+                visitor_name=visitor_name,
+                visitor_phone=normalized_phone,
+                visitor_email=visitor_email,
+                requested_at=datetime.utcnow(),
+                start_at=start_dt,
+                end_at=end_dt,
+                timezone=timezone,
+                status="pending",
+                created_by="vapi",  # Always "vapi" for VAPI endpoint
+                notes=notes,
+                vapi_call_id=vapi_call_id,
+                call_transcript=call_transcript,
+                call_recording_url=call_recording_url,
+                audit_log=[{
+                    "actorId": None,
+                    "action": "created",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "reason": "Created by vapi"
+                }]
+            )
+            
+            session.add(booking)
+            session.commit()
+            session.refresh(booking)
+            
+            # Notify assigned user (don't fail booking creation if SMS fails)
+            try:
+                if assigned_user.get("phone"):
                     notification_msg = f"New tour booking request from {visitor_name} ({normalized_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
-                    _send_sms_notification(pm.contact, notification_msg)
-        except Exception as e:
-            print(f"⚠️  Failed to send PM SMS notification: {str(e)}")
-        
-        result_data = {
-            "bookingId": booking.booking_id,
-            "status": "pending",
-            "message": "Booking request created successfully. Awaiting approval."
-        }
-        
-        # Return in VAPI format if toolCallId is present, otherwise return direct JSON
-        if tool_call_id:
-            return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
-        else:
-            return JSONResponse(content=result_data, status_code=201)
+                    _send_sms_notification(assigned_user["phone"], notification_msg)
+            except Exception as e:
+                print(f"⚠️  Failed to send SMS notification: {str(e)}")
+            
+            # Also notify PM if different from assigned user
+            try:
+                source = session.get(Source, property_listing.source_id)
+                if source and source.property_manager_id != assigned_user["user_id"]:
+                    pm = session.get(PropertyManager, source.property_manager_id)
+                    if pm and pm.contact:
+                        notification_msg = f"New tour booking request from {visitor_name} ({normalized_phone}) for {meta.get('address', 'property')} on {start_dt.strftime('%Y-%m-%d %H:%M')}"
+                        _send_sms_notification(pm.contact, notification_msg)
+            except Exception as e:
+                print(f"⚠️  Failed to send PM SMS notification: {str(e)}")
+            
+            result_data = {
+                "bookingId": booking.booking_id,
+                "status": "pending",
+                "message": "Booking request created successfully. Awaiting approval."
+            }
+            
+            # Return in VAPI format if toolCallId is present, otherwise return direct JSON
+            if tool_call_id:
+                return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
+            else:
+                return JSONResponse(content=result_data, status_code=201)
     
     except HTTPException as e:
         # Convert HTTPException to VAPI format if toolCallId is present
