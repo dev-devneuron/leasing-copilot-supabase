@@ -8654,7 +8654,7 @@ async def create_booking_request_vapi(
     visitor_email: Optional[str] = Body(None),
     requested_start_at: Optional[str] = Body(None),
     requested_end_at: Optional[str] = Body(None),
-    timezone: Optional[str] = Body(None),
+    tz_str: Optional[str] = Body(None),  # Timezone string (e.g., "America/New_York")
     notes: Optional[str] = Body(None)
 ):
     """
@@ -8707,9 +8707,9 @@ async def create_booking_request_vapi(
                                 visitor_email = visitor_email or args.get("visitor_email") or args.get("visitorEmail")
                                 requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
                                 requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
-                                timezone = timezone or args.get("timezone") or "America/New_York"
+                                tz_str = tz_str or args.get("timezone") or "America/New_York"
                                 notes = notes or args.get("notes")
-                                print(f"📋 Extracted from request body toolCalls: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={timezone}")
+                                print(f"📋 Extracted from request body toolCalls: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={tz_str}")
                             else:
                                 print(f"⚠️  No arguments found in tool call function or args is empty")
                         else:
@@ -8745,25 +8745,25 @@ async def create_booking_request_vapi(
                     visitor_email = visitor_email or args.get("visitor_email") or args.get("visitorEmail")
                     requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
                     requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
-                    timezone = timezone or args.get("timezone") or "America/New_York"
+                    tz_str = tz_str or args.get("timezone") or "America/New_York"
                     notes = notes or args.get("notes")
-                    print(f"📋 Extracted from tool call: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={timezone}")
+                    print(f"📋 Extracted from tool call: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={tz_str}")
                     break
         
         # If still missing, try to get from request body directly (already parsed above)
         if not property_name or not visitor_name or not visitor_phone:
             property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
-        visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
-        visitor_phone = visitor_phone or request_body.get("visitor_phone") or request_body.get("visitorPhone")
-        visitor_email = visitor_email or request_body.get("visitor_email") or request_body.get("visitorEmail")
-        requested_start_at = requested_start_at or request_body.get("requested_start_at") or request_body.get("requestedStartAt")
-        requested_end_at = requested_end_at or request_body.get("requested_end_at") or request_body.get("requestedEndAt")
-        timezone = timezone or request_body.get("timezone") or "America/New_York"
-        notes = notes or request_body.get("notes")
+            visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
+            visitor_phone = visitor_phone or request_body.get("visitor_phone") or request_body.get("visitorPhone")
+            visitor_email = visitor_email or request_body.get("visitor_email") or request_body.get("visitorEmail")
+            requested_start_at = requested_start_at or request_body.get("requested_start_at") or request_body.get("requestedStartAt")
+            requested_end_at = requested_end_at or request_body.get("requested_end_at") or request_body.get("requestedEndAt")
+            tz_str = tz_str or request_body.get("timezone") or "America/New_York"
+            notes = notes or request_body.get("notes")
         
         # Set defaults
-        if not timezone:
-            timezone = "America/New_York"
+        if not tz_str:
+            tz_str = "America/New_York"
         
         # Validate required fields - property_name is required (no property_id from VAPI)
         if not property_name or not property_name.strip():
@@ -8798,7 +8798,7 @@ async def create_booking_request_vapi(
             )
         
         # Robust datetime parsing
-        print(f"🔍 Parsing dates: requested_start_at='{requested_start_at}', requested_end_at='{requested_end_at}', timezone='{timezone}'")
+        print(f"🔍 Parsing dates: requested_start_at='{requested_start_at}', requested_end_at='{requested_end_at}', timezone='{tz_str}'")
         try:
             start_dt = _parse_datetime_robust(requested_start_at, "requested_start_at")
             end_dt = _parse_datetime_robust(requested_end_at, "requested_end_at")
@@ -8990,7 +8990,7 @@ async def create_booking_request_vapi(
                 requested_at=datetime.utcnow(),
                 start_at=start_dt,
                 end_at=end_dt,
-                timezone=timezone,
+                timezone=tz_str,
                 status="pending",
                 created_by="vapi",  # Always "vapi" for VAPI endpoint
                 notes=notes,
