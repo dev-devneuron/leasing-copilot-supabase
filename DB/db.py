@@ -1607,9 +1607,17 @@ def search_apartments(query: str, source_ids: Optional[List[int]] = None, k: int
         )
         params = {"source_ids": source_ids, "k": k}
     else:
-        # source_ids is None - user not identified, return empty (fail secure)
-        print("⚠️  No source_ids provided - returning empty results for security")
-        return []
+        # source_ids is None - search all listings (for VAPI endpoints when user identification fails)
+        # Note: This is allowed for VAPI endpoints that need to work even without user identification
+        print("⚠️  No source_ids provided - searching all listings (VAPI mode)")
+        sql = text(
+            f"""
+            SELECT listing_metadata FROM apartmentlisting
+            ORDER BY embedding <=> '{qvec_str}'::vector
+            LIMIT :k
+        """
+        )
+        params = {"k": k}
     
     with SessionLocal() as session:
         rows = session.execute(sql, params).all()

@@ -10016,16 +10016,22 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
         rag = RAGEngine()
         
         try:
-            # Try search with source_ids restriction first (if provided)
-            # If that fails or source_ids is None, try without restriction
+            # Try search with source_ids restriction first (if provided and not empty)
+            # If that fails or source_ids is None/empty, try without restriction
             search_results = []
-            if source_ids:
-                search_results = rag.search_apartments(property_name, source_ids=source_ids, k=3)
+            
+            # Only try with source_ids if it's a non-empty list
+            if source_ids and isinstance(source_ids, list) and len(source_ids) > 0:
+                print(f"🔍 Searching with source_ids restriction: {source_ids}")
+                search_results = rag.search_apartments(property_name, source_ids=source_ids, k=5)
+                print(f"   Found {len(search_results)} results with source_ids restriction")
             
             # If no results with source_ids restriction, try without restriction
             # This allows VAPI calls to work even when user identification fails
             if not search_results:
-                search_results = rag.search_apartments(property_name, source_ids=None, k=3)
+                print(f"🔍 Searching without source_ids restriction (source_ids={source_ids})")
+                search_results = rag.search_apartments(property_name, source_ids=None, k=5)
+                print(f"   Found {len(search_results)} results without restriction")
             
             if search_results and len(search_results) > 0:
                 # Normalize search name for better matching
