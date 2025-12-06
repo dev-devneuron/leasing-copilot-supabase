@@ -9403,36 +9403,64 @@ async def approve_booking(
             raise HTTPException(status_code=400, detail=f"Booking is not pending (current status: {booking.status})")
         
         # Atomically check for conflicts
+        print(f"🔍 Checking for conflicts: booking_id={booking_id}, user_id={user_id}, user_type={user_type}, start_at={booking.start_at}, end_at={booking.end_at}")
+        
+        # Ensure booking datetimes are timezone-aware for comparison
+        booking_start = booking.start_at
+        booking_end = booking.end_at
+        if booking_start.tzinfo is None:
+            booking_start = booking_start.replace(tzinfo=timezone.utc)
+            print(f"⚠️  booking.start_at was timezone-naive, converted to UTC")
+        if booking_end.tzinfo is None:
+            booking_end = booking_end.replace(tzinfo=timezone.utc)
+            print(f"⚠️  booking.end_at was timezone-naive, converted to UTC")
+        
         conflicting_bookings = session.exec(
             select(PropertyTourBooking).where(
                 PropertyTourBooking.assigned_to_user_id == user_id,
                 PropertyTourBooking.assigned_to_user_type == user_type,
                 PropertyTourBooking.status == "approved",
                 PropertyTourBooking.booking_id != booking_id,
-                or_(
-                    and_(
-                        PropertyTourBooking.start_at < booking.end_at,
-                        PropertyTourBooking.end_at > booking.start_at
-                    )
+                and_(
+                    PropertyTourBooking.start_at < booking_end,
+                    PropertyTourBooking.end_at > booking_start
                 )
             )
         ).all()
         
         if conflicting_bookings:
+            conflict_ids = [b.booking_id for b in conflicting_bookings]
+            print(f"❌ Found conflicting bookings: {conflict_ids}")
             raise HTTPException(
                 status_code=409,
-                detail="Time slot conflicts with an existing approved booking"
+                detail=f"Time slot conflicts with an existing approved booking (IDs: {', '.join(map(str, conflict_ids))})"
             )
+        print(f"✅ No time slot conflicts found")
         
-        # Check property status
+        # Check property status (lenient - only block explicitly unavailable statuses)
         property_listing = session.get(ApartmentListing, booking.property_id)
+        print(f"🔍 Checking property status: property_id={booking.property_id}")
         if property_listing:
             meta = property_listing.listing_metadata or {}
-            if meta.get("listing_status") != "available":
+            listing_status = meta.get("listing_status", "unknown")
+            listing_status_lower = str(listing_status).lower().strip() if listing_status else ""
+            print(f"🔍 Property listing_status: '{listing_status}' (lowercase: '{listing_status_lower}')")
+            
+            # ULTRA LENIENT: Only block explicitly unavailable statuses
+            unavailable_statuses = ["sold", "rented", "closed", "withdrawn", "cancelled", "off-market", "off market", "unavailable", "pending"]
+            is_unavailable = listing_status_lower in unavailable_statuses
+            print(f"🔍 Is unavailable: {is_unavailable} (checked against: {unavailable_statuses})")
+            
+            if is_unavailable:
+                print(f"❌ Property is unavailable with status: {listing_status}")
                 raise HTTPException(
                     status_code=409,
-                    detail=f"Property is no longer available (status: {meta.get('listing_status')})"
+                    detail=f"Property is no longer available (status: {listing_status})"
                 )
+            print(f"✅ Property status is acceptable: {listing_status}")
+            # If status is "available", "Available", "AVAILABLE", or any other status not in unavailable list, allow approval
+        else:
+            print(f"⚠️  Property listing not found for property_id={booking.property_id}, allowing approval anyway")
         
         # Update booking status
         booking.status = "approved"
