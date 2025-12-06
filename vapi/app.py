@@ -8677,22 +8677,57 @@ async def create_booking_request_vapi(
             try:
                 request_body = await http_request.json()
                 request_headers = dict(http_request.headers)
-                # Extract toolCallId from body if present
+                # Extract toolCallId and arguments from body if present
                 if request_body.get("message") and request_body["message"].get("toolCalls"):
                     tool_calls = request_body["message"]["toolCalls"]
                     if tool_calls and len(tool_calls) > 0:
                         tool_call_id = tool_calls[0].get("id")
                         print(f"✅ Extracted tool_call_id: {tool_call_id}")
+                        
+                        # Extract arguments from the tool call
+                        tool_call_func = tool_calls[0].get("function", {})
+                        print(f"🔍 tool_call_func: {tool_call_func}")
+                        if tool_call_func:
+                            args = tool_call_func.get("arguments", {})
+                            print(f"🔍 Raw args: {args}, type: {type(args)}")
+                            if isinstance(args, str):
+                                try:
+                                    args = json.loads(args)
+                                    print(f"🔍 Parsed args from string: {args}")
+                                except Exception as parse_err:
+                                    print(f"⚠️  Failed to parse args as JSON: {parse_err}")
+                                    args = {}
+                            
+                            # Extract parameters from arguments (always try, even if args is empty)
+                            print(f"🔍 Extracting from args: {args}")
+                            if args:
+                                property_name = property_name or args.get("property_name") or args.get("propertyName")
+                                visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
+                                visitor_phone = visitor_phone or args.get("visitor_phone") or args.get("visitorPhone")
+                                visitor_email = visitor_email or args.get("visitor_email") or args.get("visitorEmail")
+                                requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
+                                requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
+                                timezone = timezone or args.get("timezone") or "America/New_York"
+                                notes = notes or args.get("notes")
+                                print(f"📋 Extracted from request body toolCalls: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={timezone}")
+                            else:
+                                print(f"⚠️  No arguments found in tool call function or args is empty")
+                        else:
+                            print(f"⚠️  No function found in tool call")
             except Exception as e:
                 print(f"⚠️  Error parsing request body: {e}")
+                import traceback
+                traceback.print_exc()
                 # Continue with empty body if parsing fails
     except Exception as e:
         print(f"⚠️  Error in initial setup: {e}")
+        import traceback
+        traceback.print_exc()
         # Continue with empty values
     
     # Wrap main function body in try-except for error handling
     try:
-        # Extract parameters from VapiRequest toolCalls if provided
+        # Extract parameters from VapiRequest toolCalls if provided (fallback)
         if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
             for tool_call in request.message.toolCalls:
                 if tool_call.function.name in ["createBooking", "requestTour", "bookTour", "createBookingRequest"]:
