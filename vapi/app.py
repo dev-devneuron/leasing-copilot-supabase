@@ -1893,40 +1893,177 @@ def get_slots(request: VapiRequest):
                     status_code=400, detail="Missing 'date' or 'address' field"
                 )
 
-            with Session(engine) as session:
-                # 1. Find the listing by matching address substring in text
-                statement = select(ApartmentListing).where(
-                    ApartmentListing.text.contains(address)
-                )
-                listing = session.exec(statement).first()
-                if not listing:
+            # Parse the date
+            try:
+                # Try parsing as ISO date string (YYYY-MM-DD)
+                if isinstance(date, str):
+                    date_obj = datetime.strptime(date, "%Y-%m-%d").date()
+                else:
+                    date_obj = date
+            except ValueError:
+                try:
+                    # Try parsing with _parse_datetime_robust
+                    date_dt = _parse_datetime_robust(date, "date")
+                    date_obj = date_dt.date()
+                except:
                     raise HTTPException(
-                        status_code=404, detail="Listing not found for address"
+                        status_code=400, 
+                        detail=f"Invalid date format: {date}. Please use YYYY-MM-DD format."
                     )
 
-                # 2. Get source using the source_id
-                print("Source ID (slots):", listing.source_id)
-                statement = select(Source).where(Source.source_id == listing.source_id)
-                source = session.exec(statement).first()
-                if not source:
-                    raise HTTPException(status_code=404, detail="Source not found")
-
-                # 3. Access the realtor_id from the source
-                realtor_id = source.realtor_id
-                print("Realtor ID (slots):", source.realtor_id)
-
-            # 🧠 3. Initialize calendar client with correct token
-            calendar = GoogleCalendar(realtor_id)
-
-            slots = calendar.get_free_slots(date)
-            return {
-                "results": [
-                    {
-                        "toolCallId": tool_call.id,
-                        "result": f"Available slots on {date}:\n" + ", ".join(slots),
+            with Session(engine) as session:
+                # Use robust property finding (same as other endpoints)
+                property_listing, found_property_id, error_msg = _find_property_robust(
+                    session, None, address, None  # No property_id, only address
+                )
+                
+                if not property_listing:
+                    error_result = {
+                        "error": True,
+                        "statusCode": 404,
+                        "message": error_msg or f"Property not found for address: {address}",
+                        "address": address
                     }
+                    return {
+                        "results": [
+                            {
+                                "toolCallId": tool_call.id,
+                                "result": error_result
+                            }
+                        ]
+                    }
+
+                # Get assigned user (realtor if assigned, else PM)
+                assigned_user = _get_property_assigned_user(session, found_property_id)
+                if not assigned_user:
+                    error_result = {
+                        "error": True,
+                        "statusCode": 400,
+                        "message": "Property has no assigned PM or Realtor",
+                        "address": address
+                    }
+                    return {
+                        "results": [
+                            {
+                                "toolCallId": tool_call.id,
+                                "result": error_result
+                            }
+                        ]
+                    }
+
+                # Get user's calendar preferences
+                prefs = _get_user_calendar_preferences(session, assigned_user["user_id"], assigned_user["user_type"])
+                
+                # Calculate date range (the requested date)
+                from_dt = datetime.combine(date_obj, datetime.min.time()).replace(tzinfo=timezone.utc)
+                to_dt = datetime.combine(date_obj, datetime.max.time()).replace(tzinfo=timezone.utc)
+                
+                # Get all available slots for the date
+                available_slots = _compute_available_slots(
+                    session,
+                    assigned_user["user_id"],
+                    assigned_user["user_type"],
+                    from_dt,
+                    to_dt
+                )
+                
+                # Filter slots for the requested date only
+                requested_date_slots = [
+                    slot for slot in available_slots
+                    if datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00")).date() == date_obj
                 ]
-            }
+                
+                # Select 3-4 best slots (prefer variety: morning, afternoon, evening)
+                if requested_date_slots:
+                    # Sort by time
+                    requested_date_slots.sort(key=lambda x: x["startAt"])
+                    
+                    # Categorize slots by time of day
+                    morning_slots = []  # 8 AM - 12 PM
+                    afternoon_slots = []  # 12 PM - 5 PM
+                    evening_slots = []  # 5 PM - 9 PM
+                    
+                    for slot in requested_date_slots:
+                        slot_dt = datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00"))
+                        hour = slot_dt.hour
+                        
+                        if 8 <= hour < 12:
+                            morning_slots.append(slot)
+                        elif 12 <= hour < 17:
+                            afternoon_slots.append(slot)
+                        elif 17 <= hour < 21:
+                            evening_slots.append(slot)
+                    
+                    # Select diverse slots (prefer 1-2 from each category)
+                    selected_slots = []
+                    if morning_slots:
+                        selected_slots.append(morning_slots[0])
+                    if afternoon_slots:
+                        selected_slots.append(afternoon_slots[0])
+                    if evening_slots:
+                        selected_slots.append(evening_slots[0])
+                    
+                    # Add more slots if we have less than 3
+                    remaining_slots = [s for s in requested_date_slots if s not in selected_slots]
+                    while len(selected_slots) < 3 and remaining_slots:
+                        selected_slots.append(remaining_slots.pop(0))
+                    
+                    # Limit to 4 slots max
+                    selected_slots = selected_slots[:4]
+                else:
+                    selected_slots = []
+                
+                # Format response for VAPI
+                if selected_slots:
+                    # Format slots in a readable way
+                    slot_descriptions = []
+                    for slot in selected_slots:
+                        start_dt = datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00"))
+                        end_dt = datetime.fromisoformat(slot["endAt"].replace("Z", "+00:00"))
+                        
+                        # Format time in readable format
+                        start_time = start_dt.strftime("%I:%M %p")
+                        end_time = end_dt.strftime("%I:%M %p")
+                        
+                        # Determine time of day
+                        hour = start_dt.hour
+                        if 8 <= hour < 12:
+                            time_of_day = "morning"
+                        elif 12 <= hour < 17:
+                            time_of_day = "afternoon"
+                        else:
+                            time_of_day = "evening"
+                        
+                        slot_descriptions.append(f"{start_time} - {end_time} ({time_of_day})")
+                    
+                    result_text = f"Available time slots on {date_obj.strftime('%B %d, %Y')}:\n"
+                    result_text += "\n".join([f"• {desc}" for desc in slot_descriptions])
+                    result_text += f"\n\nTotal: {len(selected_slots)} available slot(s)"
+                    
+                    result_data = {
+                        "date": date_obj.strftime("%Y-%m-%d"),
+                        "availableSlots": selected_slots,
+                        "formattedSlots": slot_descriptions,
+                        "totalSlots": len(selected_slots),
+                        "message": result_text
+                    }
+                else:
+                    result_data = {
+                        "date": date_obj.strftime("%Y-%m-%d"),
+                        "availableSlots": [],
+                        "formattedSlots": [],
+                        "totalSlots": 0,
+                        "message": f"No available time slots found for {date_obj.strftime('%B %d, %Y')}. Please try a different date."
+                    }
+                
+                return {
+                    "results": [
+                        {
+                            "toolCallId": tool_call.id,
+                            "result": result_data
+                        }
+                    ]
+                }
     raise HTTPException(status_code=400, detail="Invalid tool call")
 
 
@@ -9891,28 +10028,62 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
                 search_results = rag.search_apartments(property_name, source_ids=None, k=3)
             
             if search_results and len(search_results) > 0:
-                # Try to find exact match first
-                for result in search_results:
-                    result_address = result.get("address", "").lower()
-                    search_name = property_name.lower()
-                    
-                    # Check if addresses match closely
-                    if search_name in result_address or result_address in search_name:
-                        found_property_id = result.get("id") or result.get("property_id")
-                        if found_property_id:
-                            property_listing = session.get(ApartmentListing, found_property_id)
-                            if property_listing:
-                                return property_listing, found_property_id, None
+                # Normalize search name for better matching
+                search_name_normalized = property_name.lower().strip()
+                # Remove common variations
+                search_name_normalized = search_name_normalized.replace(",", "").replace(".", "")
                 
-                # If no exact match, use first result
+                # Try to find best match
+                best_match = None
+                best_match_score = 0
+                
+                for result in search_results:
+                    result_address = result.get("address", "").lower().strip()
+                    result_address_normalized = result_address.replace(",", "").replace(".", "")
+                    
+                    # Calculate match score
+                    score = 0
+                    
+                    # Exact match
+                    if search_name_normalized == result_address_normalized:
+                        score = 100
+                    # Contains match (search in result or result in search)
+                    elif search_name_normalized in result_address_normalized:
+                        score = 80
+                    elif result_address_normalized in search_name_normalized:
+                        score = 70
+                    # Word overlap
+                    else:
+                        search_words = set(search_name_normalized.split())
+                        result_words = set(result_address_normalized.split())
+                        common_words = search_words.intersection(result_words)
+                        if common_words:
+                            # Calculate overlap percentage
+                            score = (len(common_words) / max(len(search_words), len(result_words))) * 60
+                    
+                    if score > best_match_score:
+                        best_match_score = score
+                        best_match = result
+                
+                # Use best match if found
+                if best_match and best_match_score >= 30:  # Minimum threshold
+                    found_property_id = best_match.get("id") or best_match.get("property_id")
+                    if found_property_id:
+                        property_listing = session.get(ApartmentListing, found_property_id)
+                        if property_listing:
+                            # Only show warning if match score is low
+                            if best_match_score < 70:
+                                result_address = best_match.get("address", "")
+                                error_msg = f"Found property '{result_address}' (ID: {found_property_id}) for search '{property_name}'. Is this the correct property?"
+                            return property_listing, found_property_id, error_msg
+                
+                # Fallback: use first result if no good match found
                 found_property_id = search_results[0].get("id") or search_results[0].get("property_id")
                 if found_property_id:
                     property_listing = session.get(ApartmentListing, found_property_id)
                     if property_listing:
-                        # Provide suggestion if address doesn't match exactly
                         result_address = search_results[0].get("address", "")
-                        if property_name.lower() not in result_address.lower():
-                            error_msg = f"Found property '{result_address}' (ID: {found_property_id}) for search '{property_name}'. Is this the correct property?"
+                        error_msg = f"Found property '{result_address}' (ID: {found_property_id}) for search '{property_name}'. Is this the correct property?"
                         return property_listing, found_property_id, error_msg
         except Exception as e:
             print(f"⚠️  Error searching for property '{property_name}': {e}")
