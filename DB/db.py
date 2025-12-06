@@ -1596,10 +1596,11 @@ def search_apartments(query: str, source_ids: Optional[List[int]] = None, k: int
     qvec_str = "[" + ",".join(f"{x:.6f}" for x in qvec) + "]"
     
     # Build SQL with optional source_id filtering
+    # Return both id and listing_metadata so we can match to database records
     if source_ids and len(source_ids) > 0:
         sql = text(
             f"""
-            SELECT listing_metadata FROM apartmentlisting
+            SELECT id, listing_metadata FROM apartmentlisting
             WHERE source_id = ANY(:source_ids)
             ORDER BY embedding <=> '{qvec_str}'::vector
             LIMIT :k
@@ -1612,7 +1613,7 @@ def search_apartments(query: str, source_ids: Optional[List[int]] = None, k: int
         print("⚠️  No source_ids provided - searching all listings (VAPI mode)")
         sql = text(
             f"""
-            SELECT listing_metadata FROM apartmentlisting
+            SELECT id, listing_metadata FROM apartmentlisting
             ORDER BY embedding <=> '{qvec_str}'::vector
             LIMIT :k
         """
@@ -1621,7 +1622,17 @@ def search_apartments(query: str, source_ids: Optional[List[int]] = None, k: int
     
     with SessionLocal() as session:
         rows = session.execute(sql, params).all()
-        return [r[0] for r in rows]
+        # Combine id and metadata into result dicts
+        results = []
+        for row in rows:
+            db_id, metadata = row
+            # Add the database ID to the metadata so it's available
+            if isinstance(metadata, dict):
+                metadata = dict(metadata)  # Make a copy
+                metadata["id"] = db_id  # Add database ID
+                metadata["property_id"] = db_id  # Also add as property_id for compatibility
+            results.append(metadata)
+        return results
 
 
 # ---------------------- OPTIONAL: Fetch from URL ----------------------

@@ -10010,7 +10010,7 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
         else:
             error_msg = f"Property with ID {property_id} not found."
     
-    # Method 2: Try property_name search
+    # Method 2: Try property_name search (SUPER LENIENT - same as confirm_address)
     if property_name and not property_listing:
         from vapi.rag import RAGEngine
         rag = RAGEngine()
@@ -10034,63 +10034,82 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
                 print(f"   Found {len(search_results)} results without restriction")
             
             if search_results and len(search_results) > 0:
-                # Normalize search name for better matching
-                search_name_normalized = property_name.lower().strip()
-                # Remove common variations
-                search_name_normalized = search_name_normalized.replace(",", "").replace(".", "")
+                print(f"   Processing {len(search_results)} search results (SUPER LENIENT MODE)")
                 
-                # Try to find best match
-                best_match = None
-                best_match_score = 0
+                # SUPER LENIENT: Just use the first search result (they're already sorted by relevance)
+                # This is the same approach as confirm_address - trust the search results
+                first_result = search_results[0]
+                result_address = first_result.get("address", "")
+                print(f"   Using first search result: {result_address}")
                 
-                for result in search_results:
-                    result_address = result.get("address", "").lower().strip()
-                    result_address_normalized = result_address.replace(",", "").replace(".", "")
-                    
-                    # Calculate match score
-                    score = 0
-                    
-                    # Exact match
-                    if search_name_normalized == result_address_normalized:
-                        score = 100
-                    # Contains match (search in result or result in search)
-                    elif search_name_normalized in result_address_normalized:
-                        score = 80
-                    elif result_address_normalized in search_name_normalized:
-                        score = 70
-                    # Word overlap
-                    else:
-                        search_words = set(search_name_normalized.split())
-                        result_words = set(result_address_normalized.split())
-                        common_words = search_words.intersection(result_words)
-                        if common_words:
-                            # Calculate overlap percentage
-                            score = (len(common_words) / max(len(search_words), len(result_words))) * 60
-                    
-                    if score > best_match_score:
-                        best_match_score = score
-                        best_match = result
+                # Method 1: Try to get property_id from result metadata (now includes DB id)
+                found_property_id = first_result.get("id") or first_result.get("property_id")
                 
-                # Use best match if found
-                if best_match and best_match_score >= 30:  # Minimum threshold
-                    found_property_id = best_match.get("id") or best_match.get("property_id")
-                    if found_property_id:
+                if found_property_id:
+                    print(f"   Found property_id in metadata: {found_property_id}")
+                    try:
+                        # Ensure it's an integer
+                        if isinstance(found_property_id, str):
+                            found_property_id = int(found_property_id)
                         property_listing = session.get(ApartmentListing, found_property_id)
                         if property_listing:
-                            # Only show warning if match score is low
-                            if best_match_score < 70:
-                                result_address = best_match.get("address", "")
-                                error_msg = f"Found property '{result_address}' (ID: {found_property_id}) for search '{property_name}'. Is this the correct property?"
-                            return property_listing, found_property_id, error_msg
+                            print(f"   ✅ Successfully found property in database: {found_property_id}")
+                            return property_listing, found_property_id, None
+                    except (ValueError, TypeError) as e:
+                        print(f"   ⚠️  Invalid property_id format: {found_property_id}, error: {e}, trying address lookup")
                 
-                # Fallback: use first result if no good match found
-                found_property_id = search_results[0].get("id") or search_results[0].get("property_id")
-                if found_property_id:
-                    property_listing = session.get(ApartmentListing, found_property_id)
+                # Method 2: Try to find by address (same simple logic as search_apartments/confirm_address)
+                if result_address:
+                    print(f"   Trying to find property by address: {result_address}")
+                    # Use exact same logic as search_apartments endpoint - simple contains
+                    property_listing = session.exec(
+                        select(ApartmentListing).where(
+                            ApartmentListing.text.contains(result_address)
+                        ).limit(1)
+                    ).first()
+                    
                     if property_listing:
-                        result_address = search_results[0].get("address", "")
-                        error_msg = f"Found property '{result_address}' (ID: {found_property_id}) for search '{property_name}'. Is this the correct property?"
-                        return property_listing, found_property_id, error_msg
+                        print(f"   ✅ Found property by address lookup: {property_listing.id}")
+                        return property_listing, property_listing.id, None
+                    
+                    # Try case-insensitive as fallback
+                    property_listing = session.exec(
+                        select(ApartmentListing).where(
+                            ApartmentListing.text.ilike(f"%{result_address}%")
+                        ).limit(1)
+                    ).first()
+                    
+                    if property_listing:
+                        print(f"   ✅ Found property by case-insensitive address lookup: {property_listing.id}")
+                        return property_listing, property_listing.id, None
+                
+                # If still not found, try other search results (but only if first one failed)
+                if not property_listing and len(search_results) > 1:
+                    print(f"   First result didn't match, trying other results...")
+                    for idx, result in enumerate(search_results[1:], start=2):
+                        result_address = result.get("address", "")
+                        found_property_id = result.get("id") or result.get("property_id")
+                        
+                        if found_property_id:
+                            try:
+                                if isinstance(found_property_id, str):
+                                    found_property_id = int(found_property_id)
+                                property_listing = session.get(ApartmentListing, found_property_id)
+                                if property_listing:
+                                    print(f"   ✅ Found property in result {idx}: {property_listing.id}")
+                                    return property_listing, found_property_id, None
+                            except:
+                                pass
+                        
+                        if result_address:
+                            property_listing = session.exec(
+                                select(ApartmentListing).where(
+                                    ApartmentListing.text.contains(result_address)
+                                ).limit(1)
+                            ).first()
+                            if property_listing:
+                                print(f"   ✅ Found property by address in result {idx}: {property_listing.id}")
+                                return property_listing, property_listing.id, None
         except Exception as e:
             print(f"⚠️  Error searching for property '{property_name}': {e}")
             error_msg = f"Error searching for property '{property_name}': {str(e)}"
