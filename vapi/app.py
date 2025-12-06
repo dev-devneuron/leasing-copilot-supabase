@@ -1888,31 +1888,32 @@ def get_slots(request: VapiRequest):
             date = args.get("date")
             address = args.get("address")
             print("Address:", address)
-            if not date:
+            if not date or not address:
                 raise HTTPException(
                     status_code=400, detail="Missing 'date' or 'address' field"
                 )
 
-            # 1. Find the listing by matching address substring in text
-            statement = select(ApartmentListing).where(
-                ApartmentListing.text.contains(address)
-            )
-            listing = session.exec(statement).first()
-            if not listing:
-                raise HTTPException(
-                    status_code=404, detail="Listing not found for address"
+            with Session(engine) as session:
+                # 1. Find the listing by matching address substring in text
+                statement = select(ApartmentListing).where(
+                    ApartmentListing.text.contains(address)
                 )
+                listing = session.exec(statement).first()
+                if not listing:
+                    raise HTTPException(
+                        status_code=404, detail="Listing not found for address"
+                    )
 
-            # 2. Get source using the source_id
-            print("Source ID (slots):", listing.source_id)
-            statement = select(Source).where(Source.source_id == listing.source_id)
-            source = session.exec(statement).first()
-            if not source:
-                raise HTTPException(status_code=404, detail="Source not found")
+                # 2. Get source using the source_id
+                print("Source ID (slots):", listing.source_id)
+                statement = select(Source).where(Source.source_id == listing.source_id)
+                source = session.exec(statement).first()
+                if not source:
+                    raise HTTPException(status_code=404, detail="Source not found")
 
-            # 3. Access the realtor_id from the source
-            realtor_id = source.realtor_id
-            print("Realtor ID (slots):", source.realtor_id)
+                # 3. Access the realtor_id from the source
+                realtor_id = source.realtor_id
+                print("Realtor ID (slots):", source.realtor_id)
 
             # 🧠 3. Initialize calendar client with correct token
             calendar = GoogleCalendar(realtor_id)
