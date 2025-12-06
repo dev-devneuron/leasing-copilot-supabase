@@ -8686,6 +8686,9 @@ async def create_booking_request_vapi(
             except Exception as e:
                 print(f"⚠️  Error parsing request body: {e}")
                 # Continue with empty body if parsing fails
+    except Exception as e:
+        print(f"⚠️  Error in initial setup: {e}")
+        # Continue with empty values
     
     # Extract parameters from VapiRequest toolCalls if provided
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
