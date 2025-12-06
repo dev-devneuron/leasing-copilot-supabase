@@ -9526,6 +9526,7 @@ async def check_property_availability_vapi(
     from_date = None
     to_date = None
     body = None
+    tool_call_id = None
     
     try:
         body = await http_request.json()
@@ -9538,6 +9539,8 @@ async def check_property_availability_vapi(
                 func_name = func.get("name", "")
                 
                 if func_name in ["checkPropertyAvailability", "getAvailability", "checkAvailability", "getPropertyAvailability"]:
+                    # Extract toolCallId
+                    tool_call_id = tool_call.get("id")
                     args = func.get("arguments", {})
                     
                     # Handle both string and object formats
@@ -9574,7 +9577,14 @@ async def check_property_availability_vapi(
         )
     
     # Call the shared handler function with extracted parameters and parsed body
-    return await _handle_property_availability(http_request, property_name, from_date, to_date, body)
+    result = await _handle_property_availability(http_request, property_name, from_date, to_date, body)
+    
+    # If we have a toolCallId and result is JSONResponse, convert to VAPI format
+    if tool_call_id and isinstance(result, JSONResponse):
+        result_data = json.loads(result.body.decode())
+        return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
+    
+    return result
 
 
 @app.post("/vapi/properties/availability")
@@ -9928,11 +9938,43 @@ async def validate_tour_request(
     request_body = {}
     tool_call_id = None
     
-    # Extract parameters from VapiRequest toolCalls if provided
+    # First, try to parse the raw JSON body to extract toolCallId and parameters
+    try:
+        request_body = await http_request.json()
+        # Check if body has message.toolCalls structure (VAPI format)
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                func = tool_call.get("function", {})
+                func_name = func.get("name", "")
+                
+                if func_name in ["validateTourRequest", "checkTourAvailability", "validateTour", "validateTourBooking"]:
+                    tool_call_id = tool_call.get("id")
+                    args = func.get("arguments", {})
+                    
+                    # Handle both string and object formats
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except:
+                            args = {}
+                    elif not isinstance(args, dict):
+                        args = {}
+                    
+                    property_name = property_name or args.get("property_name") or args.get("propertyName")
+                    requested_start_at = requested_start_at or args.get("requested_start_at") or args.get("requestedStartAt")
+                    requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
+                    break
+    except Exception as e:
+        print(f"⚠️  Error parsing request body: {e}")
+        # Continue - will try VapiRequest object next
+    
+    # Extract parameters from VapiRequest toolCalls if provided (fallback)
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
-            if tool_call.function.name in ["validateTourRequest", "checkTourAvailability", "validateTour"]:
-                tool_call_id = tool_call.id
+            if tool_call.function.name in ["validateTourRequest", "checkTourAvailability", "validateTour", "validateTourBooking"]:
+                if not tool_call_id:
+                    tool_call_id = tool_call.id
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -9945,21 +9987,13 @@ async def validate_tour_request(
                 requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
                 break
     
-    # If still missing, try to get from request body directly
+    # If still missing, try to get from request body directly (already parsed above)
     if not property_name or not requested_start_at or not requested_end_at:
-        try:
-            request_body = await http_request.json()
-            # Extract toolCallId from body if present
-            if not tool_call_id and request_body.get("message") and request_body["message"].get("toolCalls"):
-                tool_calls = request_body["message"]["toolCalls"]
-                if tool_calls and len(tool_calls) > 0:
-                    tool_call_id = tool_calls[0].get("id")
-            
+        if request_body:
+            # Try direct body parameters as fallback
             property_name = property_name or request_body.get("property_name") or request_body.get("propertyName")
             requested_start_at = requested_start_at or request_body.get("requested_start_at") or request_body.get("requestedStartAt")
             requested_end_at = requested_end_at or request_body.get("requested_end_at") or request_body.get("requestedEndAt")
-        except:
-            pass  # Body might not be JSON or already consumed
     
     # Validate property_name is provided
     if not property_name or not property_name.strip():
