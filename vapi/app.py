@@ -9779,13 +9779,21 @@ def _parse_datetime_robust(date_str: str, field_name: str = "date") -> datetime:
     if date_str.endswith("Z"):
         date_str_utc = date_str.replace("Z", "+00:00")
         try:
-            return datetime.fromisoformat(date_str_utc)
+            dt = datetime.fromisoformat(date_str_utc)
+            # Ensure timezone-aware (should already be, but double-check)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except ValueError:
             pass
     
     # Try ISO format directly
     try:
-        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        # If no timezone info, assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         pass
     
@@ -10158,8 +10166,16 @@ async def validate_tour_request(
         # Check if requested slot overlaps with any available slot
         requested_slot_available = False
         for slot in available_slots:
-            slot_start = datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00"))
-            slot_end = datetime.fromisoformat(slot["endAt"].replace("Z", "+00:00"))
+            slot_start_str = slot["startAt"].replace("Z", "+00:00")
+            slot_end_str = slot["endAt"].replace("Z", "+00:00")
+            slot_start = datetime.fromisoformat(slot_start_str)
+            slot_end = datetime.fromisoformat(slot_end_str)
+            
+            # Ensure timezone-aware (default to UTC if naive)
+            if slot_start.tzinfo is None:
+                slot_start = slot_start.replace(tzinfo=timezone.utc)
+            if slot_end.tzinfo is None:
+                slot_end = slot_end.replace(tzinfo=timezone.utc)
             
             # Check if requested time fits within this available slot
             if slot_start <= requested_start and requested_end <= slot_end:
@@ -10192,7 +10208,11 @@ async def validate_tour_request(
             
             # Sort slots by how close they are to requested time
             def slot_distance(slot):
-                slot_start = datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00"))
+                slot_start_str = slot["startAt"].replace("Z", "+00:00")
+                slot_start = datetime.fromisoformat(slot_start_str)
+                # Ensure timezone-aware (default to UTC if naive)
+                if slot_start.tzinfo is None:
+                    slot_start = slot_start.replace(tzinfo=timezone.utc)
                 return abs((slot_start - requested_start).total_seconds())
             
             sorted_slots = sorted(available_slots, key=slot_distance)
