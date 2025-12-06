@@ -8672,18 +8672,20 @@ async def create_booking_request_vapi(
     request_headers = {}
     tool_call_id = None
     
-    if http_request:
-        try:
-            request_body = await http_request.json()
-            request_headers = dict(http_request.headers)
-            # Extract toolCallId from body if present
-            if request_body.get("message") and request_body["message"].get("toolCalls"):
-                tool_calls = request_body["message"]["toolCalls"]
-                if tool_calls and len(tool_calls) > 0:
-                    tool_call_id = tool_calls[0].get("id")
-        except Exception as e:
-            print(f"⚠️  Error parsing request body: {e}")
-            # Continue with empty body if parsing fails
+    try:
+        if http_request:
+            try:
+                request_body = await http_request.json()
+                request_headers = dict(http_request.headers)
+                # Extract toolCallId from body if present
+                if request_body.get("message") and request_body["message"].get("toolCalls"):
+                    tool_calls = request_body["message"]["toolCalls"]
+                    if tool_calls and len(tool_calls) > 0:
+                        tool_call_id = tool_calls[0].get("id")
+                        print(f"✅ Extracted tool_call_id: {tool_call_id}")
+            except Exception as e:
+                print(f"⚠️  Error parsing request body: {e}")
+                # Continue with empty body if parsing fails
     
     # Extract parameters from VapiRequest toolCalls if provided
     if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
@@ -8705,6 +8707,7 @@ async def create_booking_request_vapi(
                 requested_end_at = requested_end_at or args.get("requested_end_at") or args.get("requestedEndAt")
                 timezone = timezone or args.get("timezone") or "America/New_York"
                 notes = notes or args.get("notes")
+                print(f"📋 Extracted from tool call: property_name={property_name}, visitor_name={visitor_name}, requested_start_at={requested_start_at}, requested_end_at={requested_end_at}, timezone={timezone}")
                 break
     
     # If still missing, try to get from request body directly (already parsed above)
@@ -8755,12 +8758,18 @@ async def create_booking_request_vapi(
         )
     
     # Robust datetime parsing
+    print(f"🔍 Parsing dates: requested_start_at='{requested_start_at}', requested_end_at='{requested_end_at}', timezone='{timezone}'")
     try:
         start_dt = _parse_datetime_robust(requested_start_at, "requested_start_at")
         end_dt = _parse_datetime_robust(requested_end_at, "requested_end_at")
-    except HTTPException:
+        print(f"✅ Parsed dates: start_dt={start_dt} (tzinfo={start_dt.tzinfo}), end_dt={end_dt} (tzinfo={end_dt.tzinfo})")
+    except HTTPException as e:
+        print(f"❌ HTTPException parsing dates: {e.detail}")
         raise
     except Exception as e:
+        print(f"❌ Exception parsing dates: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=400,
             detail=f"Error parsing dates: {str(e)}. Please use ISO format (e.g., 2025-12-01T16:00:00Z)"
@@ -8769,6 +8778,15 @@ async def create_booking_request_vapi(
     # Validate time constraints
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
     two_weeks_from_now = now + timedelta(days=14)
+    print(f"🔍 Time validation: now={now}, start_dt={start_dt}, end_dt={end_dt}")
+    
+    # Ensure both datetimes are timezone-aware for comparison
+    if start_dt.tzinfo is None:
+        print(f"⚠️  start_dt is timezone-naive, assuming UTC")
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    if end_dt.tzinfo is None:
+        print(f"⚠️  end_dt is timezone-naive, assuming UTC")
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
     
     if start_dt < now:
         hours_ago = (now - start_dt).total_seconds() / 3600
@@ -8934,6 +8952,32 @@ async def create_booking_request_vapi(
             return {"results": [{"toolCallId": tool_call_id, "result": result_data}]}
         else:
             return JSONResponse(content=result_data, status_code=201)
+    
+    except HTTPException as e:
+        # Convert HTTPException to VAPI format if toolCallId is present
+        if tool_call_id:
+            error_result = {
+                "error": True,
+                "statusCode": e.status_code,
+                "message": e.detail
+            }
+            return {"results": [{"toolCallId": tool_call_id, "result": error_result}]}
+        raise  # Re-raise if no toolCallId
+    except Exception as e:
+        # Handle any other exceptions
+        error_msg = str(e)
+        print(f"❌ Error creating booking request: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        
+        if tool_call_id:
+            error_result = {
+                "error": True,
+                "statusCode": 500,
+                "message": f"Error creating booking request: {error_msg}"
+            }
+            return {"results": [{"toolCallId": tool_call_id, "result": error_result}]}
+        raise HTTPException(status_code=500, detail=f"Error creating booking request: {error_msg}")
 
 
 # Get Booking Details
