@@ -5270,6 +5270,50 @@ def book_demo(
         )
 
 
+@app.post("/contact")
+def submit_contact_form(
+    name: str = Body(...),
+    email: str = Body(...),
+    message: str = Body(...),
+    phone: Optional[str] = Body(None),
+    subject: Optional[str] = Body(None),
+):
+    """
+    Public endpoint to submit a contact form. No authentication required.
+    Anyone can submit a contact form.
+    """
+    try:
+        with Session(engine) as session:
+            # Create contact form submission
+            contact_form = ContactForm(
+                name=name,
+                email=email,
+                message=message,
+                phone=phone,
+                subject=subject,
+            )
+            
+            session.add(contact_form)
+            session.commit()
+            session.refresh(contact_form)
+            
+            return JSONResponse(content={
+                "message": "Thank you for contacting us! We've received your message and will get back to you soon.",
+                "contact_id": contact_form.contact_id,
+                "submitted_at": contact_form.submitted_at.isoformat() if contact_form.submitted_at else None,
+            })
+            
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error submitting contact form: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error submitting contact form: {error_msg}"
+        )
+
+
 @app.get("/demo-requests")
 def get_demo_requests(
     status: Optional[str] = None,  # Filter by status: pending, scheduled, completed, cancelled, converted

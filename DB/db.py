@@ -471,6 +471,22 @@ class DemoRequest(SQLModel, table=True):
     converted_property_manager: Optional["PropertyManager"] = Relationship()
 
 
+class ContactForm(SQLModel, table=True):
+    """Stores contact form submissions from the website."""
+    contact_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Contact information
+    name: str
+    email: str
+    phone: Optional[str] = None
+    subject: Optional[str] = None
+    message: str
+    
+    # Timestamps
+    submitted_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+
+
 class PhoneNumberRequest(SQLModel, table=True):
     """Stores PM requests for phone numbers."""
     request_id: Optional[int] = Field(default=None, primary_key=True)
