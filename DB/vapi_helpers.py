@@ -89,6 +89,9 @@ def get_phone_number_from_id(phone_number_id: str) -> Optional[str]:
 def get_phone_number_from_vapi_chat(chat_id: Optional[str] = None) -> Optional[str]:
     """
     Get phone number from VAPI chat ID.
+    Tries multiple methods:
+    1. VAPI API (if available)
+    2. Database reverse lookup (chat_id -> phone number via ChatSession)
     
     Args:
         chat_id: VAPI chat ID (if available in request)
@@ -99,6 +102,7 @@ def get_phone_number_from_vapi_chat(chat_id: Optional[str] = None) -> Optional[s
     if not chat_id:
         return None
     
+    # Method 1: Try VAPI API (may not be available for chats)
     try:
         headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
         response = requests.get(
@@ -124,14 +128,38 @@ def get_phone_number_from_vapi_chat(chat_id: Optional[str] = None) -> Optional[s
                 if phone_number:
                     print(f"   ✅ Got phone number from phoneNumberId: {phone_number}")
                     return phone_number
-            else:
-                print(f"   ⚠️  No phoneNumberId found in chat data")
+        elif response.status_code == 404:
+            print(f"   ⚠️  VAPI chat API endpoint not available (404) - trying database lookup...")
         else:
             print(f"   ⚠️  Vapi API returned status {response.status_code}: {response.text}")
     except requests.exceptions.Timeout:
-        print(f"   ⚠️  Timeout fetching chat data from Vapi API")
+        print(f"   ⚠️  Timeout fetching chat data from Vapi API - trying database lookup...")
     except Exception as e:
-        print(f"   ⚠️  Error getting phone number from VAPI chat: {e}")
+        print(f"   ⚠️  Error calling VAPI chat API: {e} - trying database lookup...")
+    
+    # Method 2: Database reverse lookup (chat_id -> phone number)
+    try:
+        from .db import Session, ChatSession, Customer, engine
+        from sqlmodel import select
+        
+        with Session(engine) as session:
+            # Find chat session by chat_id
+            chat_session = session.exec(
+                select(ChatSession).where(ChatSession.chat_id == chat_id)
+            ).first()
+            
+            if chat_session:
+                # Get customer from chat session
+                customer = session.get(Customer, chat_session.cust_id)
+                if customer and customer.contact:
+                    print(f"   ✅ Found phone number from database chat session: {customer.contact}")
+                    return customer.contact
+                else:
+                    print(f"   ⚠️  Chat session found but no customer contact")
+            else:
+                print(f"   ⚠️  No chat session found in database for chat_id: {chat_id}")
+    except Exception as e:
+        print(f"   ⚠️  Error looking up chat in database: {e}")
     
     return None
 
@@ -178,6 +206,17 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     print(f"   Request body keys: {list(request_body.keys())}")
     print(f"   Request headers keys: {list(request_headers.keys())}")
     
+    # Log full request body structure for debugging (limit size)
+    import json
+    try:
+        body_str = json.dumps(request_body, default=str)
+        if len(body_str) > 1000:
+            print(f"   Request body (first 1000 chars): {body_str[:1000]}...")
+        else:
+            print(f"   Request body: {body_str}")
+    except:
+        print(f"   Request body (could not serialize): {request_body}")
+    
     # Method 1: Custom headers from Vapi phone number inbound settings (MOST RELIABLE)
     # These are set at phone number level: x-vapi-to={{to}}, x-vapi-from={{from}}
     # FastAPI/Starlette normalizes headers to lowercase, so check lowercase
@@ -222,7 +261,40 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
             else:
                 print(f"   ⚠️  Phone number {phone_number} not found in database")
     
-    # Method 1c: Use x-chat-id header to fetch phone number from Vapi API (FOR CHATS)
+    # Method 1c: Check for phoneNumberId in request (works for both calls and chats)
+    # This is often available in chat requests
+    phone_number_id = (
+        request_body.get("phoneNumberId") or 
+        request_body.get("phone_number_id") or
+        (request_body.get("message") and request_body["message"].get("phoneNumberId")) if isinstance(request_body.get("message"), dict) else None or
+        (request_body.get("message") and request_body["message"].get("phone_number_id")) if isinstance(request_body.get("message"), dict) else None
+    )
+    if phone_number_id:
+        print(f"   📞 Found phone number ID: {phone_number_id}")
+        
+        # Check cache first (from webhook)
+        if phone_number_id in _phone_id_cache:
+            phone_number = _phone_id_cache[phone_number_id]
+            print(f"   ✅ Got phone number from cache: {phone_number}")
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+        
+        # Fallback: Fetch from API
+        print(f"   📞 Phone number ID not in cache, fetching from Vapi API...")
+        phone_number = get_phone_number_from_id(phone_number_id)
+        if phone_number:
+            print(f"   ✅ Got phone number from phone number ID: {phone_number}")
+            # Store in cache
+            _phone_id_cache[phone_number_id] = phone_number
+            _phone_to_id_cache[phone_number] = phone_number_id
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+        else:
+            print(f"   ⚠️  Could not get phone number from phone number ID")
+    
+    # Method 1d: Use x-chat-id header to fetch phone number from Vapi API (FOR CHATS)
     # This handles chat-based requests where users interact via chat instead of calls
     chat_id_from_header = header_keys_lower.get("x-chat-id")
     if chat_id_from_header:
@@ -236,11 +308,11 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
             if user_info:
                 return user_info
         
-        # Fallback: Fetch from Vapi API
-        print(f"   💬 Chat ID not in cache, fetching phone number from Vapi API...")
+        # Fallback: Try to get phone number from chat (API or database)
+        print(f"   💬 Chat ID not in cache, trying to get phone number from chat...")
         phone_number = get_phone_number_from_vapi_chat(chat_id_from_header)
         if phone_number:
-            print(f"   ✅ Got phone number from Vapi API using chat ID: {phone_number}")
+            print(f"   ✅ Got phone number from chat (API or database): {phone_number}")
             # Store in cache (reuse call_phone_cache for both calls and chats)
             _call_phone_cache[chat_id_from_header] = phone_number
             user_info = get_user_from_phone_number(phone_number)
@@ -249,7 +321,7 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
             else:
                 print(f"   ⚠️  Phone number {phone_number} not found in database")
         else:
-            print(f"   ⚠️  Could not get phone number from chat ID {chat_id_from_header}")
+            print(f"   ⚠️  Could not get phone number from chat ID {chat_id_from_header} (tried API and database)")
     
     # Method 2: Twilio destination number (from webhook events)
     # This is the number that was called/texted (YOUR number), which identifies the PM/Realtor
@@ -267,7 +339,49 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                 print(f"   ⚠️  Destination number {destination_number} not found in database")
     
     # Method 2: Direct phone number in request body/headers
-    # Check tool call arguments first (toNumber/fromNumber from Vapi tool parameters)
+    # Check message object thoroughly for phone number info
+    message_obj = request_body.get("message")
+    if isinstance(message_obj, dict):
+        print(f"   📋 Checking message object for phone number...")
+        print(f"   📋 Message object keys: {list(message_obj.keys())}")
+        
+        # Check message object for phone number fields
+        message_phone = (
+            message_obj.get("phoneNumber") or
+            message_obj.get("phone_number") or
+            message_obj.get("toNumber") or
+            message_obj.get("to_number") or
+            message_obj.get("to") or
+            message_obj.get("from") or
+            message_obj.get("fromNumber") or
+            message_obj.get("from_number")
+        )
+        if message_phone:
+            print(f"   📞 Found phone number in message object: {message_phone}")
+            user_info = get_user_from_phone_number(message_phone)
+            if user_info:
+                return user_info
+        
+        # Check chat object inside message
+        chat_obj = message_obj.get("chat")
+        if isinstance(chat_obj, dict):
+            print(f"   📋 Found chat object in message, checking for phone number...")
+            chat_phone = (
+                chat_obj.get("phoneNumber") or
+                chat_obj.get("phone_number") or
+                chat_obj.get("toNumber") or
+                chat_obj.get("to_number") or
+                chat_obj.get("to") or
+                chat_obj.get("from") or
+                chat_obj.get("fromNumber")
+            )
+            if chat_phone:
+                print(f"   📞 Found phone number in chat object: {chat_phone}")
+                user_info = get_user_from_phone_number(chat_phone)
+                if user_info:
+                    return user_info
+    
+    # Check tool call arguments (toNumber/fromNumber from Vapi tool parameters)
     tool_call_args = None
     if isinstance(request_body.get("message"), dict):
         tool_calls = request_body["message"].get("toolCalls") or request_body["message"].get("toolCallList") or []

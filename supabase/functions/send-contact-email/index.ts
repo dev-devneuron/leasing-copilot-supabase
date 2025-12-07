@@ -19,16 +19,34 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // Log raw request details for debugging
+    console.log("=== Contact Form Email Request ===");
+    console.log("Method:", req.method);
+    console.log("URL:", req.url);
+    console.log("Headers:", JSON.stringify(Object.fromEntries(req.headers.entries())));
+    
+    // Get raw body text first for debugging
+    const rawBody = await req.text();
+    console.log("Raw body:", rawBody);
+    console.log("Raw body type:", typeof rawBody);
+    console.log("Raw body length:", rawBody.length);
+    
     // Parse the request payload
     let payload;
     try {
-      payload = await req.json();
+      // Try parsing the raw body as JSON
+      payload = JSON.parse(rawBody);
+      console.log("Parsed payload:", JSON.stringify(payload));
+      console.log("Payload type:", typeof payload);
     } catch (e) {
       console.error("Failed to parse JSON:", e);
+      console.error("Error details:", e.message);
+      console.error("Raw body that failed:", rawBody);
       return new Response(
         JSON.stringify({
           error: "Invalid JSON payload",
-          details: "Request body must be valid JSON",
+          details: e.message || "Request body must be valid JSON",
+          rawBody: rawBody.substring(0, 200), // First 200 chars for debugging
         }),
         {
           status: 400,
