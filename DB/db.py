@@ -125,6 +125,9 @@ class PropertyManager(SQLModel, table=True):
         sa_column=Column(JSONB)
     )  # { defaultSlotLengthMins: 30, workingHours: { start: '09:00', end: '17:00' } }
     
+    # VAPI Assistant ID (for chat identification when phone number is not available)
+    vapi_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for chat requests
+    
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -189,6 +192,9 @@ class Realtor(SQLModel, table=True):
         default=None,
         sa_column=Column(JSONB)
     )  # { defaultSlotLengthMins: 30, workingHours: { start: '09:00', end: '17:00' } }
+    
+    # VAPI Assistant ID (for chat identification when phone number is not available)
+    vapi_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for chat requests
     
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -703,7 +709,7 @@ class MaintenanceRequest(SQLModel, table=True):
     # Relationships
     tenant: Optional["Tenant"] = Relationship(back_populates="maintenance_requests")
     property: Optional["ApartmentListing"] = Relationship()
-    property_manager: Optional["PropertyManager"] = Relationship()
+    property_manager: Optional["PropertyManager"] = Relationship(overlaps="maintenance_requests")
     assigned_realtor: Optional["Realtor"] = Relationship()
 
 # ---------------------- EMBEDDING SETUP ----------------------

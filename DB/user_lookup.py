@@ -266,6 +266,57 @@ def get_user_from_phone_number(phone_number: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def get_user_from_assistant_id(assistant_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Identify user (PM or Realtor) from their VAPI assistant ID.
+    This is used for chat requests where phone number is not available.
+    
+    Args:
+        assistant_id: VAPI assistant ID
+    
+    Returns:
+        Dict with user_type, user_id, and accessible source_ids, or None if not found
+    """
+    if not assistant_id:
+        return None
+    
+    print(f"🔍 Looking up user for assistant ID: {assistant_id}")
+    
+    with Session(engine) as session:
+        # Check Realtors first
+        realtor = session.exec(
+            select(Realtor).where(Realtor.vapi_assistant_id == assistant_id)
+        ).first()
+        
+        if realtor:
+            scope = get_data_access_scope("realtor", realtor.realtor_id)
+            print(f"✅ Found realtor ID {realtor.realtor_id} via assistant ID with source_ids: {scope['source_ids']}")
+            return {
+                "user_type": "realtor",
+                "user_id": realtor.realtor_id,
+                "source_ids": scope["source_ids"],
+                "realtor": realtor,
+            }
+        
+        # Check Property Managers
+        property_manager = session.exec(
+            select(PropertyManager).where(PropertyManager.vapi_assistant_id == assistant_id)
+        ).first()
+        
+        if property_manager:
+            scope = get_data_access_scope("property_manager", property_manager.property_manager_id)
+            print(f"✅ Found PM ID {property_manager.property_manager_id} via assistant ID with source_ids: {scope['source_ids']}")
+            return {
+                "user_type": "property_manager",
+                "user_id": property_manager.property_manager_id,
+                "source_ids": scope["source_ids"],
+                "property_manager": property_manager,
+            }
+        
+        print(f"❌ No user found for assistant ID: {assistant_id}")
+        return None
+
+
 def identify_tenant(
     phone_number: Optional[str] = None,
     email: Optional[str] = None,

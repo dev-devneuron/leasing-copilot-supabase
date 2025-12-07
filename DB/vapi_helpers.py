@@ -117,6 +117,17 @@ def get_phone_number_from_assistant_id(assistant_id: str) -> Optional[str]:
             assistant_data = response.json()
             print(f"   📋 Assistant data keys: {list(assistant_data.keys())}")
             
+            # Log full assistant data for debugging (first 2000 chars)
+            try:
+                import json
+                assistant_str = json.dumps(assistant_data, default=str)
+                if len(assistant_str) > 2000:
+                    print(f"   📋 Assistant data (first 2000 chars): {assistant_str[:2000]}...")
+                else:
+                    print(f"   📋 Assistant data: {assistant_str}")
+            except:
+                pass
+            
             # Try to get phoneNumberId from assistant
             phone_number_id = (
                 assistant_data.get("phoneNumberId") or
@@ -135,6 +146,61 @@ def get_phone_number_from_assistant_id(assistant_id: str) -> Optional[str]:
             print(f"   ⚠️  VAPI API returned status {response.status_code} for assistant: {response.text}")
     except Exception as e:
         print(f"   ⚠️  Error getting phone number from assistant ID: {e}")
+    
+    return None
+
+
+def _identify_user_from_assistant_metadata(assistant_id: str, assistant_obj: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """
+    Try to identify user from assistant metadata when phone number is not available.
+    This is a fallback for chat requests where the assistant doesn't have a phoneNumberId.
+    
+    Uses the assistant_id to look up the user in the database (PM or Realtor).
+    
+    Args:
+        assistant_id: VAPI assistant ID
+        assistant_obj: Assistant object from request (optional, for performance)
+    
+    Returns:
+        User info dict with source_ids, or None
+    """
+    from .user_lookup import get_user_from_assistant_id
+    
+    print(f"   🔍 Trying to identify user from assistant ID: {assistant_id}")
+    
+    # Method 1: Look up user directly from assistant_id in database
+    user_info = get_user_from_assistant_id(assistant_id)
+    if user_info:
+        print(f"   ✅ Successfully identified user from assistant ID")
+        return user_info
+    
+    # Method 2: Try to get full assistant data and check for phoneNumberId (already tried above, but log it)
+    if not assistant_obj:
+        try:
+            headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+            response = requests.get(
+                f"{VAPI_BASE_URL}/assistant/{assistant_id}",
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code == 200:
+                assistant_obj = response.json()
+            else:
+                print(f"   ⚠️  Could not fetch assistant data: {response.status_code}")
+        except Exception as e:
+            print(f"   ⚠️  Error fetching assistant data: {e}")
+    
+    # Method 3: Check serverUrl for backend URL (might contain identifier)
+    if assistant_obj:
+        server_url = assistant_obj.get("serverUrl") or assistant_obj.get("server_url")
+        if server_url:
+            print(f"   📋 Found serverUrl in assistant: {server_url}")
+            # The serverUrl should point to our backend, but it might not help identify the specific user
+            # For now, we'll log it but can't use it to identify the user
+    
+    print(f"   ⚠️  Cannot identify user from assistant ID: {assistant_id}")
+    print(f"   💡 Make sure the assistant_id is stored in the PropertyManager or Realtor table")
+    print(f"   💡 Update the vapi_assistant_id field for the user who owns this assistant")
     
     return None
 
@@ -580,6 +646,25 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                     user_info = get_user_from_phone_number(phone_number)
                     if user_info:
                         return user_info
+                
+                # If no phone number, try to identify user from assistant's serverUrl or other metadata
+                # For chats, the assistant might not have a phone number, but we can try to identify
+                # the user from the assistant's serverUrl or by looking up the assistant ID in database
+                print(f"   📋 No phone number found for assistant, trying alternative identification methods...")
+                user_info = _identify_user_from_assistant_metadata(assistant_id, assistant_obj)
+                if user_info:
+                    return user_info
+                
+                # Last resort: Try to get phone number from chat's sessionId if available
+                # The sessionId might help us look up the chat in VAPI API
+                chat_obj = message_obj.get("chat")
+                if isinstance(chat_obj, dict):
+                    session_id = chat_obj.get("sessionId") or chat_obj.get("session_id")
+                    if session_id:
+                        print(f"   📋 Found sessionId in chat object: {session_id}, trying to get phone number from session...")
+                        # Try to look up chat by sessionId (if VAPI API supports it)
+                        # For now, we can't do this without VAPI API support, but we log it
+                        print(f"   ⚠️  Cannot look up chat by sessionId - VAPI API may not support this")
     
     # Check tool call arguments (toNumber/fromNumber from Vapi tool parameters)
     tool_call_args = None
