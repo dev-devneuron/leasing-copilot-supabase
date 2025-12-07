@@ -263,11 +263,18 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     
     # Method 1c: Check for phoneNumberId in request (works for both calls and chats)
     # This is often available in chat requests
+    message_obj_temp = request_body.get("message")
     phone_number_id = (
         request_body.get("phoneNumberId") or 
         request_body.get("phone_number_id") or
-        (request_body.get("message") and request_body["message"].get("phoneNumberId")) if isinstance(request_body.get("message"), dict) else None or
-        (request_body.get("message") and request_body["message"].get("phone_number_id")) if isinstance(request_body.get("message"), dict) else None
+        (message_obj_temp and message_obj_temp.get("phoneNumberId")) if isinstance(message_obj_temp, dict) else None or
+        (message_obj_temp and message_obj_temp.get("phone_number_id")) if isinstance(message_obj_temp, dict) else None or
+        # Check in chat object inside message
+        (message_obj_temp and isinstance(message_obj_temp.get("chat"), dict) and message_obj_temp["chat"].get("phoneNumberId")) or
+        (message_obj_temp and isinstance(message_obj_temp.get("chat"), dict) and message_obj_temp["chat"].get("phone_number_id")) or
+        # Check if phoneNumber is an object with id
+        (message_obj_temp and isinstance(message_obj_temp.get("phoneNumber"), dict) and message_obj_temp["phoneNumber"].get("id")) or
+        (message_obj_temp and isinstance(message_obj_temp.get("chat"), dict) and isinstance(message_obj_temp["chat"].get("phoneNumber"), dict) and message_obj_temp["chat"]["phoneNumber"].get("id"))
     )
     if phone_number_id:
         print(f"   📞 Found phone number ID: {phone_number_id}")
@@ -362,10 +369,44 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
             if user_info:
                 return user_info
         
+        # Check if phoneNumber is an object in message
+        message_phone_obj = message_obj.get("phoneNumber")
+        if isinstance(message_phone_obj, dict):
+            print(f"   📋 Found phoneNumber object in message, checking...")
+            message_phone_from_obj = (
+                message_phone_obj.get("number") or
+                message_phone_obj.get("phoneNumber") or
+                message_phone_obj.get("id")  # Might be ID, we'll resolve it
+            )
+            if message_phone_from_obj:
+                # If it looks like a phone number (has + or digits), use it directly
+                if isinstance(message_phone_from_obj, str) and ('+' in message_phone_from_obj or message_phone_from_obj.replace('-', '').replace(' ', '').isdigit()):
+                    print(f"   📞 Found phone number in phoneNumber object: {message_phone_from_obj}")
+                    user_info = get_user_from_phone_number(message_phone_from_obj)
+                    if user_info:
+                        return user_info
+                # Otherwise might be an ID
+                elif isinstance(message_phone_from_obj, str):
+                    print(f"   📋 phoneNumber object has ID, will check phoneNumberId extraction above")
+        
         # Check chat object inside message
         chat_obj = message_obj.get("chat")
         if isinstance(chat_obj, dict):
             print(f"   📋 Found chat object in message, checking for phone number...")
+            print(f"   📋 Chat object keys: {list(chat_obj.keys())}")
+            
+            # Log chat object structure for debugging
+            try:
+                import json
+                chat_str = json.dumps(chat_obj, default=str)
+                if len(chat_str) > 1000:
+                    print(f"   📋 Chat object (first 1000 chars): {chat_str[:1000]}...")
+                else:
+                    print(f"   📋 Chat object: {chat_str}")
+            except Exception as e:
+                print(f"   ⚠️  Could not serialize chat object: {e}")
+            
+            # Try to get phone number from chat object
             chat_phone = (
                 chat_obj.get("phoneNumber") or
                 chat_obj.get("phone_number") or
@@ -373,13 +414,64 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                 chat_obj.get("to_number") or
                 chat_obj.get("to") or
                 chat_obj.get("from") or
-                chat_obj.get("fromNumber")
+                chat_obj.get("fromNumber") or
+                chat_obj.get("from_number")
             )
             if chat_phone:
-                print(f"   📞 Found phone number in chat object: {chat_phone}")
-                user_info = get_user_from_phone_number(chat_phone)
-                if user_info:
-                    return user_info
+                # If phoneNumber is an object, extract the number
+                if isinstance(chat_phone, dict):
+                    chat_phone = chat_phone.get("number") or chat_phone.get("phoneNumber") or chat_phone.get("id")
+                
+                if chat_phone and isinstance(chat_phone, str):
+                    print(f"   📞 Found phone number in chat object: {chat_phone}")
+                    user_info = get_user_from_phone_number(chat_phone)
+                    if user_info:
+                        return user_info
+            
+            # Try to get phoneNumberId from chat object and resolve it
+            chat_phone_number_id = (
+                chat_obj.get("phoneNumberId") or
+                chat_obj.get("phone_number_id") or
+                (chat_obj.get("phoneNumber", {}).get("id") if isinstance(chat_obj.get("phoneNumber"), dict) else None)
+            )
+            if chat_phone_number_id:
+                print(f"   📋 Found phoneNumberId in chat object: {chat_phone_number_id}")
+                # Check cache first
+                if chat_phone_number_id in _phone_id_cache:
+                    phone_number = _phone_id_cache[chat_phone_number_id]
+                    print(f"   ✅ Got phone number from cache via phoneNumberId: {phone_number}")
+                    user_info = get_user_from_phone_number(phone_number)
+                    if user_info:
+                        return user_info
+                
+                # Fetch from API
+                phone_number = get_phone_number_from_id(chat_phone_number_id)
+                if phone_number:
+                    print(f"   ✅ Got phone number from phoneNumberId: {phone_number}")
+                    _phone_id_cache[chat_phone_number_id] = phone_number
+                    _phone_to_id_cache[phone_number] = chat_phone_number_id
+                    user_info = get_user_from_phone_number(phone_number)
+                    if user_info:
+                        return user_info
+        
+        # Check assistant object inside message (might have phone number info)
+        assistant_obj = message_obj.get("assistant")
+        if isinstance(assistant_obj, dict):
+            print(f"   📋 Found assistant object in message, checking for phone number...")
+            assistant_phone = (
+                assistant_obj.get("phoneNumber") or
+                assistant_obj.get("phone_number") or
+                assistant_obj.get("toNumber") or
+                assistant_obj.get("to_number")
+            )
+            if assistant_phone:
+                if isinstance(assistant_phone, dict):
+                    assistant_phone = assistant_phone.get("number") or assistant_phone.get("phoneNumber")
+                if assistant_phone:
+                    print(f"   📞 Found phone number in assistant object: {assistant_phone}")
+                    user_info = get_user_from_phone_number(assistant_phone)
+                    if user_info:
+                        return user_info
     
     # Check tool call arguments (toNumber/fromNumber from Vapi tool parameters)
     tool_call_args = None
