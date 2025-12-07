@@ -86,6 +86,56 @@ def get_phone_number_from_id(phone_number_id: str) -> Optional[str]:
     return None
 
 
+def get_phone_number_from_vapi_chat(chat_id: Optional[str] = None) -> Optional[str]:
+    """
+    Get phone number from VAPI chat ID.
+    
+    Args:
+        chat_id: VAPI chat ID (if available in request)
+    
+    Returns:
+        Phone number or None
+    """
+    if not chat_id:
+        return None
+    
+    try:
+        headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+        response = requests.get(
+            f"{VAPI_BASE_URL}/chat/{chat_id}",
+            headers=headers,
+            timeout=5  # Add timeout to avoid hanging
+        )
+        if response.status_code == 200:
+            chat_data = response.json()
+            print(f"   📋 Chat data keys: {list(chat_data.keys())}")
+            
+            # Try to get phone number directly from chat data first
+            phone_number = chat_data.get("phoneNumber") or chat_data.get("phone_number")
+            if phone_number:
+                print(f"   ✅ Found phone number directly in chat data: {phone_number}")
+                return phone_number
+            
+            # Fallback: Get phone number via phoneNumberId
+            phone_number_id = chat_data.get("phoneNumberId") or chat_data.get("phone_number_id")
+            if phone_number_id:
+                print(f"   📋 Found phoneNumberId in chat: {phone_number_id}, fetching phone number...")
+                phone_number = get_phone_number_from_id(phone_number_id)
+                if phone_number:
+                    print(f"   ✅ Got phone number from phoneNumberId: {phone_number}")
+                    return phone_number
+            else:
+                print(f"   ⚠️  No phoneNumberId found in chat data")
+        else:
+            print(f"   ⚠️  Vapi API returned status {response.status_code}: {response.text}")
+    except requests.exceptions.Timeout:
+        print(f"   ⚠️  Timeout fetching chat data from Vapi API")
+    except Exception as e:
+        print(f"   ⚠️  Error getting phone number from VAPI chat: {e}")
+    
+    return None
+
+
 # Import the cache from vapi.app (will be set at runtime)
 _call_phone_cache: Dict[str, str] = {}
 _phone_id_cache: Dict[str, str] = {}
@@ -105,12 +155,15 @@ def set_phone_caches(phone_id_cache: Dict[str, str], phone_to_id_cache: Dict[str
 def identify_user_from_vapi_request(request_body: Dict[str, Any], request_headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """
     Identify user from VAPI request by trying multiple methods.
+    Supports both calls and chats.
     
     Methods tried (in priority order):
-    1. Twilio destination number (twilio.to for calls, twilio.To for SMS) - MOST RELIABLE
-    2. Direct phone number in request body/headers
-    3. Phone number from call ID
-    4. Phone number from phone number ID
+    1. Custom headers from Vapi phone number inbound settings (x-vapi-to) - MOST RELIABLE
+    2. Phone number from call ID (x-call-id header or in body)
+    3. Phone number from chat ID (x-chat-id header or in body) - FOR CHATS
+    4. Twilio destination number (twilio.to for calls, twilio.To for SMS)
+    5. Direct phone number in request body/headers
+    6. Phone number from phone number ID
     
     Args:
         request_body: Request body as dict
@@ -143,7 +196,7 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         print(f"   ⚠️  x-vapi-to header exists but is empty (template variable {{to}} not populated)")
     
     # Method 1b: Use x-call-id header to fetch phone number from Vapi API
-    # This is a fallback when x-vapi-to is empty
+    # This is a fallback when x-vapi-to is empty (for calls)
     call_id_from_header = header_keys_lower.get("x-call-id")
     if call_id_from_header:
         print(f"   📞 Found x-call-id header: {call_id_from_header}")
@@ -168,6 +221,35 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                 return user_info
             else:
                 print(f"   ⚠️  Phone number {phone_number} not found in database")
+    
+    # Method 1c: Use x-chat-id header to fetch phone number from Vapi API (FOR CHATS)
+    # This handles chat-based requests where users interact via chat instead of calls
+    chat_id_from_header = header_keys_lower.get("x-chat-id")
+    if chat_id_from_header:
+        print(f"   💬 Found x-chat-id header: {chat_id_from_header}")
+        
+        # First check cache (can reuse call_phone_cache since it's just ID -> phone mapping)
+        if chat_id_from_header in _call_phone_cache:
+            cached_number = _call_phone_cache[chat_id_from_header]
+            print(f"   ✅ Found phone number from cached chat ID: {cached_number}")
+            user_info = get_user_from_phone_number(cached_number)
+            if user_info:
+                return user_info
+        
+        # Fallback: Fetch from Vapi API
+        print(f"   💬 Chat ID not in cache, fetching phone number from Vapi API...")
+        phone_number = get_phone_number_from_vapi_chat(chat_id_from_header)
+        if phone_number:
+            print(f"   ✅ Got phone number from Vapi API using chat ID: {phone_number}")
+            # Store in cache (reuse call_phone_cache for both calls and chats)
+            _call_phone_cache[chat_id_from_header] = phone_number
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+            else:
+                print(f"   ⚠️  Phone number {phone_number} not found in database")
+        else:
+            print(f"   ⚠️  Could not get phone number from chat ID {chat_id_from_header}")
     
     # Method 2: Twilio destination number (from webhook events)
     # This is the number that was called/texted (YOUR number), which identifies the PM/Realtor
@@ -232,7 +314,7 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         # Check inside message object
         (request_body.get("message") and request_body["message"].get("callId")) if isinstance(request_body.get("message"), dict) else None or
         (request_body.get("message") and request_body["message"].get("call_id")) if isinstance(request_body.get("message"), dict) else None or
-        # Check headers
+        # Check headers (already checked above, but check again for body-based IDs)
         request_headers.get("x-call-id") or
         request_headers.get("call-id") or
         request_headers.get("vapi-call-id") or
@@ -264,8 +346,51 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                 print(f"   ⚠️  Phone number {phone_number} not found in database")
         else:
             print(f"   ⚠️  Could not get phone number from call ID {call_id}")
+    
+    # Method 3b: From chat ID (check body, headers, and cache) - FOR CHATS
+    # Try multiple locations in the request body
+    chat_id = (
+        request_body.get("chatId") or 
+        request_body.get("chat_id") or 
+        request_body.get("chat") or
+        (request_body.get("chat") and request_body["chat"].get("id")) if isinstance(request_body.get("chat"), dict) else None or
+        # Check inside message object
+        (request_body.get("message") and request_body["message"].get("chatId")) if isinstance(request_body.get("message"), dict) else None or
+        (request_body.get("message") and request_body["message"].get("chat_id")) if isinstance(request_body.get("message"), dict) else None or
+        # Check headers (already checked above, but check again for body-based IDs)
+        request_headers.get("x-chat-id") or
+        request_headers.get("chat-id") or
+        request_headers.get("vapi-chat-id") or
+        request_headers.get("x-vapi-chat-id")
+    )
+    
+    if chat_id:
+        print(f"   💬 Found chat ID: {chat_id}")
+        
+        # First check in-memory cache (fastest) - reuse call_phone_cache
+        if chat_id in _call_phone_cache:
+            phone_number = _call_phone_cache[chat_id]
+            print(f"   ✅ Got phone number from cache: {phone_number}")
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+        
+        # Fallback: Fetch from Vapi API
+        print(f"   💬 Chat ID not in cache, fetching from Vapi API...")
+        phone_number = get_phone_number_from_vapi_chat(chat_id)
+        if phone_number:
+            print(f"   ✅ Got phone number from Vapi API: {phone_number}")
+            # Store in cache for future requests (reuse call_phone_cache)
+            _call_phone_cache[chat_id] = phone_number
+            user_info = get_user_from_phone_number(phone_number)
+            if user_info:
+                return user_info
+            else:
+                print(f"   ⚠️  Phone number {phone_number} not found in database")
+        else:
+            print(f"   ⚠️  Could not get phone number from chat ID {chat_id}")
     else:
-        print(f"   ⚠️  No call ID found in request body or headers")
+        print(f"   ⚠️  No call ID or chat ID found in request body or headers")
     
     # Method 4: From phone number ID (check cache first, then API)
     phone_number_id = (

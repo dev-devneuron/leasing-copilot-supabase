@@ -634,6 +634,16 @@ def _extract_caller_number(
                 call_obj.get("customerPhoneNumber"),
                 call_obj.get("customer", {}).get("phoneNumber") if isinstance(call_obj.get("customer"), dict) else None,
             ])
+        # Also check chat object (for chat-based requests)
+        chat_obj = source.get("chat")
+        if isinstance(chat_obj, dict):
+            candidate_values.extend([
+                chat_obj.get("fromNumber"),
+                chat_obj.get("from"),
+                chat_obj.get("callerNumber"),
+                chat_obj.get("customerPhoneNumber"),
+                chat_obj.get("customer", {}).get("phoneNumber") if isinstance(chat_obj.get("customer"), dict) else None,
+            ])
         customer_obj = source.get("customer")
         if isinstance(customer_obj, dict):
             candidate_values.extend([
@@ -665,6 +675,7 @@ def _extract_caller_number(
             headers.get("x-vapi-from"),
             headers.get("x-vapi-caller"),
             headers.get("x-forwarded-from"),
+            headers.get("x-chat-from"),  # For chat-based requests
         ])
     
     for value in candidate_values:
@@ -1156,7 +1167,7 @@ async def search_apartments(request: VapiRequest, http_request: Request):
         body = await http_request.json()
         # Log headers for debugging - especially check for custom headers
         print(f"🔍 Full request headers: {dict(http_request.headers)}")
-        print(f"🔍 Looking for x-vapi-to header...")
+        print(f"🔍 Looking for identification headers...")
         # Check if headers contain our custom headers (case-insensitive)
         header_keys_lower = {k.lower(): v for k, v in http_request.headers.items()}
         if 'x-vapi-to' in header_keys_lower:
@@ -1168,12 +1179,19 @@ async def search_apartments(request: VapiRequest, http_request: Request):
         else:
             print(f"   ❌ x-vapi-to header NOT FOUND in request!")
         
-        # Also check for x-call-id
+        # Check for x-call-id (for calls)
         if 'x-call-id' in header_keys_lower:
             call_id_value = header_keys_lower['x-call-id']
             print(f"   ✅ Found x-call-id: {call_id_value}")
         else:
             print(f"   ⚠️  x-call-id header NOT FOUND in request!")
+        
+        # Check for x-chat-id (for chats)
+        if 'x-chat-id' in header_keys_lower:
+            chat_id_value = header_keys_lower['x-chat-id']
+            print(f"   ✅ Found x-chat-id: {chat_id_value}")
+        else:
+            print(f"   ⚠️  x-chat-id header NOT FOUND in request!")
         
         print(f"   Available headers: {list(header_keys_lower.keys())}")
         user_info = identify_user_from_vapi_request(body, dict(http_request.headers))
@@ -8916,7 +8934,10 @@ async def create_booking_request_vapi(
             source_ids = None
             if http_request:
                 try:
-                    from DB.vapi_helpers import identify_user_from_vapi_request
+                    from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
+                    # Share the caches with the helper module
+                    set_call_phone_cache(_call_phone_cache)
+                    set_phone_caches(_phone_id_cache, _phone_to_id_cache)
                     user_info = identify_user_from_vapi_request(request_body, request_headers)
                     source_ids = user_info.get("source_ids") if user_info else None
                 except Exception as e:
@@ -8996,8 +9017,9 @@ async def create_booking_request_vapi(
                     detail="Property has no assigned PM or Realtor. Please assign a user to the property before creating bookings."
                 )
         
-            # Extract call record information from headers (if booking came from VAPI call)
+            # Extract call/chat record information from headers (if booking came from VAPI call or chat)
             vapi_call_id = None
+            vapi_chat_id = None
             call_transcript = None
             call_recording_url = None
             
@@ -9006,8 +9028,9 @@ async def create_booking_request_vapi(
                     # Use already parsed headers
                     header_keys_lower = {k.lower(): v for k, v in request_headers.items()}
                     
-                    # Extract call_id from headers
+                    # Extract call_id or chat_id from headers (support both calls and chats)
                     vapi_call_id = header_keys_lower.get("x-call-id") or header_keys_lower.get("x-vapi-call-id")
+                    vapi_chat_id = header_keys_lower.get("x-chat-id") or header_keys_lower.get("x-vapi-chat-id")
                     
                     # If we have a call_id, try to get call record from database
                     if vapi_call_id:
@@ -9019,9 +9042,13 @@ async def create_booking_request_vapi(
                             call_transcript = call_record.transcript
                             call_recording_url = call_record.recording_url
                             print(f"✅ Linked booking to call record: {vapi_call_id}")
+                    
+                    # Note: Chat records might be stored differently, but we capture chat_id for future use
+                    if vapi_chat_id:
+                        print(f"✅ Linked booking to chat: {vapi_chat_id}")
                 except Exception as e:
-                    print(f"⚠️  Error extracting call record info: {e}")
-                    # Don't fail the booking creation if call record linking fails
+                    print(f"⚠️  Error extracting call/chat record info: {e}")
+                    # Don't fail the booking creation if call/chat record linking fails
             
             # Create booking
             booking = PropertyTourBooking(
@@ -10052,7 +10079,10 @@ async def _handle_property_availability(
         source_ids = None
         if http_request:
             try:
-                from DB.vapi_helpers import identify_user_from_vapi_request
+                from DB.vapi_helpers import identify_user_from_vapi_request, set_call_phone_cache, set_phone_caches
+                # Share the caches with the helper module
+                set_call_phone_cache(_call_phone_cache)
+                set_phone_caches(_phone_id_cache, _phone_to_id_cache)
                 # Use provided body if available, otherwise try to get from request
                 request_body = body
                 if request_body is None:
@@ -10547,6 +10577,10 @@ async def validate_tour_request(
         source_ids = None
         if http_request:
             try:
+                from DB.vapi_helpers import set_call_phone_cache, set_phone_caches
+                # Share the caches with the helper module
+                set_call_phone_cache(_call_phone_cache)
+                set_phone_caches(_phone_id_cache, _phone_to_id_cache)
                 # Use already parsed request_body if available
                 body = request_body if request_body else {}
                 headers = dict(http_request.headers) if http_request else {}
