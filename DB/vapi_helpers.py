@@ -75,13 +75,66 @@ def get_phone_number_from_id(phone_number_id: str) -> Optional[str]:
         headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
         response = requests.get(
             f"{VAPI_BASE_URL}/phone-number/{phone_number_id}",
-            headers=headers
+            headers=headers,
+            timeout=5
         )
         if response.status_code == 200:
             phone_data = response.json()
-            return phone_data.get("number")
+            phone_number = phone_data.get("number")
+            if phone_number:
+                print(f"   ✅ Got phone number from phone number ID: {phone_number}")
+            return phone_number
+        else:
+            print(f"   ⚠️  VAPI API returned status {response.status_code} for phone number ID: {response.text}")
     except Exception as e:
-        print(f"Error getting phone number from ID: {e}")
+        print(f"   ⚠️  Error getting phone number from ID: {e}")
+    
+    return None
+
+
+def get_phone_number_from_assistant_id(assistant_id: str) -> Optional[str]:
+    """
+    Get phone number from VAPI assistant ID.
+    For chats, the assistant configuration contains the phoneNumberId.
+    
+    Args:
+        assistant_id: VAPI assistant ID
+    
+    Returns:
+        Phone number or None
+    """
+    if not assistant_id:
+        return None
+    
+    try:
+        headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+        response = requests.get(
+            f"{VAPI_BASE_URL}/assistant/{assistant_id}",
+            headers=headers,
+            timeout=5
+        )
+        if response.status_code == 200:
+            assistant_data = response.json()
+            print(f"   📋 Assistant data keys: {list(assistant_data.keys())}")
+            
+            # Try to get phoneNumberId from assistant
+            phone_number_id = (
+                assistant_data.get("phoneNumberId") or
+                assistant_data.get("phone_number_id") or
+                (assistant_data.get("phoneNumber", {}).get("id") if isinstance(assistant_data.get("phoneNumber"), dict) else None)
+            )
+            
+            if phone_number_id:
+                print(f"   📋 Found phoneNumberId in assistant: {phone_number_id}")
+                phone_number = get_phone_number_from_id(phone_number_id)
+                if phone_number:
+                    return phone_number
+            else:
+                print(f"   ⚠️  No phoneNumberId found in assistant data")
+        else:
+            print(f"   ⚠️  VAPI API returned status {response.status_code} for assistant: {response.text}")
+    except Exception as e:
+        print(f"   ⚠️  Error getting phone number from assistant ID: {e}")
     
     return None
 
@@ -262,21 +315,26 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                 print(f"   ⚠️  Phone number {phone_number} not found in database")
     
     # Method 1c: Check for phoneNumberId in request (works for both calls and chats)
-    # This is often available in chat requests
+    # This is often available in chat requests - identifies which phone number/assistant is being used
     message_obj_temp = request_body.get("message")
     phone_number_id = (
         request_body.get("phoneNumberId") or 
         request_body.get("phone_number_id") or
         (message_obj_temp and message_obj_temp.get("phoneNumberId")) if isinstance(message_obj_temp, dict) else None or
         (message_obj_temp and message_obj_temp.get("phone_number_id")) if isinstance(message_obj_temp, dict) else None or
+        # Check in assistant object (for chats, the assistant has the phoneNumberId)
+        (message_obj_temp and isinstance(message_obj_temp.get("assistant"), dict) and message_obj_temp["assistant"].get("phoneNumberId")) or
+        (message_obj_temp and isinstance(message_obj_temp.get("assistant"), dict) and message_obj_temp["assistant"].get("phone_number_id")) or
         # Check in chat object inside message
         (message_obj_temp and isinstance(message_obj_temp.get("chat"), dict) and message_obj_temp["chat"].get("phoneNumberId")) or
         (message_obj_temp and isinstance(message_obj_temp.get("chat"), dict) and message_obj_temp["chat"].get("phone_number_id")) or
         # Check if phoneNumber is an object with id
         (message_obj_temp and isinstance(message_obj_temp.get("phoneNumber"), dict) and message_obj_temp["phoneNumber"].get("id")) or
+        (message_obj_temp and isinstance(message_obj_temp.get("assistant"), dict) and isinstance(message_obj_temp["assistant"].get("phoneNumber"), dict) and message_obj_temp["assistant"]["phoneNumber"].get("id")) or
         (message_obj_temp and isinstance(message_obj_temp.get("chat"), dict) and isinstance(message_obj_temp["chat"].get("phoneNumber"), dict) and message_obj_temp["chat"]["phoneNumber"].get("id"))
     )
     if phone_number_id:
+        print(f"   📞 Found phone number ID in request: {phone_number_id}")
         print(f"   📞 Found phone number ID: {phone_number_id}")
         
         # Check cache first (from webhook)
@@ -458,6 +516,19 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         assistant_obj = message_obj.get("assistant")
         if isinstance(assistant_obj, dict):
             print(f"   📋 Found assistant object in message, checking for phone number...")
+            print(f"   📋 Assistant object keys: {list(assistant_obj.keys())}")
+            
+            # Log assistant object structure
+            try:
+                import json
+                assistant_str = json.dumps(assistant_obj, default=str)
+                if len(assistant_str) > 1000:
+                    print(f"   📋 Assistant object (first 1000 chars): {assistant_str[:1000]}...")
+                else:
+                    print(f"   📋 Assistant object: {assistant_str}")
+            except Exception as e:
+                print(f"   ⚠️  Could not serialize assistant object: {e}")
+            
             assistant_phone = (
                 assistant_obj.get("phoneNumber") or
                 assistant_obj.get("phone_number") or
@@ -470,6 +541,43 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
                 if assistant_phone:
                     print(f"   📞 Found phone number in assistant object: {assistant_phone}")
                     user_info = get_user_from_phone_number(assistant_phone)
+                    if user_info:
+                        return user_info
+            
+            # Check for phoneNumberId in assistant object
+            assistant_phone_number_id = (
+                assistant_obj.get("phoneNumberId") or
+                assistant_obj.get("phone_number_id") or
+                (assistant_obj.get("phoneNumber", {}).get("id") if isinstance(assistant_obj.get("phoneNumber"), dict) else None)
+            )
+            if assistant_phone_number_id:
+                print(f"   📋 Found phoneNumberId in assistant object: {assistant_phone_number_id}")
+                # Check cache first
+                if assistant_phone_number_id in _phone_id_cache:
+                    phone_number = _phone_id_cache[assistant_phone_number_id]
+                    print(f"   ✅ Got phone number from cache via assistant phoneNumberId: {phone_number}")
+                    user_info = get_user_from_phone_number(phone_number)
+                    if user_info:
+                        return user_info
+                
+                # Fetch from API
+                phone_number = get_phone_number_from_id(assistant_phone_number_id)
+                if phone_number:
+                    print(f"   ✅ Got phone number from assistant phoneNumberId: {phone_number}")
+                    _phone_id_cache[assistant_phone_number_id] = phone_number
+                    _phone_to_id_cache[phone_number] = assistant_phone_number_id
+                    user_info = get_user_from_phone_number(phone_number)
+                    if user_info:
+                        return user_info
+            
+            # If no phoneNumberId in assistant object, try fetching assistant details from API
+            assistant_id = assistant_obj.get("id")
+            if assistant_id:
+                print(f"   📋 Found assistant ID: {assistant_id}, fetching assistant details from VAPI API...")
+                phone_number = get_phone_number_from_assistant_id(assistant_id)
+                if phone_number:
+                    print(f"   ✅ Got phone number from assistant API: {phone_number}")
+                    user_info = get_user_from_phone_number(phone_number)
                     if user_info:
                         return user_info
     
