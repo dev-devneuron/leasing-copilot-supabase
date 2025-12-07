@@ -709,7 +709,7 @@ class MaintenanceRequest(SQLModel, table=True):
     # Relationships
     tenant: Optional["Tenant"] = Relationship(back_populates="maintenance_requests")
     property: Optional["ApartmentListing"] = Relationship()
-    property_manager: Optional["PropertyManager"] = Relationship(overlaps="maintenance_requests")
+    property_manager: Optional["PropertyManager"] = Relationship()
     assigned_realtor: Optional["Realtor"] = Relationship()
 
 # ---------------------- EMBEDDING SETUP ----------------------
