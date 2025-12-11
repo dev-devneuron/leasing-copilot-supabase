@@ -70,10 +70,15 @@ if DATABASE_URL:
     engine = create_engine(
         DATABASE_URL, 
         pool_pre_ping=True,  # Verify connections before using
-        pool_size=5,  # Number of connections to maintain
-        max_overflow=10,  # Additional connections beyond pool_size
+        pool_size=20,  # Increased from 5 - Number of connections to maintain
+        max_overflow=30,  # Increased from 10 - Additional connections beyond pool_size
         pool_recycle=3600,  # Recycle connections after 1 hour
-        echo=False  # Set to True for SQL query logging
+        pool_timeout=30,  # Timeout for getting connection from pool
+        echo=False,  # Set to True for SQL query logging
+        connect_args={
+            "connect_timeout": 10,  # Connection timeout
+            "application_name": "leasap_backend"  # Help identify connections in DB
+        }
     )
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 else:

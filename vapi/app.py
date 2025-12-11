@@ -73,6 +73,23 @@ from config import (
 load_dotenv()
 
 # ============================================================================
+# GLOBAL HTTP CLIENT (Reused for better performance)
+# ============================================================================
+# Create a global httpx client that's reused across requests
+# This avoids creating a new client for each request, improving latency
+_http_client: Optional[httpx.AsyncClient] = None
+
+def get_http_client() -> httpx.AsyncClient:
+    """Get or create the global HTTP client."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=timeout, 
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        )
+    return _http_client
+
+# ============================================================================
 # FASTAPI APPLICATION INITIALIZATION
 # ============================================================================
 
@@ -88,6 +105,12 @@ async def lifespan(app: FastAPI):
         print("⚠️ Continuing without database connection...")
     
     yield  # Application runs here
+    
+    # Cleanup: Close HTTP client on shutdown
+    global _http_client
+    if _http_client:
+        await _http_client.aclose()
+        _http_client = None
     
     print("Shutting down FastAPI app...")
 
@@ -2213,17 +2236,17 @@ async def twilio_incoming(
         payload["previousChatId"] = prev_chat_id
 
     # Send to Vapi
-
+    # OPTIMIZATION: Reuse global HTTP client instead of creating new one per request
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                "https://api.vapi.ai/chat",
-                headers={
-                    "Authorization": f"Bearer {VAPI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
+        client = get_http_client()
+        response = await client.post(
+            "https://api.vapi.ai/chat",
+            headers={
+                "Authorization": f"Bearer {VAPI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
     except TimeoutException:
         return PlainTextResponse(
             "Vapi took too long to respond. Please try again later.", status_code=504
@@ -2261,12 +2284,13 @@ async def twilio_incoming(
 
     # Send reply via Twilio
 
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
-            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-            data={"From": TWILIO_PHONE_NUMBER, "To": From, "Body": vapi_reply},
-        )
+    # OPTIMIZATION: Reuse global HTTP client
+    client = get_http_client()
+    await client.post(
+        f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+        auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+        data={"From": TWILIO_PHONE_NUMBER, "To": From, "Body": vapi_reply},
+    )
     return PlainTextResponse(status_code=200)
 
 
@@ -2551,18 +2575,36 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
         # Create a mapping of source_id to source for quick lookup
         source_map = {s.source_id: s for s in sources}
 
+        # OPTIMIZATION: Bulk fetch all PMs and Realtors in one query each
+        pm_ids = [s.property_manager_id for s in sources if s.property_manager_id]
+        realtor_ids = [s.realtor_id for s in sources if s.realtor_id]
+        
+        # Bulk fetch all PMs
+        pm_map = {}
+        if pm_ids:
+            pms = session.exec(
+                select(PropertyManager).where(PropertyManager.property_manager_id.in_(pm_ids))
+            ).all()
+            pm_map = {pm.property_manager_id: pm for pm in pms}
+        
+        # Bulk fetch all Realtors
+        realtor_map = {}
+        if realtor_ids:
+            realtors = session.exec(
+                select(Realtor).where(Realtor.realtor_id.in_(realtor_ids))
+            ).all()
+            realtor_map = {r.realtor_id: r for r in realtors}
+        
         # Transform into frontend-friendly shape with ownership info
         result = []
         for apt in apartments:
             meta = apt.listing_metadata or {}
             source = source_map.get(apt.source_id)
             
-            # Get owner information
+            # Get owner information from pre-fetched maps (no N+1 queries)
             owner_info = {}
             if source and source.property_manager_id:
-                pm = session.exec(
-                    select(PropertyManager).where(PropertyManager.property_manager_id == source.property_manager_id)
-                ).first()
+                pm = pm_map.get(source.property_manager_id)
                 if pm:
                     owner_info = {
                         "owner_type": "property_manager",
@@ -2572,9 +2614,7 @@ async def get_apartments(user_data: dict = Depends(get_current_user_data)):
                     }
             
             if source and source.realtor_id:
-                realtor = session.exec(
-                    select(Realtor).where(Realtor.realtor_id == source.realtor_id)
-                ).first()
+                realtor = realtor_map.get(source.realtor_id)
                 if realtor:
                     owner_info = {
                         "owner_type": "realtor",
@@ -3614,6 +3654,10 @@ async def update_calendar_preferences(
                 user = session.get(PropertyManager, user_id)
             elif user_type == "realtor":
                 user = session.get(Realtor, user_id)
+            
+            # Clear cache for this user's preferences
+            cache_key = f"{user_type}_{user_id}"
+            _user_preferences_cache.pop(cache_key, None)
             
             # Return updated preferences
             updated_prefs = _get_user_calendar_preferences(session, user_id, user_type)
@@ -7969,37 +8013,54 @@ def _send_sms_notification(phone_number: str, message: str):
         return False
 
 
+# Cache for user preferences (cleared on update)
+_user_preferences_cache: Dict[str, Dict[str, Any]] = {}
+
 def _get_user_calendar_preferences(session: Session, user_id: int, user_type: str) -> Dict[str, Any]:
-    """Get user's calendar preferences with defaults."""
+    """Get user's calendar preferences with defaults. Uses in-memory cache for performance."""
+    cache_key = f"{user_type}_{user_id}"
+    
+    # Check cache first (cache is cleared when preferences are updated)
+    if cache_key in _user_preferences_cache:
+        return _user_preferences_cache[cache_key]
+    
     if user_type == "property_manager":
         user = session.get(PropertyManager, user_id)
     elif user_type == "realtor":
         user = session.get(Realtor, user_id)
     else:
-        return {
+        default_prefs = {
             "timezone": "America/New_York",
             "defaultSlotLengthMins": 30,
             "workingHours": {"start": "09:00", "end": "17:00"},
             "workingDays": [0, 1, 2, 3, 4]  # Default: Monday-Friday
         }
+        _user_preferences_cache[cache_key] = default_prefs
+        return default_prefs
     
     if not user:
-        return {
+        default_prefs = {
             "timezone": "America/New_York",
             "defaultSlotLengthMins": 30,
             "workingHours": {"start": "09:00", "end": "17:00"},
             "workingDays": [0, 1, 2, 3, 4]  # Default: Monday-Friday
         }
+        _user_preferences_cache[cache_key] = default_prefs
+        return default_prefs
     
     prefs = user.calendar_preferences or {}
     timezone = user.timezone or "America/New_York"
     
-    return {
+    result = {
         "timezone": timezone,
         "defaultSlotLengthMins": prefs.get("defaultSlotLengthMins", 30),
         "workingHours": prefs.get("workingHours", {"start": "09:00", "end": "17:00"}),
         "workingDays": prefs.get("workingDays", [0, 1, 2, 3, 4])  # Default: Monday-Friday
     }
+    
+    # Cache the result
+    _user_preferences_cache[cache_key] = result
+    return result
 
 
 def _compute_available_slots(
@@ -8663,9 +8724,9 @@ async def create_manual_booking(
             }]
         )
         try:
+            # OPTIMIZATION: Add both objects before committing (single transaction)
             session.add(booking)
-            session.commit()
-            session.refresh(booking)
+            session.flush()  # Flush to get booking_id without committing
             
             # Create blocking availability slot
             blocking_slot = AvailabilitySlot(
@@ -8678,7 +8739,8 @@ async def create_manual_booking(
                 booking_id=booking.booking_id
             )
             session.add(blocking_slot)
-            session.commit()
+            session.commit()  # Single commit for both objects
+            session.refresh(booking)
             session.refresh(blocking_slot)
         except Exception as db_error:
             session.rollback()
@@ -9301,6 +9363,15 @@ async def get_calendar_events(
         
         bookings = session.exec(bookings_query).all()
         
+        # OPTIMIZATION: Bulk fetch all properties for bookings in one query
+        booking_property_ids = list(set([b.property_id for b in bookings if b.property_id]))
+        property_map = {}
+        if booking_property_ids:
+            properties = session.exec(
+                select(ApartmentListing).where(ApartmentListing.id.in_(booking_property_ids))
+            ).all()
+            property_map = {p.id: p for p in properties}
+        
         # Get availability slots that overlap with the date range
         # Use overlap check: slot overlaps if (slot.start < to_date) AND (slot.end > from_date)
         slots_query = select(AvailabilitySlot).where(
@@ -9311,10 +9382,10 @@ async def get_calendar_events(
         )
         slots = session.exec(slots_query).all()
         
-        # Format bookings
+        # Format bookings (using pre-fetched property map - no N+1 queries)
         booking_events = []
         for booking in bookings:
-            property_listing = session.get(ApartmentListing, booking.property_id)
+            property_listing = property_map.get(booking.property_id)
             property_meta = property_listing.listing_metadata or {} if property_listing else {}
             
             booking_events.append({
@@ -9445,36 +9516,68 @@ async def get_user_bookings(
         
         bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
         
-        # Get property details for each booking
+        # OPTIMIZATION: Bulk fetch all properties and call records in one query each
+        property_ids = list(set([b.property_id for b in bookings if b.property_id]))
+        vapi_call_ids = [b.vapi_call_id for b in bookings if b.vapi_call_id and (not b.call_recording_url or not b.call_transcript)]
+        
+        # Bulk fetch all properties
+        property_map = {}
+        if property_ids:
+            properties = session.exec(
+                select(ApartmentListing).where(ApartmentListing.id.in_(property_ids))
+            ).all()
+            property_map = {p.id: p for p in properties}
+        
+        # Bulk fetch all call records that need updating
+        call_record_map = {}
+        if vapi_call_ids:
+            from DB.db import CallRecord
+            call_records = session.exec(
+                select(CallRecord).where(CallRecord.call_id.in_(vapi_call_ids))
+            ).all()
+            call_record_map = {cr.call_id: cr for cr in call_records}
+        
+        # Batch update bookings that need call record data
+        bookings_to_update = []
+        for b in bookings:
+            if b.vapi_call_id and (not b.call_recording_url or not b.call_transcript):
+                call_record = call_record_map.get(b.vapi_call_id)
+                if call_record:
+                    updated = False
+                    if not b.call_recording_url and call_record.recording_url:
+                        b.call_recording_url = call_record.recording_url
+                        updated = True
+                    if not b.call_transcript and call_record.transcript:
+                        b.call_transcript = call_record.transcript
+                        updated = True
+                    if updated:
+                        bookings_to_update.append(b)
+        
+        # Batch commit all updates at once
+        if bookings_to_update:
+            for b in bookings_to_update:
+                session.add(b)
+            session.commit()
+        
+        # Get property details for each booking (using pre-fetched map - no N+1 queries)
         result_bookings = []
         for b in bookings:
-            property_listing = session.get(ApartmentListing, b.property_id)
+            property_listing = property_map.get(b.property_id)
             property_address = None
             if property_listing:
                 meta = property_listing.listing_metadata or {}
                 property_address = meta.get("address", "Unknown")
             
-            # If we have a vapi_call_id but no recording URL/transcript stored, try to fetch it from CallRecord
+            # Get call record data from pre-fetched map
             call_recording_url = b.call_recording_url
             call_transcript = b.call_transcript
-            if b.vapi_call_id:
-                if not call_recording_url or not call_transcript:
-                    from DB.db import CallRecord
-                    call_record = session.exec(
-                        select(CallRecord).where(CallRecord.call_id == b.vapi_call_id)
-                    ).first()
-                    if call_record:
-                        if not call_recording_url and call_record.recording_url:
-                            call_recording_url = call_record.recording_url
-                            # Update the booking with the recording URL for future requests
-                            b.call_recording_url = call_recording_url
-                        if not call_transcript and call_record.transcript:
-                            call_transcript = call_record.transcript
-                            # Update the booking with the transcript for future requests
-                            b.call_transcript = call_transcript
-                        if b.call_recording_url != call_recording_url or b.call_transcript != call_transcript:
-                            session.add(b)
-                            session.commit()
+            if b.vapi_call_id and (not call_recording_url or not call_transcript):
+                call_record = call_record_map.get(b.vapi_call_id)
+                if call_record:
+                    if not call_recording_url:
+                        call_recording_url = call_record.recording_url
+                    if not call_transcript:
+                        call_transcript = call_record.transcript
             
             result_bookings.append({
                 "bookingId": b.booking_id,
@@ -11171,23 +11274,37 @@ async def get_bookings_by_visitor_vapi(
             
             bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
         
-        # Prepare response with helpful information
-        # Fetch call records for bookings that have vapi_call_id but missing transcript/recording
+        # OPTIMIZATION: Bulk fetch all call records that need updating
+        vapi_call_ids = [b.vapi_call_id for b in bookings if b.vapi_call_id and (not b.call_recording_url or not b.call_transcript)]
+        call_record_map = {}
+        if vapi_call_ids:
+            from DB.db import CallRecord
+            call_records = session.exec(
+                select(CallRecord).where(CallRecord.call_id.in_(vapi_call_ids))
+            ).all()
+            call_record_map = {cr.call_id: cr for cr in call_records}
+        
+        # Batch update bookings that need call record data
+        bookings_to_update = []
         for b in bookings:
-            if b.vapi_call_id:
-                if not b.call_recording_url or not b.call_transcript:
-                    from DB.db import CallRecord
-                    call_record = session.exec(
-                        select(CallRecord).where(CallRecord.call_id == b.vapi_call_id)
-                    ).first()
-                    if call_record:
-                        if not b.call_recording_url and call_record.recording_url:
-                            b.call_recording_url = call_record.recording_url
-                        if not b.call_transcript and call_record.transcript:
-                            b.call_transcript = call_record.transcript
-                        if b.call_recording_url != call_record.recording_url or b.call_transcript != call_record.transcript:
-                            session.add(b)
-                            session.commit()
+            if b.vapi_call_id and (not b.call_recording_url or not b.call_transcript):
+                call_record = call_record_map.get(b.vapi_call_id)
+                if call_record:
+                    updated = False
+                    if not b.call_recording_url and call_record.recording_url:
+                        b.call_recording_url = call_record.recording_url
+                        updated = True
+                    if not b.call_transcript and call_record.transcript:
+                        b.call_transcript = call_record.transcript
+                        updated = True
+                    if updated:
+                        bookings_to_update.append(b)
+        
+        # Batch commit all updates at once
+        if bookings_to_update:
+            for b in bookings_to_update:
+                session.add(b)
+            session.commit()
         
         response_data = {
             "visitorPhone": visitor_phone,
