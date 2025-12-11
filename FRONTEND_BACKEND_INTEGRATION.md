@@ -3221,6 +3221,72 @@ function PendingBookingsPanel({ userId, userType }) {
   - `holiday` - Holiday (full day)
   - `off_day` - Day off (full day)
 - **Full-Day Events:** Set `is_full_day: true` to mark entire day(s) as holiday/off day
+- **Response:**
+```json
+{
+  "slotId": 789,
+  "startAt": "2025-12-25T00:00:00Z",
+  "endAt": "2025-12-25T23:59:59Z",
+  "slotType": "holiday",
+  "isFullDay": true,
+  "message": "Availability slot created successfully"
+}
+```
+
+**3a. Delete Availability Slot (Blocked Time Slot)**
+- **Endpoint:** `DELETE /api/users/{user_id}/availability/{slot_id}?user_type={user_type}`
+- **Description:** Delete a blocked time slot (availability slot). Users can only delete their own slots. Cannot delete slots linked to bookings.
+- **Query Parameters:**
+  - `user_type` (required): `"property_manager"` or `"realtor"`
+- **Response:**
+```json
+{
+  "slotId": 789,
+  "message": "Availability slot deleted successfully"
+}
+```
+- **Error Responses:**
+  - `404`: Slot not found
+  - `403`: You can only delete your own availability slots
+  - `400`: Cannot delete availability slot linked to a booking. Cancel or delete the booking instead.
+- **Frontend Implementation:**
+```javascript
+// Delete a blocked time slot
+async function deleteAvailabilitySlot(slotId) {
+  const response = await fetch(
+    `/api/users/${userId}/availability/${slotId}?user_type=${userType}`,
+    {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    }
+  );
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to delete availability slot');
+  }
+  
+  return response.json();
+}
+
+// Usage in calendar component
+async function handleDeleteSlot(slotId) {
+  try {
+    await deleteAvailabilitySlot(slotId);
+    // Refresh calendar events after deletion
+    await refreshCalendarEvents();
+    showSuccessMessage('Blocked time slot removed successfully');
+  } catch (error) {
+    showErrorMessage(error.message);
+  }
+}
+```
+- **Important Notes:**
+  - Users can only delete their own availability slots
+  - Slots linked to bookings (where `booking_id` is not null) cannot be deleted directly - cancel or delete the booking instead
+  - After deletion, refresh calendar events to update the UI
 
 **4. Get All Calendar Events**
 - **Endpoint:** `GET /api/users/{user_id}/calendar-events?from_date={ISO_DATE}&to_date={ISO_DATE}`

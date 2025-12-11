@@ -3565,8 +3565,15 @@ async def update_calendar_preferences(
         if timezone is not None:
             user.timezone = timezone
         
-        # Get or initialize calendar_preferences
-        prefs = user.calendar_preferences or {}
+        # Get or initialize calendar_preferences - IMPORTANT: Create a deep copy to avoid modifying the original
+        # This ensures SQLAlchemy detects the change properly
+        import copy
+        existing_prefs = user.calendar_preferences
+        if existing_prefs is None:
+            prefs = {}
+        else:
+            # Deep copy to ensure we're working with a new dict object
+            prefs = copy.deepcopy(existing_prefs)
         
         # Update default slot length if provided
         if default_slot_length_mins is not None:
@@ -3579,7 +3586,13 @@ async def update_calendar_preferences(
         
         # Update working hours if provided
         if working_hours_start is not None or working_hours_end is not None:
-            working_hours = prefs.get("workingHours", {"start": "09:00", "end": "17:00"})
+            # Get existing working hours or create new dict
+            working_hours = prefs.get("workingHours")
+            if working_hours is None:
+                working_hours = {"start": "09:00", "end": "17:00"}
+            else:
+                # Deep copy to ensure we're modifying a new dict
+                working_hours = copy.deepcopy(working_hours)
             
             if working_hours_start is not None:
                 # Validate format
@@ -3631,12 +3644,13 @@ async def update_calendar_preferences(
                     detail="working_days must contain integers between 0 (Monday) and 6 (Sunday)"
                 )
             
-            # Remove duplicates and sort
+            # Remove duplicates and sort - create a new list to ensure change detection
             working_days_unique = sorted(list(set(working_days)))
             prefs["workingDays"] = working_days_unique
         
-        # Update calendar_preferences - create a new dict to ensure change detection
-        user.calendar_preferences = dict(prefs)
+        # CRITICAL: Always create a completely new dict object to ensure SQLAlchemy detects the change
+        # This is necessary for JSONB fields in PostgreSQL
+        user.calendar_preferences = copy.deepcopy(prefs)
         
         # Mark JSONB field as modified (required for SQLAlchemy to detect changes)
         flag_modified(user, "calendar_preferences")
@@ -8570,6 +8584,66 @@ async def create_availability_slot(
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to create availability slot: {error_msg}"
+            )
+
+
+# Delete Availability Slot
+@app.delete("/api/users/{user_id}/availability/{slot_id}")
+async def delete_availability_slot(
+    user_id: int,
+    slot_id: int,
+    user_type: str,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Delete an availability slot (blocked time slot).
+    Only the slot owner can delete their own slots.
+    Cannot delete slots that are linked to bookings (booking_id is not null).
+    """
+    # Verify user can only delete their own slots
+    if user_data.get("user_type") != user_type or user_data.get("id") != user_id:
+        raise HTTPException(
+            status_code=403, 
+            detail="You can only delete your own availability slots"
+        )
+    
+    with Session(engine) as session:
+        # Get the slot
+        slot = session.get(AvailabilitySlot, slot_id)
+        if not slot:
+            raise HTTPException(status_code=404, detail="Availability slot not found")
+        
+        # Verify the slot belongs to the user
+        if slot.user_id != user_id or slot.user_type != user_type:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete your own availability slots"
+            )
+        
+        # Prevent deletion of slots linked to bookings (these are managed by booking lifecycle)
+        if slot.booking_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete availability slot linked to a booking. Cancel or delete the booking instead."
+            )
+        
+        try:
+            session.delete(slot)
+            session.commit()
+            
+            return JSONResponse(content={
+                "slotId": slot_id,
+                "message": "Availability slot deleted successfully"
+            })
+        except Exception as e:
+            session.rollback()
+            error_msg = str(e) if isinstance(e, (str, Exception)) else repr(e)
+            print(f"⚠️  Error deleting availability slot: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete availability slot: {error_msg}"
             )
 
 
