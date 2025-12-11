@@ -8038,25 +8038,27 @@ def _compute_available_slots(
     work_start = datetime.strptime(working_hours["start"], "%H:%M").time()
     work_end = datetime.strptime(working_hours["end"], "%H:%M").time()
     
-    # Get all unavailable/busy slots
+    # Get all unavailable/busy slots that overlap with the date range
+    # Use overlap check: slot overlaps if (slot.start < to_date) AND (slot.end > from_date)
     busy_slots = session.exec(
         select(AvailabilitySlot).where(
             AvailabilitySlot.user_id == user_id,
             AvailabilitySlot.user_type == user_type,
             AvailabilitySlot.slot_type.in_(["unavailable", "busy", "booking"]),
-            AvailabilitySlot.start_at >= from_date,
-            AvailabilitySlot.end_at <= to_date
+            AvailabilitySlot.start_at < to_date,  # Slot starts before range ends
+            AvailabilitySlot.end_at > from_date    # Slot ends after range starts
         )
     ).all()
     
-    # Get all approved bookings
+    # Get all approved bookings that overlap with the date range
+    # Use overlap check: booking overlaps if (booking.start < to_date) AND (booking.end > from_date)
     approved_bookings = session.exec(
         select(PropertyTourBooking).where(
             PropertyTourBooking.assigned_to_user_id == user_id,
             PropertyTourBooking.assigned_to_user_type == user_type,
             PropertyTourBooking.status == "approved",
-            PropertyTourBooking.start_at >= from_date,
-            PropertyTourBooking.end_at <= to_date
+            PropertyTourBooking.start_at < to_date,  # Booking starts before range ends
+            PropertyTourBooking.end_at > from_date   # Booking ends after range starts
         )
     ).all()
     
@@ -9265,13 +9267,14 @@ async def get_calendar_events(
         raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format.")
     
     with Session(engine) as session:
-        # Get bookings
+        # Get bookings that overlap with the date range
+        # Use overlap check: booking overlaps if (booking.start < to_date) AND (booking.end > from_date)
         bookings_query = select(PropertyTourBooking).where(
             PropertyTourBooking.assigned_to_user_id == user_id,
             PropertyTourBooking.assigned_to_user_type == user_type,
             PropertyTourBooking.deleted_at.is_(None),
-            PropertyTourBooking.start_at >= from_dt,
-            PropertyTourBooking.end_at <= to_dt
+            PropertyTourBooking.start_at < to_dt,  # Booking starts before range ends
+            PropertyTourBooking.end_at > from_dt   # Booking ends after range starts
         )
         
         # If PM, also include bookings for properties they manage
@@ -9292,18 +9295,19 @@ async def get_calendar_events(
                         PropertyTourBooking.property_id.in_(property_ids)
                     ),
                     PropertyTourBooking.deleted_at.is_(None),
-                    PropertyTourBooking.start_at >= from_dt,
-                    PropertyTourBooking.end_at <= to_dt
+                    PropertyTourBooking.start_at < to_dt,  # Booking starts before range ends
+                    PropertyTourBooking.end_at > from_dt   # Booking ends after range starts
                 )
         
         bookings = session.exec(bookings_query).all()
         
-        # Get availability slots (manual events, holidays, off days, etc.)
+        # Get availability slots that overlap with the date range
+        # Use overlap check: slot overlaps if (slot.start < to_date) AND (slot.end > from_date)
         slots_query = select(AvailabilitySlot).where(
             AvailabilitySlot.user_id == user_id,
             AvailabilitySlot.user_type == user_type,
-            AvailabilitySlot.start_at >= from_dt,
-            AvailabilitySlot.end_at <= to_dt
+            AvailabilitySlot.start_at < to_dt,  # Slot starts before range ends
+            AvailabilitySlot.end_at > from_dt   # Slot ends after range starts
         )
         slots = session.exec(slots_query).all()
         

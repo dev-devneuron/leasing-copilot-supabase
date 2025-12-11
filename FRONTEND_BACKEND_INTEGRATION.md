@@ -3443,13 +3443,16 @@ async function getCalendarEvents(fromDate, toDate) {
 ```
 
 **Important Notes:**
+- ⚠️ **CRITICAL: Always fetch preferences on component mount** - Don't use hardcoded defaults
+- ⚠️ **CRITICAL: Preferences persist across sessions** - Always fetch from API, don't assume defaults
 - You can update individual fields (e.g., just `working_hours_start` and `working_hours_end`)
 - `working_hours_end` must be after `working_hours_start`
 - `default_slot_length_mins` must be between 15 and 120
 - Time format must be `HH:MM` (24-hour format, e.g., "09:00", "17:00")
 - `working_days` is an array of integers: 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
-- Default `working_days` is `[0, 1, 2, 3, 4]` (Monday-Friday)
+- Default `working_days` is `[0, 1, 2, 3, 4]` (Monday-Friday) - but only if user hasn't set preferences yet
 - Changes are saved immediately and persist across sessions
+- **Always use the fetched preferences** - don't use hardcoded defaults in your UI
 
 **Implementation:**
 ```javascript
@@ -3465,20 +3468,44 @@ function AvailabilityManager({ userId, userType }) {
   
   const [unavailableSlots, setUnavailableSlots] = useState([]);
   
-  // Fetch calendar preferences on mount
+  // ⚠️ CRITICAL: Always fetch preferences on mount - don't use hardcoded defaults
   useEffect(() => {
     fetchCalendarPreferences();
   }, [userId, userType]);
   
   async function fetchCalendarPreferences() {
-    const response = await fetch(
-      `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
-      {
-        headers: { 'Authorization': `Bearer ${token}` }
+    try {
+      const response = await fetch(
+        `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+        {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        // ⚠️ IMPORTANT: Use the fetched preferences, not defaults
+        setPreferences(data);
+      } else {
+        console.error('Failed to fetch calendar preferences');
+        // Only use defaults if fetch fails
+        setPreferences({
+          timezone: 'America/New_York',
+          defaultSlotLengthMins: 30,
+          workingHours: { start: '09:00', end: '17:00' },
+          workingDays: [0, 1, 2, 3, 4]
+        });
       }
-    );
-    const data = await response.json();
-    setPreferences(data);
+    } catch (error) {
+      console.error('Error fetching calendar preferences:', error);
+      // Only use defaults if fetch fails
+      setPreferences({
+        timezone: 'America/New_York',
+        defaultSlotLengthMins: 30,
+        workingHours: { start: '09:00', end: '17:00' },
+        workingDays: [0, 1, 2, 3, 4]
+      });
+    }
   }
   
   // Update calendar preferences
@@ -3577,6 +3604,56 @@ function AvailabilityManager({ userId, userType }) {
       // Refresh unavailable slots
       fetchUnavailableSlots();
     }
+  }
+  
+  // ⚠️ CRITICAL: Initialize state with null/undefined, then fetch from API
+  // Don't use hardcoded defaults - they will override saved preferences
+  const [preferences, setPreferences] = useState(null);  // Start with null
+  const [unavailableSlots, setUnavailableSlots] = useState([]);
+  
+  // Fetch calendar preferences on mount
+  useEffect(() => {
+    fetchCalendarPreferences();
+  }, [userId, userType]);
+  
+  async function fetchCalendarPreferences() {
+    try {
+      const response = await fetch(
+        `/api/users/${userId}/calendar-preferences?user_type=${userType}`,
+        {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        // ⚠️ IMPORTANT: Use the fetched preferences, not defaults
+        setPreferences(data);
+      } else {
+        console.error('Failed to fetch calendar preferences');
+        // Only use defaults if fetch fails
+        setPreferences({
+          timezone: 'America/New_York',
+          defaultSlotLengthMins: 30,
+          workingHours: { start: '09:00', end: '17:00' },
+          workingDays: [0, 1, 2, 3, 4]
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching calendar preferences:', error);
+      // Only use defaults if fetch fails
+      setPreferences({
+        timezone: 'America/New_York',
+        defaultSlotLengthMins: 30,
+        workingHours: { start: '09:00', end: '17:00' },
+        workingDays: [0, 1, 2, 3, 4]
+      });
+    }
+  }
+  
+  // Don't render until preferences are loaded
+  if (!preferences) {
+    return <div>Loading preferences...</div>;
   }
   
   return (
