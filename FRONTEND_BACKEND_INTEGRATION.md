@@ -2165,6 +2165,101 @@ async function updateMaintenanceRequest(requestId, updateData) {
 }
 ```
 
+**Displaying Call Recordings and Transcripts (Same as Bookings):**
+
+Maintenance requests created via phone calls include call record information, just like bookings. The response includes:
+- `vapi_call_id`: The VAPI call ID
+- `call_transcript`: Full conversation transcript
+- `call_recording_url`: MP3 recording URL
+
+**Frontend Implementation for Displaying Call Records:**
+```javascript
+function MaintenanceRequestDetail({ request }) {
+  const [showTranscript, setShowTranscript] = useState(false);
+  
+  return (
+    <div className="maintenance-request-detail">
+      {/* ... other request details ... */}
+      
+      {/* Call Record Section - Show if request was submitted via phone */}
+      {request.submitted_via === 'phone' && request.vapi_call_id && (
+        <section className="call-record-section" style={{
+          marginTop: '16px',
+          padding: '12px',
+          backgroundColor: '#e7f3ff',
+          borderRadius: '4px'
+        }}>
+          <h3>📞 Call Record</h3>
+          
+          {/* Audio Player */}
+          {request.call_recording_url && (
+            <div style={{ marginBottom: '12px' }}>
+              <audio 
+                controls 
+                src={request.call_recording_url}
+                style={{ width: '100%' }}
+              >
+                Your browser does not support the audio element.
+              </audio>
+            </div>
+          )}
+          
+          {/* Transcript with Expand/Collapse */}
+          {request.call_transcript && (
+            <div>
+              <button
+                onClick={() => setShowTranscript(!showTranscript)}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#007bff',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  marginBottom: '8px'
+                }}
+              >
+                {showTranscript ? 'Hide' : 'Show'} Transcript
+              </button>
+              
+              {showTranscript && (
+                <div style={{
+                  marginTop: '8px',
+                  padding: '12px',
+                  backgroundColor: '#fff',
+                  borderRadius: '4px',
+                  maxHeight: '300px',
+                  overflowY: 'auto',
+                  fontSize: '14px',
+                  lineHeight: '1.6',
+                  whiteSpace: 'pre-wrap'
+                }}>
+                  {request.call_transcript}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Call ID */}
+          {request.vapi_call_id && (
+            <p style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
+              Call ID: {request.vapi_call_id}
+            </p>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+```
+
+**Key Points:**
+- ✅ Check `request.submitted_via === 'phone'` to determine if call record exists
+- ✅ Display audio player for `call_recording_url` (HTML5 `<audio>` element)
+- ✅ Make transcript expandable/collapsible (can be long)
+- ✅ Show call ID for reference
+- ✅ Backend automatically fetches transcript/recording from `CallRecord` table if missing (same as bookings)
+
 **UI Requirements:**
 - Display maintenance requests in a table/list with:
   - Tenant name and contact info
@@ -4182,13 +4277,17 @@ This error occurs when you try to display an error object directly instead of ex
 **❌ WRONG - Causes [object Object]:**
 ```javascript
 async function cancelBooking(bookingId) {
-  const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    }
-  });
+      // Build request body - send empty object if no reason, or include reason if provided
+      const requestBody = reason ? { reason: reason } : {};
+      
+      const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
   
   if (!response.ok) {
     const error = await response.json();
@@ -4201,13 +4300,17 @@ async function cancelBooking(bookingId) {
 ```javascript
 async function cancelBooking(bookingId) {
   try {
-    const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      }
-    });
+      // Build request body - send empty object if no reason, or include reason if provided
+      const requestBody = reason ? { reason: reason } : {};
+      
+      const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
     
     // IMPORTANT: Always parse JSON first
     const data = await response.json();
@@ -4272,13 +4375,17 @@ async function handleApiResponse(response) {
 
 // Usage:
 async function cancelBooking(bookingId) {
-  const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    }
-  });
+      // Build request body - send empty object if no reason, or include reason if provided
+      const requestBody = reason ? { reason: reason } : {};
+      
+      const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
   
   const result = await handleApiResponse(response);
   
@@ -4803,13 +4910,16 @@ function BookingDashboard({ userId, userType }) {
   
   async function handleCancel(bookingId, reason = null) {
     try {
+      // Build request body - send empty object if no reason, or include reason if provided
+      const requestBody = reason ? { reason: reason } : {};
+      
       const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ reason: reason || null })
+        body: JSON.stringify(requestBody)
       });
       
       // ⚠️ CRITICAL: Always parse JSON response FIRST before checking response.ok

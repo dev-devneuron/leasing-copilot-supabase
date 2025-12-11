@@ -351,6 +351,11 @@ class UnassignPhoneNumberRequest(BaseModel):
     purchased_phone_number_id: int
 
 
+class CancelBookingRequest(BaseModel):
+    """Request model for canceling a booking."""
+    reason: Optional[str] = None
+
+
 class CallForwardingStateUpdate(BaseModel):
     """Request model for updating call forwarding state."""
     after_hours_enabled: Optional[bool] = None
@@ -9727,10 +9732,13 @@ async def reschedule_booking(
 @app.post("/api/bookings/{booking_id}/cancel")
 async def cancel_booking(
     booking_id: int,
-    reason: Optional[str] = Body(None),
-    user_data: dict = Depends(get_current_user_data)
+    user_data: dict = Depends(get_current_user_data),
+    request_body: Optional[CancelBookingRequest] = None
 ):
     """Cancel a booking (either party can cancel)."""
+    # Extract reason from request body if provided
+    reason = request_body.reason if request_body else None
+    
     user_type = user_data["user_type"]
     user_id = user_data["id"]
     
