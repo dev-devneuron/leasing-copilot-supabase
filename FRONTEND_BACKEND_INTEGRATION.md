@@ -2338,6 +2338,9 @@ The property tour booking system allows tenants to schedule property tours via V
    - Call recordings (audio playback)
    - Call transcripts (full conversation text)
    - Call ID for reference
+   - **Automatic Linking:** The backend extracts `x-call-id` header from VAPI requests and links to the `CallRecord` table
+   - **Auto-Fetch:** If a booking has a `vapi_call_id` but is missing transcript/recording, the backend automatically fetches it from CallRecord when you retrieve the booking
+   - **No Extra API Calls Needed:** Call record data is included in all booking responses (`GET /api/bookings/{booking_id}`, `GET /api/users/{user_id}/bookings`, etc.)
 
 3. **Update Booking Endpoint** - New `PUT /api/bookings/{booking_id}` endpoint to update booking details
    - Update visitor info, times, notes, timezone, status
@@ -3770,6 +3773,20 @@ function BookingTimeDisplay({ booking }) {
 
 #### 4b. Displaying Call Recordings and Transcripts
 
+**IMPORTANT: How Bookings Link to Call Records**
+
+When a booking is created via a phone call (VAPI), the backend automatically:
+1. **Extracts the call ID** from the `x-call-id` header in the VAPI request
+2. **Links the booking to the CallRecord** table using `vapi_call_id`
+3. **Fetches transcript and recording** from the CallRecord table and stores them in the booking
+4. **Auto-updates missing data** - If a booking has a `vapi_call_id` but is missing transcript/recording, the backend automatically fetches it from CallRecord when you retrieve the booking
+
+**This means:**
+- ✅ Bookings created via phone calls are **automatically linked** to their call records
+- ✅ The backend **automatically fetches** transcript/recording from CallRecord if missing
+- ✅ You don't need to make separate API calls - the call record data is included in booking responses
+- ✅ The `callRecord` object in booking responses contains everything you need
+
 **When a booking is created via phone call, it includes call record information:**
 
 ```javascript
@@ -4792,24 +4809,41 @@ function BookingDashboard({ userId, userType }) {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ reason: reason })
+        body: JSON.stringify({ reason: reason || null })
       });
       
-      // IMPORTANT: Always parse JSON response first
+      // ⚠️ CRITICAL: Always parse JSON response FIRST before checking response.ok
+      // This prevents "[object Object]" errors
       const data = await response.json();
       
       if (response.ok) {
+        // Success - data contains: { bookingId, status: "cancelled", message }
         showNotification(data.message || 'Booking cancelled successfully');
         refreshBookings();
+        return data;
       } else {
-        // Extract error message from response
+        // Error - FastAPI returns errors as: { "detail": "Error message" }
+        // Extract the error message properly to avoid "[object Object]"
         const errorMsg = data.detail || data.message || 'Failed to cancel booking';
+        console.error('Cancel booking error:', errorMsg);
         alert(`Error: ${errorMsg}`);
+        throw new Error(errorMsg);
       }
     } catch (error) {
-      // Handle network errors
-      const errorMsg = error.message || 'Network error. Please try again.';
-      alert(`Error: ${errorMsg}`);
+      // Handle network errors or JSON parsing errors
+      if (error instanceof TypeError && error.message.includes('JSON')) {
+        // JSON parsing failed - might be network error
+        console.error('Network error or invalid response:', error);
+        alert('Network error. Please check your connection and try again.');
+      } else if (error instanceof Error) {
+        // Re-throw if we already extracted the error message above
+        throw error;
+      } else {
+        // Unknown error
+        console.error('Unknown error:', error);
+        alert('An unexpected error occurred. Please try again.');
+      }
+      throw error;
     }
   }
   

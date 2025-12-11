@@ -9176,6 +9176,28 @@ async def get_booking_details(
         if not can_view:
             raise HTTPException(status_code=403, detail="Access denied")
         
+        # If we have a vapi_call_id but no recording URL stored, try to fetch it from CallRecord
+        call_recording_url = booking.call_recording_url
+        call_transcript = booking.call_transcript
+        if booking.vapi_call_id:
+            if not call_recording_url or not call_transcript:
+                from DB.db import CallRecord
+                call_record = session.exec(
+                    select(CallRecord).where(CallRecord.call_id == booking.vapi_call_id)
+                ).first()
+                if call_record:
+                    if not call_recording_url and call_record.recording_url:
+                        call_recording_url = call_record.recording_url
+                        # Update the booking with the recording URL for future requests
+                        booking.call_recording_url = call_recording_url
+                    if not call_transcript and call_record.transcript:
+                        call_transcript = call_record.transcript
+                        # Update the booking with the transcript for future requests
+                        booking.call_transcript = call_transcript
+                    if booking.call_recording_url != call_recording_url or booking.call_transcript != call_transcript:
+                        session.add(booking)
+                        session.commit()
+        
         return JSONResponse(content={
             "bookingId": booking.booking_id,
             "propertyId": booking.property_id,
@@ -9201,8 +9223,8 @@ async def get_booking_details(
             "auditLog": booking.audit_log,
             "callRecord": {
                 "vapiCallId": booking.vapi_call_id,
-                "callTranscript": booking.call_transcript,
-                "callRecordingUrl": booking.call_recording_url
+                "callTranscript": call_transcript,
+                "callRecordingUrl": call_recording_url
             } if booking.vapi_call_id else None,
             "createdAt": booking.created_at.isoformat(),
             "updatedAt": booking.updated_at.isoformat()
@@ -9423,6 +9445,28 @@ async def get_user_bookings(
                 meta = property_listing.listing_metadata or {}
                 property_address = meta.get("address", "Unknown")
             
+            # If we have a vapi_call_id but no recording URL/transcript stored, try to fetch it from CallRecord
+            call_recording_url = b.call_recording_url
+            call_transcript = b.call_transcript
+            if b.vapi_call_id:
+                if not call_recording_url or not call_transcript:
+                    from DB.db import CallRecord
+                    call_record = session.exec(
+                        select(CallRecord).where(CallRecord.call_id == b.vapi_call_id)
+                    ).first()
+                    if call_record:
+                        if not call_recording_url and call_record.recording_url:
+                            call_recording_url = call_record.recording_url
+                            # Update the booking with the recording URL for future requests
+                            b.call_recording_url = call_recording_url
+                        if not call_transcript and call_record.transcript:
+                            call_transcript = call_record.transcript
+                            # Update the booking with the transcript for future requests
+                            b.call_transcript = call_transcript
+                        if b.call_recording_url != call_recording_url or b.call_transcript != call_transcript:
+                            session.add(b)
+                            session.commit()
+            
             result_bookings.append({
                 "bookingId": b.booking_id,
                 "propertyId": b.property_id,
@@ -9447,8 +9491,8 @@ async def get_user_bookings(
                 "requestedAt": b.requested_at.isoformat() if b.requested_at else None,
                 "callRecord": {
                     "vapiCallId": b.vapi_call_id,
-                    "callTranscript": b.call_transcript,
-                    "callRecordingUrl": b.call_recording_url
+                    "callTranscript": call_transcript,
+                    "callRecordingUrl": call_recording_url
                 } if b.vapi_call_id else None,
                 "createdAt": b.created_at.isoformat() if b.created_at else None,
                 "updatedAt": b.updated_at.isoformat() if b.updated_at else None
@@ -11116,6 +11160,23 @@ async def get_bookings_by_visitor_vapi(
             bookings = session.exec(query.order_by(PropertyTourBooking.start_at.desc())).all()
         
         # Prepare response with helpful information
+        # Fetch call records for bookings that have vapi_call_id but missing transcript/recording
+        for b in bookings:
+            if b.vapi_call_id:
+                if not b.call_recording_url or not b.call_transcript:
+                    from DB.db import CallRecord
+                    call_record = session.exec(
+                        select(CallRecord).where(CallRecord.call_id == b.vapi_call_id)
+                    ).first()
+                    if call_record:
+                        if not b.call_recording_url and call_record.recording_url:
+                            b.call_recording_url = call_record.recording_url
+                        if not b.call_transcript and call_record.transcript:
+                            b.call_transcript = call_record.transcript
+                        if b.call_recording_url != call_record.recording_url or b.call_transcript != call_record.transcript:
+                            session.add(b)
+                            session.commit()
+        
         response_data = {
             "visitorPhone": visitor_phone,
             "visitorName": visitor_name,

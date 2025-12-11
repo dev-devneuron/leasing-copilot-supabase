@@ -1,6 +1,0 @@
-address,price,bedrooms,bathrooms,square_feet,property_type,listing_status,features,description
-"123 Main St, Seattle, WA",2500,3,2.5,1200,Apartment,Available,"Pool, Gym, Parking","Modern apartment with great amenities"
-"456 Oak Ave, Portland, OR",1800,2,1,900,Condo,For Rent,"Balcony, Dishwasher","Cozy condo in downtown"
-"789 Pine Rd, San Francisco, CA",3500,1,1,750,Studio,Available,"Gym, Rooftop","Luxury studio in prime location"
-"321 Elm St, Boston, MA",2200,2,2,1100,Apartment,Available,"Laundry, Parking","Spacious 2-bedroom apartment"
-
