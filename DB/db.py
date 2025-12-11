@@ -276,9 +276,12 @@ class PropertyTourBooking(SQLModel, table=True):
     
     # Booking timing
     requested_at: datetime = Field(default_factory=datetime.utcnow, index=True)
-    start_at: datetime = Field(index=True)  # UTC
-    end_at: datetime = Field(index=True)  # UTC
+    start_at: datetime = Field(index=True)  # UTC (for internal calculations)
+    end_at: datetime = Field(index=True)  # UTC (for internal calculations)
     timezone: str = Field(default="America/New_York")  # Visitor's timezone
+    # Original time strings as customer sent them (no conversion)
+    customer_sent_start_at: Optional[str] = None  # Original time string from customer
+    customer_sent_end_at: Optional[str] = None  # Original time string from customer
     
     # Status and workflow
     status: str = Field(
@@ -306,6 +309,11 @@ class PropertyTourBooking(SQLModel, table=True):
         default=None,
         sa_column=Column(JSONB)
     )  # Array of {startAt, endAt} for reschedule proposals
+    
+    # Call record linking (for bookings created via phone calls)
+    vapi_call_id: Optional[str] = None  # VAPI call ID if booking was created via phone call
+    call_transcript: Optional[str] = None  # Transcript of the call that created this booking
+    call_recording_url: Optional[str] = None  # MP3 recording URL from VAPI for the call that created this booking
     
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)

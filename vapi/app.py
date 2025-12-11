@@ -8631,6 +8631,7 @@ async def create_manual_booking(
             )
         
         # Create the booking (automatically approved since created by approver)
+        # Store original time strings as entered (no conversion)
         booking = PropertyTourBooking(
             property_id=property_id,
             assigned_to_user_id=assigned_user["user_id"],
@@ -8639,9 +8640,11 @@ async def create_manual_booking(
             visitor_phone=normalized_phone,
             visitor_email=visitor_email,
             requested_at=datetime.utcnow(),
-            start_at=start_dt,
-            end_at=end_dt,
+            start_at=start_dt,  # Keep UTC for internal calculations
+            end_at=end_dt,  # Keep UTC for internal calculations
             timezone=timezone or "America/New_York",
+            customer_sent_start_at=start_at,  # Store original as entered
+            customer_sent_end_at=end_at,  # Store original as entered
             status="approved",  # Auto-approved since created by approver
             created_by="ui",  # Manual creation from UI
             notes=notes,
@@ -9051,6 +9054,7 @@ async def create_booking_request_vapi(
                     # Don't fail the booking creation if call/chat record linking fails
             
             # Create booking
+            # Store original time strings as customer sent them (no conversion)
             booking = PropertyTourBooking(
                 property_id=property_id,
                 assigned_to_user_id=assigned_user["user_id"],
@@ -9059,9 +9063,11 @@ async def create_booking_request_vapi(
                 visitor_phone=normalized_phone,
                 visitor_email=visitor_email,
                 requested_at=datetime.utcnow(),
-                start_at=start_dt,
-                end_at=end_dt,
+                start_at=start_dt,  # Keep UTC for internal calculations
+                end_at=end_dt,  # Keep UTC for internal calculations
                 timezone=tz_str,
+                customer_sent_start_at=requested_start_at,  # Store original as customer sent
+                customer_sent_end_at=requested_end_at,  # Store original as customer sent
                 status="pending",
                 created_by="vapi",  # Always "vapi" for VAPI endpoint
                 notes=notes,
@@ -9185,6 +9191,8 @@ async def get_booking_details(
             "requestedAt": booking.requested_at.isoformat(),
             "startAt": booking.start_at.isoformat(),
             "endAt": booking.end_at.isoformat(),
+            "customerSentStartAt": booking.customer_sent_start_at,  # Original time as customer sent
+            "customerSentEndAt": booking.customer_sent_end_at,  # Original time as customer sent
             "timezone": booking.timezone,
             "status": booking.status,
             "createdBy": booking.created_by,
@@ -9426,6 +9434,8 @@ async def get_user_bookings(
                 },
                 "startAt": b.start_at.isoformat(),
                 "endAt": b.end_at.isoformat(),
+                "customerSentStartAt": b.customer_sent_start_at,  # Original time as customer sent
+                "customerSentEndAt": b.customer_sent_end_at,  # Original time as customer sent
                 "timezone": b.timezone,
                 "status": b.status,
                 "createdBy": b.created_by,
@@ -9435,6 +9445,11 @@ async def get_user_bookings(
                     "userType": b.assigned_to_user_type
                 },
                 "requestedAt": b.requested_at.isoformat() if b.requested_at else None,
+                "callRecord": {
+                    "vapiCallId": b.vapi_call_id,
+                    "callTranscript": b.call_transcript,
+                    "callRecordingUrl": b.call_recording_url
+                } if b.vapi_call_id else None,
                 "createdAt": b.created_at.isoformat() if b.created_at else None,
                 "updatedAt": b.updated_at.isoformat() if b.updated_at else None
             })
@@ -9727,6 +9742,142 @@ async def cancel_booking(
             "bookingId": booking.booking_id,
             "status": "cancelled",
             "message": "Booking cancelled successfully"
+        })
+
+
+# Update Booking
+@app.put("/api/bookings/{booking_id}")
+@app.patch("/api/bookings/{booking_id}")
+async def update_booking(
+    booking_id: int,
+    visitor_name: Optional[str] = Body(None),
+    visitor_phone: Optional[str] = Body(None),
+    visitor_email: Optional[str] = Body(None),
+    start_at: Optional[str] = Body(None),  # ISO format
+    end_at: Optional[str] = Body(None),  # ISO format
+    timezone: Optional[str] = Body(None),
+    notes: Optional[str] = Body(None),
+    status: Optional[str] = Body(None),  # Can update status
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Update a booking. Only approver (PM/Realtor) can update."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        booking = session.get(PropertyTourBooking, booking_id)
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        
+        # Check if user is the approver
+        is_approver = (
+            booking.assigned_to_user_id == user_id and booking.assigned_to_user_type == user_type
+        )
+        
+        if not is_approver:
+            raise HTTPException(status_code=403, detail="Only the assigned approver can update this booking")
+        
+        # Update fields if provided
+        if visitor_name is not None:
+            booking.visitor_name = visitor_name
+        if visitor_phone is not None:
+            booking.visitor_phone = _normalize_phone_robust(visitor_phone, "visitor_phone")
+        if visitor_email is not None:
+            booking.visitor_email = visitor_email
+        if notes is not None:
+            booking.notes = notes
+        if timezone is not None:
+            booking.timezone = timezone
+        if status is not None:
+            if status not in ["pending", "approved", "denied", "cancelled", "rescheduled"]:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+            booking.status = status
+        
+        # Update time if provided
+        if start_at is not None or end_at is not None:
+            if start_at:
+                start_dt = _parse_datetime_robust(start_at, "start_at")
+                booking.start_at = start_dt
+                booking.customer_sent_start_at = start_at  # Store original
+            if end_at:
+                end_dt = _parse_datetime_robust(end_at, "end_at")
+                booking.end_at = end_dt
+                booking.customer_sent_end_at = end_at  # Store original
+            
+            # Validate time constraints
+            if start_at and end_at:
+                if booking.end_at <= booking.start_at:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="end_at must be after start_at"
+                    )
+        
+        booking.updated_at = datetime.utcnow()
+        _add_audit_log(booking, user_id, "updated", "Booking updated by approver")
+        
+        session.add(booking)
+        session.commit()
+        session.refresh(booking)
+        
+        return JSONResponse(content={
+            "bookingId": booking.booking_id,
+            "message": "Booking updated successfully",
+            "booking": {
+                "bookingId": booking.booking_id,
+                "visitorName": booking.visitor_name,
+                "visitorPhone": booking.visitor_phone,
+                "visitorEmail": booking.visitor_email,
+                "startAt": booking.start_at.isoformat(),
+                "endAt": booking.end_at.isoformat(),
+                "customerSentStartAt": booking.customer_sent_start_at,
+                "customerSentEndAt": booking.customer_sent_end_at,
+                "timezone": booking.timezone,
+                "status": booking.status,
+                "notes": booking.notes
+            }
+        })
+
+
+# Delete Booking (Hard Delete)
+@app.delete("/api/bookings/{booking_id}")
+async def delete_booking(
+    booking_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """Permanently delete a booking. Only approver (PM/Realtor) can delete."""
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        booking = session.get(PropertyTourBooking, booking_id)
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        
+        # Check if user is the approver
+        is_approver = (
+            booking.assigned_to_user_id == user_id and booking.assigned_to_user_type == user_type
+        )
+        
+        if not is_approver:
+            raise HTTPException(status_code=403, detail="Only the assigned approver can delete this booking")
+        
+        # Remove associated availability slot if exists
+        blocking_slot = session.exec(
+            select(AvailabilitySlot).where(
+                AvailabilitySlot.booking_id == booking_id,
+                AvailabilitySlot.slot_type == "booking"
+            )
+        ).first()
+        if blocking_slot:
+            session.delete(blocking_slot)
+        
+        # Hard delete the booking
+        session.delete(booking)
+        session.commit()
+        
+        return JSONResponse(content={
+            "bookingId": booking_id,
+            "message": "Booking deleted successfully"
         })
 
 
@@ -10976,6 +11127,13 @@ async def get_bookings_by_visitor_vapi(
                     "phone": b.visitor_phone,
                     "email": b.visitor_email
                 },
+                "customerSentStartAt": b.customer_sent_start_at,  # Original time as customer sent
+                "customerSentEndAt": b.customer_sent_end_at,  # Original time as customer sent
+                "callRecord": {
+                    "vapiCallId": b.vapi_call_id,
+                    "callTranscript": b.call_transcript,
+                    "callRecordingUrl": b.call_recording_url
+                } if b.vapi_call_id else None,
                 "startAt": b.start_at.isoformat(),
                 "endAt": b.end_at.isoformat(),
                 "timezone": b.timezone,
