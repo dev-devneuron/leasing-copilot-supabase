@@ -3658,23 +3658,39 @@ async def update_calendar_preferences(
         try:
             session.add(user)
             session.commit()
-            session.refresh(user)
             
-            # Expire the object to force a fresh query
-            session.expire(user)
-            
-            # Re-fetch the user to ensure we have the latest data
-            if user_type == "property_manager":
-                user = session.get(PropertyManager, user_id)
-            elif user_type == "realtor":
-                user = session.get(Realtor, user_id)
-            
-            # Clear cache for this user's preferences
+            # CRITICAL: Clear cache BEFORE re-fetching to ensure we get fresh data
             cache_key = f"{user_type}_{user_id}"
             _user_preferences_cache.pop(cache_key, None)
             
-            # Return updated preferences
+            # Verify the data was actually saved by re-fetching in a fresh query
+            # Use a new session context to ensure we're reading from the database, not cache
+            session.expire_all()  # Expire all objects in the session
+            
+            # Re-fetch the user to verify the save worked
+            if user_type == "property_manager":
+                user_verify = session.get(PropertyManager, user_id)
+            elif user_type == "realtor":
+                user_verify = session.get(Realtor, user_id)
+            else:
+                user_verify = None
+            
+            # Debug: Log what was actually saved
+            if user_verify:
+                saved_prefs = user_verify.calendar_preferences
+                print(f"✅ Preferences saved to DB: {saved_prefs}")
+                if saved_prefs:
+                    print(f"   - workingDays: {saved_prefs.get('workingDays')}")
+                    print(f"   - workingHours: {saved_prefs.get('workingHours')}")
+            
+            # Return updated preferences (this will fetch fresh from DB since cache is cleared)
             updated_prefs = _get_user_calendar_preferences(session, user_id, user_type)
+            
+            # Debug: Log what we're returning
+            print(f"✅ Returning preferences: {updated_prefs}")
+            print(f"   - workingDays: {updated_prefs.get('workingDays')}")
+            print(f"   - workingHours: {updated_prefs.get('workingHours')}")
+            
             return JSONResponse(content={
                 "message": "Calendar preferences updated successfully",
                 "preferences": updated_prefs
@@ -8065,12 +8081,21 @@ def _get_user_calendar_preferences(session: Session, user_id: int, user_type: st
     prefs = user.calendar_preferences or {}
     timezone = user.timezone or "America/New_York"
     
+    # IMPORTANT: Only use defaults if the field is actually missing (None), not if it's an empty list
+    # This ensures that if workingDays is explicitly set to [], we return [] instead of defaulting
     result = {
         "timezone": timezone,
-        "defaultSlotLengthMins": prefs.get("defaultSlotLengthMins", 30),
-        "workingHours": prefs.get("workingHours", {"start": "09:00", "end": "17:00"}),
-        "workingDays": prefs.get("workingDays", [0, 1, 2, 3, 4])  # Default: Monday-Friday
+        "defaultSlotLengthMins": prefs.get("defaultSlotLengthMins") if "defaultSlotLengthMins" in prefs else 30,
+        "workingHours": prefs.get("workingHours") if "workingHours" in prefs else {"start": "09:00", "end": "17:00"},
+        "workingDays": prefs.get("workingDays") if "workingDays" in prefs else [0, 1, 2, 3, 4]  # Default: Monday-Friday
     }
+    
+    # Debug: Log what we're reading from DB
+    print(f"📖 Reading preferences from DB for {cache_key}:")
+    print(f"   - Raw prefs: {prefs}")
+    print(f"   - workingDays in prefs: {'workingDays' in prefs}")
+    print(f"   - workingDays value: {prefs.get('workingDays')}")
+    print(f"   - Result workingDays: {result.get('workingDays')}")
     
     # Cache the result
     _user_preferences_cache[cache_key] = result
