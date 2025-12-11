@@ -2326,6 +2326,35 @@ The property tour booking system allows tenants to schedule property tours via V
 - SMS notifications for booking lifecycle events
 - Property assignment to realtors with audit trail
 
+### 🆕 Recent Updates (Important for Frontend Integration)
+
+**New Features Added:**
+1. **Original Customer Time Storage** - Bookings now store the exact time string as the customer sent it (no timezone conversion)
+   - New fields: `customerSentStartAt`, `customerSentEndAt`
+   - Display these fields to show exactly what the customer mentioned
+   - Show timezone confirmation notice to remind PMs/Realtors to verify with customer
+
+2. **Call Recording & Transcript Linking** - Bookings created via phone calls are automatically linked to:
+   - Call recordings (audio playback)
+   - Call transcripts (full conversation text)
+   - Call ID for reference
+
+3. **Update Booking Endpoint** - New `PUT /api/bookings/{booking_id}` endpoint to update booking details
+   - Update visitor info, times, notes, timezone, status
+   - Only assigned approver can update
+
+4. **Delete Booking Endpoint** - New `DELETE /api/bookings/{booking_id}` endpoint for permanent deletion
+   - Hard delete (different from cancel which is soft delete)
+   - Only assigned approver can delete
+
+**Frontend Requirements:**
+- ✅ Display `customerSentStartAt` and `customerSentEndAt` (not converted times)
+- ✅ Show timezone confirmation warning: "The customer mentioned this time: [time]. Please confirm with the customer that this time is correct for their timezone."
+- ✅ Display call recordings with audio player
+- ✅ Display call transcripts (expandable/collapsible)
+- ✅ Add Update and Delete buttons to booking cards/modals
+- ✅ See detailed implementation examples in sections 4a-4d below
+
 ### VAPI Integration Endpoints
 
 **These endpoints are designed for VAPI to call (no authentication required):**
@@ -2623,13 +2652,20 @@ The property tour booking system allows tenants to schedule property tours via V
         "phone": "+14125551234",
         "email": "john@example.com"
       },
-      "startAt": "2025-12-01T16:00:00Z",
-      "endAt": "2025-12-01T16:30:00Z",
+      "startAt": "2025-12-01T16:00:00Z",  // UTC datetime (for internal calculations)
+      "endAt": "2025-12-01T16:30:00Z",  // UTC datetime (for internal calculations)
+      "customerSentStartAt": "2025-12-01T16:00:00",  // Original time as customer sent it (no conversion)
+      "customerSentEndAt": "2025-12-01T16:30:00",  // Original time as customer sent it (no conversion)
       "timezone": "America/New_York",
       "status": "pending",  // or "approved", "denied", "cancelled", "rescheduled"
       "createdBy": "vapi",
       "notes": "Interested in 2-bedroom unit",
       "proposedSlots": null,  // Only set if status is "rescheduled"
+      "callRecord": {  // Only present if booking was created via phone call
+        "vapiCallId": "call_abc123",
+        "callTranscript": "Full conversation transcript...",
+        "callRecordingUrl": "https://storage.vapi.ai/recordings/abc123.mp3"
+      },
       "requestedAt": "2025-11-26T10:30:00Z",
       "createdAt": "2025-11-26T10:30:00Z",
       "updatedAt": "2025-11-26T10:30:00Z"
@@ -2882,6 +2918,10 @@ VAPI → Tells user: "Your booking has been cancelled."
 These endpoints require authentication and are for the dashboard UI:
 
 - `GET /api/users/{user_id}/bookings` - Get user's bookings
+- `GET /api/bookings/{booking_id}` - Get single booking details
+- `PUT /api/bookings/{booking_id}` - Update booking (NEW)
+- `PATCH /api/bookings/{booking_id}` - Update booking (NEW, alias for PUT)
+- `DELETE /api/bookings/{booking_id}` - Delete booking (NEW)
 - `POST /api/bookings/{booking_id}/approve` - Approve booking
 - `POST /api/bookings/{booking_id}/deny` - Deny booking
 - `POST /api/bookings/{booking_id}/reschedule` - Reschedule booking
@@ -3054,6 +3094,8 @@ function PendingBookingsPanel({ userId, userType }) {
   "visitorName": "John Doe",
   "startAt": "2025-12-01T16:00:00Z",
   "endAt": "2025-12-01T17:00:00Z",
+  "customerSentStartAt": "2025-12-01T16:00:00",  // Original time as entered
+  "customerSentEndAt": "2025-12-01T17:00:00",  // Original time as entered
   "message": "Manual booking created and approved successfully"
 }
 ```
@@ -3103,6 +3145,9 @@ function PendingBookingsPanel({ userId, userType }) {
       "visitorPhone": "+15409773737",
       "startAt": "2025-12-01T16:00:00Z",
       "endAt": "2025-12-01T17:00:00Z",
+      "customerSentStartAt": "2025-12-01T16:00:00",  // Original time as customer sent
+      "customerSentEndAt": "2025-12-01T17:00:00",  // Original time as customer sent
+      "timezone": "America/New_York",
       "status": "approved",
       "callRecord": {
         "vapiCallId": "call_abc123",
@@ -3488,19 +3533,19 @@ function AvailabilityManager({ userId, userType }) {
   - Property details (bedrooms, bathrooms, price)
   - Link to property details page
 - **Booking Details:**
-  - Requested date/time
+  - **Original Customer Time (IMPORTANT):** Display the time exactly as the customer mentioned it
+  - **Timezone Confirmation Notice:** Show a warning that the time needs to be confirmed with the customer
   - Status and status history
-  - Timezone
   - Notes from visitor
   - Audit log (who did what and when)
 - **Call Record (if booking came from phone call):**
   - **Call Recording:** Play button to listen to the call recording
-  - **Call Transcript:** Full transcript of the conversation
+  - **Call Transcript:** Full transcript of the conversation (expandable)
   - **Call ID:** Link to view full call details
   - Display prominently if `callRecord` is present in booking data
 - **Actions (based on status):**
   - **Pending:** Approve, Deny, Reschedule buttons
-  - **Approved:** Cancel, View Property, Contact Visitor
+  - **Approved:** Update, Delete, Cancel, View Property, Contact Visitor
   - **Rescheduled:** Show proposed slots, Approve Reschedule
   - **Denied/Cancelled:** View details only
 
@@ -3532,11 +3577,86 @@ function BookingDetailModal({ booking, onClose, onAction }) {
         {/* Booking Info */}
         <section>
           <h3>Booking Details</h3>
-          <p>Date: {formatDate(booking.startAt)}</p>
-          <p>Time: {formatTime(booking.startAt)} - {formatTime(booking.endAt)}</p>
+          
+          {/* Original Customer Time - Display exactly as customer sent it */}
+          <div className="customer-time-section">
+            <h4>⏰ Time (as customer mentioned):</h4>
+            <div className="customer-time-display">
+              <p><strong>Start:</strong> {booking.customerSentStartAt || booking.startAt}</p>
+              <p><strong>End:</strong> {booking.customerSentEndAt || booking.endAt}</p>
+            </div>
+            
+            {/* Timezone Confirmation Notice */}
+            {booking.customerSentStartAt && (
+              <div className="timezone-warning" style={{
+                marginTop: '12px',
+                padding: '12px',
+                backgroundColor: '#fff3cd',
+                border: '1px solid #ffc107',
+                borderRadius: '4px'
+              }}>
+                <strong>⚠️ Timezone Confirmation Needed:</strong>
+                <p style={{ margin: '8px 0 0 0' }}>
+                  The customer mentioned this time: <strong>{booking.customerSentStartAt}</strong>
+                  <br />
+                  Please confirm with the customer that this time is correct for their timezone ({booking.timezone}).
+                </p>
+              </div>
+            )}
+          </div>
+          
           <p>Status: <StatusBadge status={booking.status} /></p>
           {booking.notes && <p>Notes: {booking.notes}</p>}
         </section>
+        
+        {/* Call Record Section */}
+        {booking.callRecord && (
+          <section className="call-record-section" style={{
+            marginTop: '16px',
+            padding: '12px',
+            backgroundColor: '#e7f3ff',
+            borderRadius: '4px'
+          }}>
+            <h3>📞 Call Record</h3>
+            
+            {/* Audio Player */}
+            {booking.callRecord.callRecordingUrl && (
+              <div style={{ marginBottom: '12px' }}>
+                <audio controls src={booking.callRecord.callRecordingUrl} style={{ width: '100%' }}>
+                  Your browser does not support the audio element.
+                </audio>
+              </div>
+            )}
+            
+            {/* Transcript */}
+            {booking.callRecord.callTranscript && (
+              <div>
+                <button onClick={() => setShowTranscript(!showTranscript)}>
+                  {showTranscript ? 'Hide' : 'Show'} Transcript
+                </button>
+                {showTranscript && (
+                  <div style={{
+                    marginTop: '8px',
+                    padding: '12px',
+                    backgroundColor: '#fff',
+                    borderRadius: '4px',
+                    maxHeight: '300px',
+                    overflowY: 'auto',
+                    whiteSpace: 'pre-wrap'
+                  }}>
+                    {booking.callRecord.callTranscript}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {booking.callRecord.vapiCallId && (
+              <p style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
+                Call ID: {booking.callRecord.vapiCallId}
+              </p>
+            )}
+          </section>
+        )}
         
         {/* Actions */}
         <section className="booking-actions">
@@ -3554,9 +3674,22 @@ function BookingDetailModal({ booking, onClose, onAction }) {
             </>
           )}
           {booking.status === 'approved' && (
-            <button onClick={() => onAction('cancel', booking.bookingId)}>
-              Cancel Booking
-            </button>
+            <>
+              <button onClick={() => onAction('update', booking.bookingId)}>
+                Update Booking
+              </button>
+              <button onClick={() => onAction('delete', booking.bookingId)}>
+                Delete Booking
+              </button>
+              <button 
+                onClick={async () => {
+                  const reason = prompt('Reason for cancellation (optional):');
+                  await onAction('cancel', booking.bookingId, reason);
+                }}
+              >
+                Cancel Booking
+              </button>
+            </>
           )}
         </section>
         
@@ -3570,6 +3703,575 @@ function BookingDetailModal({ booking, onClose, onAction }) {
       </div>
     </Modal>
   );
+}
+```
+
+---
+
+#### 4a. Displaying Original Customer Time & Timezone Confirmation
+
+**IMPORTANT:** The backend now stores the original time string exactly as the customer sent it, without any timezone conversion. This is critical for avoiding confusion and ensuring accurate communication with customers.
+
+**New Booking Response Fields:**
+- `customerSentStartAt` (string): Original time string as customer sent it (e.g., "2025-12-01T16:00:00")
+- `customerSentEndAt` (string): Original time string as customer sent it
+- `startAt` (ISO datetime): UTC datetime for internal calculations (keep for scheduling logic)
+- `endAt` (ISO datetime): UTC datetime for internal calculations
+- `timezone` (string): Customer's timezone (e.g., "America/New_York")
+- `callRecord` (object, optional): Contains call recording and transcript if booking came from phone call
+
+**Frontend Implementation:**
+
+```javascript
+// Display original customer time
+function BookingTimeDisplay({ booking }) {
+  // Always prefer customerSentStartAt/EndAt if available
+  const displayStart = booking.customerSentStartAt || booking.startAt;
+  const displayEnd = booking.customerSentEndAt || booking.endAt;
+  
+  return (
+    <div className="booking-time-section">
+      <h4>⏰ Time (as customer mentioned):</h4>
+      <div className="time-display">
+        <p><strong>Start:</strong> {displayStart}</p>
+        <p><strong>End:</strong> {displayEnd}</p>
+      </div>
+      
+      {/* CRITICAL: Show timezone confirmation notice */}
+      {booking.customerSentStartAt && (
+        <div className="timezone-warning" style={{
+          marginTop: '12px',
+          padding: '12px',
+          backgroundColor: '#fff3cd',
+          border: '1px solid #ffc107',
+          borderRadius: '4px',
+          fontSize: '14px'
+        }}>
+          <strong>⚠️ Timezone Confirmation Needed:</strong>
+          <p style={{ margin: '8px 0 0 0' }}>
+            The customer mentioned this time: <strong>{booking.customerSentStartAt}</strong>
+            <br />
+            Please confirm with the customer that this time is correct for their timezone ({booking.timezone}).
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+**Key Points:**
+- ✅ **Always display `customerSentStartAt` and `customerSentEndAt`** if available (fallback to `startAt`/`endAt` for older bookings)
+- ✅ **DO NOT convert or format the time** - show it exactly as the customer sent it
+- ✅ **Show timezone confirmation notice** - This reminds PMs/Realtors to verify the time with the customer
+- ✅ **Use `startAt`/`endAt` only for internal calculations** (scheduling, conflict detection, etc.)
+
+---
+
+#### 4b. Displaying Call Recordings and Transcripts
+
+**When a booking is created via phone call, it includes call record information:**
+
+```javascript
+function CallRecordDisplay({ callRecord }) {
+  const [showTranscript, setShowTranscript] = useState(false);
+  
+  if (!callRecord) return null;
+  
+  return (
+    <div className="call-record-section" style={{
+      marginTop: '16px',
+      padding: '12px',
+      backgroundColor: '#e7f3ff',
+      borderRadius: '4px'
+    }}>
+      <h3>📞 Call Record</h3>
+      
+      {/* Audio Player */}
+      {callRecord.callRecordingUrl && (
+        <div style={{ marginBottom: '12px' }}>
+          <audio 
+            controls 
+            src={callRecord.callRecordingUrl}
+            style={{ width: '100%' }}
+          >
+            Your browser does not support the audio element.
+          </audio>
+        </div>
+      )}
+      
+      {/* Transcript with Expand/Collapse */}
+      {callRecord.callTranscript && (
+        <div>
+          <button
+            onClick={() => setShowTranscript(!showTranscript)}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: '#007bff',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              marginBottom: '8px'
+            }}
+          >
+            {showTranscript ? 'Hide' : 'Show'} Transcript
+          </button>
+          
+          {showTranscript && (
+            <div style={{
+              marginTop: '8px',
+              padding: '12px',
+              backgroundColor: '#fff',
+              borderRadius: '4px',
+              maxHeight: '300px',
+              overflowY: 'auto',
+              fontSize: '14px',
+              lineHeight: '1.6',
+              whiteSpace: 'pre-wrap'
+            }}>
+              {callRecord.callTranscript}
+            </div>
+          )}
+        </div>
+      )}
+      
+      {/* Call ID */}
+      {callRecord.vapiCallId && (
+        <p style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
+          Call ID: {callRecord.vapiCallId}
+        </p>
+      )}
+    </div>
+  );
+}
+```
+
+**UI Requirements:**
+- Show call record section only if `booking.callRecord` exists
+- Display audio player for call recording (HTML5 `<audio>` element)
+- Make transcript expandable/collapsible (can be long)
+- Show call ID for reference
+- Use visual distinction (e.g., blue background) to highlight call record section
+
+---
+
+#### 4c. Update Booking Endpoint
+
+**Endpoint:** `PUT /api/bookings/{booking_id}` or `PATCH /api/bookings/{booking_id}`  
+**Auth:** Required (only assigned approver can update)
+
+**Request Body (all fields optional - only send fields you want to update):**
+```json
+{
+  "visitor_name": "John Doe Updated",
+  "visitor_phone": "+1234567890",
+  "visitor_email": "john.updated@example.com",
+  "start_at": "2025-12-01T16:00:00",  // Original format (will be stored in customerSentStartAt)
+  "end_at": "2025-12-01T17:00:00",  // Original format (will be stored in customerSentEndAt)
+  "timezone": "America/New_York",
+  "notes": "Updated notes",
+  "status": "approved"  // Can update status
+}
+```
+
+**Response:**
+```json
+{
+  "bookingId": 1,
+  "message": "Booking updated successfully",
+  "booking": {
+    "bookingId": 1,
+    "visitorName": "John Doe Updated",
+    "visitorPhone": "+1234567890",
+    "visitorEmail": "john.updated@example.com",
+    "startAt": "2025-12-01T16:00:00Z",
+    "endAt": "2025-12-01T17:00:00Z",
+    "customerSentStartAt": "2025-12-01T16:00:00",
+    "customerSentEndAt": "2025-12-01T17:00:00",
+    "timezone": "America/New_York",
+    "status": "approved",
+    "notes": "Updated notes"
+  }
+}
+```
+
+**Frontend Implementation:**
+```javascript
+async function updateBooking(bookingId, updates) {
+  try {
+    const response = await fetch(`/api/bookings/${bookingId}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        visitor_name: updates.visitorName,
+        visitor_phone: updates.visitorPhone,
+        visitor_email: updates.visitorEmail,
+        start_at: updates.startAt,  // Original format
+        end_at: updates.endAt,  // Original format
+        timezone: updates.timezone,
+        notes: updates.notes,
+        status: updates.status
+      })
+    });
+    
+    // IMPORTANT: Always parse JSON response first
+    const data = await response.json();
+    
+    if (!response.ok) {
+      // Extract error message properly - prevents [object Object] error
+      const errorMsg = data.detail || data.message || 'Failed to update booking';
+      throw new Error(errorMsg);
+    }
+    
+    return data;
+  } catch (error) {
+    // Re-throw if it's already an Error with message
+    if (error instanceof Error) {
+      throw error;
+    }
+    // Handle unexpected errors (network, JSON parsing, etc.)
+    throw new Error('Network error. Please try again.');
+  }
+}
+
+// Example usage in a form
+function UpdateBookingForm({ booking, onUpdate, onCancel }) {
+  const [formData, setFormData] = useState({
+    visitorName: booking.visitor.name,
+    visitorPhone: booking.visitor.phone,
+    visitorEmail: booking.visitor.email || '',
+    startAt: booking.customerSentStartAt || booking.startAt,
+    endAt: booking.customerSentEndAt || booking.endAt,
+    timezone: booking.timezone,
+    notes: booking.notes || ''
+  });
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`/api/bookings/${booking.bookingId}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          visitor_name: formData.visitorName,
+          visitor_phone: formData.visitorPhone,
+          visitor_email: formData.visitorEmail,
+          start_at: formData.startAt,
+          end_at: formData.endAt,
+          timezone: formData.timezone,
+          notes: formData.notes
+        })
+      });
+      
+      // IMPORTANT: Always parse JSON response first
+      const data = await response.json();
+      
+      if (response.ok) {
+        alert(data.message || 'Booking updated successfully');
+        onUpdate(); // Refresh booking list
+      } else {
+        // Extract error message properly - this prevents [object Object] error
+        const errorMsg = data.detail || data.message || 'Failed to update booking';
+        alert(`Error: ${errorMsg}`);
+      }
+    } catch (error) {
+      // Handle network errors
+      const errorMsg = error.message || 'Network error. Please try again.';
+      alert(`Error: ${errorMsg}`);
+    }
+  };
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        type="text"
+        value={formData.visitorName}
+        onChange={(e) => setFormData({ ...formData, visitorName: e.target.value })}
+        placeholder="Visitor Name"
+        required
+      />
+      <input
+        type="tel"
+        value={formData.visitorPhone}
+        onChange={(e) => setFormData({ ...formData, visitorPhone: e.target.value })}
+        placeholder="Visitor Phone"
+        required
+      />
+      <input
+        type="email"
+        value={formData.visitorEmail}
+        onChange={(e) => setFormData({ ...formData, visitorEmail: e.target.value })}
+        placeholder="Visitor Email"
+      />
+      <input
+        type="text"
+        value={formData.startAt}
+        onChange={(e) => setFormData({ ...formData, startAt: e.target.value })}
+        placeholder="Start Time (as customer sent it)"
+        required
+      />
+      <input
+        type="text"
+        value={formData.endAt}
+        onChange={(e) => setFormData({ ...formData, endAt: e.target.value })}
+        placeholder="End Time (as customer sent it)"
+        required
+      />
+      <input
+        type="text"
+        value={formData.timezone}
+        onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
+        placeholder="Timezone (e.g., America/New_York)"
+        required
+      />
+      <textarea
+        value={formData.notes}
+        onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+        placeholder="Notes"
+      />
+      <button type="submit">Save Changes</button>
+      <button type="button" onClick={onCancel}>Cancel</button>
+    </form>
+  );
+}
+```
+
+**Permissions:**
+- Only the assigned approver (PM or Realtor) can update bookings
+- Returns 403 Forbidden if user is not the approver
+
+---
+
+#### 4d. Delete Booking Endpoint
+
+**Endpoint:** `DELETE /api/bookings/{booking_id}`  
+**Auth:** Required (only assigned approver can delete)
+
+**Response:**
+```json
+{
+  "bookingId": 1,
+  "message": "Booking deleted successfully"
+}
+```
+
+**Frontend Implementation:**
+```javascript
+async function deleteBooking(bookingId) {
+  if (!confirm('Are you sure you want to permanently delete this booking? This action cannot be undone.')) {
+    return;
+  }
+  
+  try {
+    const response = await fetch(`/api/bookings/${bookingId}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    
+    // IMPORTANT: Always parse JSON response first
+    const data = await response.json();
+    
+    if (!response.ok) {
+      // Extract error message properly - prevents [object Object] error
+      const errorMsg = data.detail || data.message || 'Failed to delete booking';
+      throw new Error(errorMsg);
+    }
+    
+    return data;
+  } catch (error) {
+    // Re-throw if it's already an Error with message
+    if (error instanceof Error) {
+      throw error;
+    }
+    // Handle unexpected errors (network, JSON parsing, etc.)
+    throw new Error('Network error. Please try again.');
+  }
+}
+
+// Example usage
+function BookingCard({ booking, onDelete }) {
+  const handleDelete = async () => {
+    try {
+      const result = await deleteBooking(booking.bookingId);
+      alert(result.message || 'Booking deleted successfully');
+      onDelete(); // Refresh booking list
+    } catch (error) {
+      // Error message is already extracted in deleteBooking function
+      // Just display it - this prevents [object Object] error
+      const errorMsg = error.message || 'Failed to delete booking';
+      alert(`Error: ${errorMsg}`);
+    }
+  };
+  
+  return (
+    <div className="booking-card">
+      {/* Booking details */}
+      <button onClick={handleDelete} className="delete-button">
+        🗑️ Delete
+      </button>
+    </div>
+  );
+}
+```
+
+**Important Notes:**
+- ⚠️ **This is a HARD DELETE** - the booking is permanently removed from the database
+- ⚠️ **Different from Cancel** - Cancel (`POST /api/bookings/{booking_id}/cancel`) is a soft delete (sets status to "cancelled")
+- ⚠️ **Only assigned approver can delete** - Returns 403 if user is not the approver
+- ⚠️ **Always show confirmation dialog** - This is a destructive action
+
+---
+
+#### 4e. Common Error Handling Issues & Solutions
+
+**⚠️ IMPORTANT: Fix for "[object Object]" Error**
+
+This is a common issue when canceling (or any booking action) - the error shows as "[object Object]" instead of the actual error message. This happens when you try to display an error object directly.
+
+**Root Cause:**
+- FastAPI returns errors as JSON: `{"detail": "Error message"}`
+- If you try to display the error object directly: `alert(error)`, it shows "[object Object]"
+- You must extract the message: `alert(error.detail || error.message)`
+
+**Quick Fix Template:**
+```javascript
+// ✅ ALWAYS use this pattern for API calls:
+const response = await fetch(url, options);
+const data = await response.json(); // Parse JSON first
+
+if (response.ok) {
+  // Success
+  alert(data.message || 'Success');
+} else {
+  // Error - extract message properly
+  const errorMsg = data.detail || data.message || 'An error occurred';
+  alert(`Error: ${errorMsg}`); // ✅ Shows actual message, not [object Object]
+}
+```
+
+**Problem: "[object Object]" Error**
+
+This error occurs when you try to display an error object directly instead of extracting the error message. Here's how to fix it:
+
+**❌ WRONG - Causes [object Object]:**
+```javascript
+async function cancelBooking(bookingId) {
+  const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  
+  if (!response.ok) {
+    const error = await response.json();
+    alert("Error: " + error); // ❌ This shows [object Object]
+  }
+}
+```
+
+**✅ CORRECT - Extract error message:**
+```javascript
+async function cancelBooking(bookingId) {
+  try {
+    const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    // IMPORTANT: Always parse JSON first
+    const data = await response.json();
+    
+    if (response.ok) {
+      alert(data.message || 'Booking cancelled successfully');
+      return data;
+    } else {
+      // Extract error message properly
+      const errorMsg = data.detail || data.message || 'Failed to cancel booking';
+      alert(`Error: ${errorMsg}`); // ✅ Shows actual error message
+      throw new Error(errorMsg);
+    }
+  } catch (error) {
+    // Handle network errors or JSON parsing errors
+    if (error instanceof Error) {
+      alert(`Error: ${error.message}`);
+    } else {
+      alert('Network error. Please try again.');
+    }
+    throw error;
+  }
+}
+```
+
+**Key Points:**
+1. ✅ **Always parse JSON response first** - `const data = await response.json()`
+2. ✅ **Check response.ok** before accessing data
+3. ✅ **Extract error message** - Use `data.detail || data.message || 'Default message'`
+4. ✅ **Handle network errors** - Wrap in try-catch
+5. ✅ **Never display error objects directly** - Always extract the message
+
+**FastAPI Error Response Format:**
+```json
+{
+  "detail": "Error message here"
+}
+```
+
+**Success Response Format:**
+```json
+{
+  "message": "Success message here",
+  "bookingId": 1,
+  "status": "cancelled"
+}
+```
+
+**Universal Error Handler Helper:**
+```javascript
+// Helper function for consistent error handling
+async function handleApiResponse(response) {
+  const data = await response.json();
+  
+  if (response.ok) {
+    return { success: true, data };
+  } else {
+    const errorMsg = data.detail || data.message || 'An error occurred';
+    return { success: false, error: errorMsg };
+  }
+}
+
+// Usage:
+async function cancelBooking(bookingId) {
+  const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  
+  const result = await handleApiResponse(response);
+  
+  if (result.success) {
+    alert(result.data.message || 'Booking cancelled successfully');
+    return result.data;
+  } else {
+    alert(`Error: ${result.error}`);
+    throw new Error(result.error);
+  }
 }
 ```
 
@@ -4026,20 +4728,146 @@ function BookingDashboard({ userId, userType }) {
       .then(setBookings);
   }, [userId, userType, filters]);
   
-  // Handle booking actions
+  // Handle booking actions with proper error handling
   async function handleApprove(bookingId) {
-    const response = await fetch(`/api/bookings/${bookingId}/approve`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ approver_id: userId })
-    });
-    
-    if (response.ok) {
-      showNotification('Booking approved successfully');
-      refreshBookings();
+    try {
+      const response = await fetch(`/api/bookings/${bookingId}/approve`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ approver_id: userId })
+      });
+      
+      // IMPORTANT: Always parse JSON response, even for errors
+      const data = await response.json();
+      
+      if (response.ok) {
+        showNotification('Booking approved successfully');
+        refreshBookings();
+      } else {
+        // Extract error message properly
+        const errorMsg = data.detail || data.message || 'Failed to approve booking';
+        alert(`Error: ${errorMsg}`);
+      }
+    } catch (error) {
+      // Handle network errors or JSON parsing errors
+      const errorMsg = error.message || 'Network error. Please try again.';
+      alert(`Error: ${errorMsg}`);
+    }
+  }
+  
+  async function handleDeny(bookingId) {
+    try {
+      const response = await fetch(`/api/bookings/${bookingId}/deny`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ approver_id: userId })
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        showNotification('Booking denied successfully');
+        refreshBookings();
+      } else {
+        const errorMsg = data.detail || data.message || 'Failed to deny booking';
+        alert(`Error: ${errorMsg}`);
+      }
+    } catch (error) {
+      const errorMsg = error.message || 'Network error. Please try again.';
+      alert(`Error: ${errorMsg}`);
+    }
+  }
+  
+  async function handleCancel(bookingId, reason = null) {
+    try {
+      const response = await fetch(`/api/bookings/${bookingId}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ reason: reason })
+      });
+      
+      // IMPORTANT: Always parse JSON response first
+      const data = await response.json();
+      
+      if (response.ok) {
+        showNotification(data.message || 'Booking cancelled successfully');
+        refreshBookings();
+      } else {
+        // Extract error message from response
+        const errorMsg = data.detail || data.message || 'Failed to cancel booking';
+        alert(`Error: ${errorMsg}`);
+      }
+    } catch (error) {
+      // Handle network errors
+      const errorMsg = error.message || 'Network error. Please try again.';
+      alert(`Error: ${errorMsg}`);
+    }
+  }
+  
+  async function handleReschedule(bookingId, proposedSlots, note = null) {
+    try {
+      const response = await fetch(`/api/bookings/${bookingId}/reschedule`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          proposed_slots: proposedSlots,
+          approver_id: userId,
+          note: note
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        showNotification(data.message || 'Booking rescheduled successfully');
+        refreshBookings();
+      } else {
+        const errorMsg = data.detail || data.message || 'Failed to reschedule booking';
+        alert(`Error: ${errorMsg}`);
+      }
+    } catch (error) {
+      const errorMsg = error.message || 'Network error. Please try again.';
+      alert(`Error: ${errorMsg}`);
+    }
+  }
+  
+  // Handle all booking actions from modal
+  async function handleBookingAction(action, bookingId, ...args) {
+    switch (action) {
+      case 'approve':
+        await handleApprove(bookingId);
+        break;
+      case 'deny':
+        await handleDeny(bookingId);
+        break;
+      case 'cancel':
+        const reason = args[0] || null;
+        await handleCancel(bookingId, reason);
+        break;
+      case 'reschedule':
+        const [proposedSlots, note] = args;
+        await handleReschedule(bookingId, proposedSlots, note);
+        break;
+      case 'update':
+        // Handle update (see section 4c for full implementation)
+        break;
+      case 'delete':
+        // Handle delete (see section 4d for full implementation)
+        break;
+      default:
+        console.warn(`Unknown action: ${action}`);
     }
   }
   
@@ -4272,4 +5100,25 @@ To enable the property tour booking system, run `migration_property_tour_booking
 - The migration creates all necessary tables and indexes
 - Calendar preferences default to 9 AM - 5 PM working hours, 30-minute slots
 - Users can customize their timezone and working hours after migration
+
+### Migration 4: Original Customer Time Fields
+
+To store original customer-sent time strings (no timezone conversion), run `migration_add_original_time_fields_to_booking.sql`:
+
+```sql
+-- Add original time string fields
+ALTER TABLE propertytourbooking
+ADD COLUMN IF NOT EXISTS customer_sent_start_at TEXT DEFAULT NULL,
+ADD COLUMN IF NOT EXISTS customer_sent_end_at TEXT DEFAULT NULL;
+
+-- Add comments
+COMMENT ON COLUMN propertytourbooking.customer_sent_start_at IS 'Original time string as customer sent it (no timezone conversion)';
+COMMENT ON COLUMN propertytourbooking.customer_sent_end_at IS 'Original time string as customer sent it (no timezone conversion)';
+```
+
+**Note:**
+- These fields store the exact time string the customer provided
+- Used for display purposes to avoid timezone confusion
+- `start_at` and `end_at` still store UTC datetime for internal calculations
+- Existing bookings will have `null` for these fields (frontend should fallback to `startAt`/`endAt`)
 
