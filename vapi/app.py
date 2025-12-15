@@ -10708,6 +10708,7 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
         rag = RAGEngine()
         import re
         from difflib import SequenceMatcher
+        from sqlalchemy import and_
         
         try:
             # Try search with source_ids restriction first (if provided and not empty)
@@ -10729,6 +10730,25 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
             
             if search_results and len(search_results) > 0:
                 print(f"   Processing {len(search_results)} search results (SUPER LENIENT MODE)")
+                
+                # If city/state is provided in query, prefer results with that city
+                city_phrases_master = [
+                    "san francisco", "los angeles", "new york", "nyc", "chicago", "seattle",
+                    "boston", "austin", "dallas", "miami", "denver", "atlanta", "houston",
+                    "phoenix", "philadelphia", "san diego", "san jose", "sacramento",
+                    "portland", "orlando", "tampa", "charlotte", "las vegas",
+                    "washington dc", "washington, dc", "washington"
+                ]
+                query_lower = property_name.lower()
+                query_cities = [p for p in city_phrases_master if p in query_lower]
+                
+                if query_cities:
+                    filtered = [r for r in search_results if any(p in (r.get("address","").lower()) for p in query_cities)]
+                    if filtered:
+                        print(f"   City filter retained {len(filtered)} results matching {query_cities}")
+                        search_results = filtered
+                    else:
+                        print(f"   City filter found no matches for {query_cities}, keeping all results")
                 
                 # Pick the best match instead of blindly taking the first result.
                 # Heuristic: prefer results whose address contains more of the query tokens
@@ -10766,9 +10786,19 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
                     nums = [t for t in tokens if t.isdigit()]
                     bonus_num = 0.3 if nums and any(n in addr_lower for n in nums) else 0
                     
-                    # City/state phrase bonus (helps "san francisco" vs LA)
-                    city_phrases = ["san francisco", "los angeles", "new york", "nyc", "chicago", "seattle", "boston", "austin"]
-                    bonus_city = 0.4 if any(p in addr_lower and p in query.lower() for p in city_phrases) else 0
+                    # City/state phrase bonus + penalty (helps "san francisco" vs LA)
+                    city_phrases = [
+                        "san francisco", "los angeles", "new york", "nyc", "chicago", "seattle",
+                        "boston", "austin", "dallas", "miami", "denver", "atlanta", "houston",
+                        "phoenix", "philadelphia", "san diego", "san jose", "sacramento",
+                        "portland", "orlando", "tampa", "charlotte", "las vegas",
+                        "washington dc", "washington, dc", "washington"
+                    ]
+                    query_cities = [p for p in city_phrases if p in query.lower()]
+                    addr_cities = [p for p in city_phrases if p in addr_lower]
+                    bonus_city = 0.6 if query_cities and any(p in addr_lower for p in query_cities) else 0
+                    penalty_city_missing = -1.0 if query_cities and not any(p in addr_lower for p in query_cities) else 0
+                    penalty_city_conflict = -0.5 if query_cities and addr_cities and not any(ac in query_cities for ac in addr_cities) else 0
                     
                     # Fuzzy similarity average as tie-breaker
                     avg_sim = 0
@@ -10778,15 +10808,22 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
                             sims.append(max((_similar(t, at) for at in addr_tokens), default=0))
                         avg_sim = sum(sims) / len(tokens)
                     
-                    return (
+                    score = (
                         coverage * 2
                         + exact_matches * 0.2
                         + fuzzy_matches * 0.1
                         + bonus_all
                         + bonus_num
                         + bonus_city
+                        + penalty_city_missing
+                        + penalty_city_conflict
                         + avg_sim * 0.5
                     )
+                    
+                    # Guardrail: if coverage and similarity are both very low, make it clearly unattractive
+                    if coverage < 0.35 and avg_sim < 0.5:
+                        score -= 1.5
+                    return score
                 
                 best_result = search_results[0]
                 best_score = _match_score(best_result.get("address", "") or "", property_name)
@@ -10796,13 +10833,19 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
                         best_result = candidate
                         best_score = score
                 
+                # If best score is still weak, try DB token AND search as a stricter fallback
+                tokens = _tokenize(property_name)
+                sufficient_match = best_score >= 0.75 or (best_score >= 0.55 and len(tokens) <= 3) or (best_score >= 0.5 and any(t.isdigit() for t in tokens))
+                
+                property_listing = None
+                
                 result_address = best_result.get("address", "")
-                print(f"   Using best-matched search result: {result_address} (score={best_score:.2f})")
+                print(f"   Using best-matched search result: {result_address} (score={best_score:.2f}, sufficient={sufficient_match})")
                 
                 # Method 1: Try to get property_id from result metadata (now includes DB id)
                 found_property_id = best_result.get("id") or best_result.get("property_id")
                 
-                if found_property_id:
+                if sufficient_match and found_property_id:
                     print(f"   Found property_id in metadata: {found_property_id}")
                     try:
                         # Ensure it's an integer
@@ -10816,7 +10859,7 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
                         print(f"   ⚠️  Invalid property_id format: {found_property_id}, error: {e}, trying address lookup")
                 
                 # Method 2: Try to find by address (same simple logic as search_apartments/confirm_address)
-                if result_address:
+                if sufficient_match and result_address:
                     print(f"   Trying to find property by address: {result_address}")
                     # Use exact same logic as search_apartments endpoint - simple contains
                     property_listing = session.exec(
@@ -10840,32 +10883,46 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
                         print(f"   ✅ Found property by case-insensitive address lookup: {property_listing.id}")
                         return property_listing, property_listing.id, None
                 
-                # If still not found, try other search results (but only if first one failed)
-                if not property_listing and len(search_results) > 1:
-                    print(f"   First result didn't match, trying other results...")
+                # Fallback: strict token AND search in DB if best match is weak
+                if not sufficient_match and tokens:
+                    print(f"   Best match insufficient (score={best_score:.2f}); trying DB token AND search with tokens={tokens}")
+                    conditions = [ApartmentListing.text.ilike(f"%{t}%") for t in tokens]
+                    property_listing = session.exec(
+                        select(ApartmentListing).where(and_(*conditions)).limit(1)
+                    ).first()
+                    if property_listing:
+                        print(f"   ✅ Found property via token AND search: {property_listing.id}")
+                        return property_listing, property_listing.id, None
+                
+                # If still not found, try other search results (but only if first one failed or insufficient)
+                if (not property_listing) and len(search_results) > 1:
+                    print(f"   First/best result insufficient, trying other results...")
                     for idx, result in enumerate(search_results[1:], start=2):
                         result_address = result.get("address", "")
                         found_property_id = result.get("id") or result.get("property_id")
                         
-                        if found_property_id:
+                        alt_score = _match_score(result_address or "", property_name)
+                        alt_sufficient = alt_score >= 0.75 or (alt_score >= 0.55 and len(tokens) <= 3) or (alt_score >= 0.5 and any(t.isdigit() for t in tokens))
+                        
+                        if alt_sufficient and found_property_id:
                             try:
                                 if isinstance(found_property_id, str):
                                     found_property_id = int(found_property_id)
                                 property_listing = session.get(ApartmentListing, found_property_id)
                                 if property_listing:
-                                    print(f"   ✅ Found property in result {idx}: {property_listing.id}")
+                                    print(f"   ✅ Found property in result {idx}: {property_listing.id} (score={alt_score:.2f})")
                                     return property_listing, found_property_id, None
                             except:
                                 pass
                         
-                        if result_address:
+                        if alt_sufficient and result_address:
                             property_listing = session.exec(
                                 select(ApartmentListing).where(
                                     ApartmentListing.text.contains(result_address)
                                 ).limit(1)
                             ).first()
                             if property_listing:
-                                print(f"   ✅ Found property by address in result {idx}: {property_listing.id}")
+                                print(f"   ✅ Found property by address in result {idx}: {property_listing.id} (score={alt_score:.2f})")
                                 return property_listing, property_listing.id, None
         except Exception as e:
             print(f"⚠️  Error searching for property '{property_name}': {e}")
