@@ -11677,6 +11677,54 @@ async def get_bookings_by_visitor_vapi(
             return JSONResponse(content=response_data)
 
 
+# Get Current Date/Time for VAPI (simple, human-friendly)
+@app.post("/vapi/time/now")
+async def get_vapi_time_now(
+    http_request: Request,  # FastAPI injects
+    request: Optional[VapiRequest] = None
+):
+    """
+    Return the current date and time in a very simple, human-friendly format for VAPI.
+
+    Response example (direct JSON):
+    {
+      "isoUtc": "2025-12-15T20:45:12Z",
+      "human": "Monday, December 15, 2025 at 8:45 PM UTC",
+      "timestampMs": 1765812312000,
+      "timezone": "UTC"
+    }
+
+    If called via VAPI toolCalls, the same object is wrapped in:
+    { "results": [{ "toolCallId": "<id>", "result": { ... } }] }
+    """
+    now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+    iso_utc = now_utc.isoformat().replace("+00:00", "Z")
+    timestamp_ms = int(now_utc.timestamp() * 1000)
+    human = now_utc.strftime("%A, %B %d, %Y at %-I:%M %p UTC") if hasattr(now_utc, "strftime") else iso_utc
+
+    # Detect VAPI toolCallId if present
+    tool_call_id = None
+    body = {}
+    try:
+        body = await http_request.json()
+        if body.get("message") and body["message"].get("toolCalls"):
+            tool_calls = body["message"]["toolCalls"]
+            if tool_calls:
+                tool_call_id = tool_calls[0].get("id")
+    except Exception:
+        pass
+
+    result = {
+        "isoUtc": iso_utc,
+        "human": human,
+        "timestampMs": timestamp_ms,
+        "timezone": "UTC"
+    }
+
+    if tool_call_id:
+        return {"results": [{"toolCallId": tool_call_id, "result": result}]}
+    return JSONResponse(content=result)
+
 # Cancel/Delete Booking by Visitor (VAPI) - Handles both bookings and pending requests
 @app.post("/vapi/bookings/cancel")
 async def cancel_booking_vapi(
