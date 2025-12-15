@@ -10706,6 +10706,8 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
     if property_name and not property_listing:
         from vapi.rag import RAGEngine
         rag = RAGEngine()
+        import re
+        from difflib import SequenceMatcher
         
         try:
             # Try search with source_ids restriction first (if provided and not empty)
@@ -10728,14 +10730,77 @@ def _find_property_robust(session: Session, property_id: Optional[int] = None,
             if search_results and len(search_results) > 0:
                 print(f"   Processing {len(search_results)} search results (SUPER LENIENT MODE)")
                 
-                # SUPER LENIENT: Just use the first search result (they're already sorted by relevance)
-                # This is the same approach as confirm_address - trust the search results
-                first_result = search_results[0]
-                result_address = first_result.get("address", "")
-                print(f"   Using first search result: {result_address}")
+                # Pick the best match instead of blindly taking the first result.
+                # Heuristic: prefer results whose address contains more of the query tokens
+                # and also allow fuzzy token matches for typos/partial names.
+                def _tokenize(text: str) -> list[str]:
+                    return [t for t in re.split(r"[\\s,]+", text.lower()) if len(t) >= 3]
+                
+                def _similar(a: str, b: str) -> float:
+                    return SequenceMatcher(None, a, b).ratio()
+                
+                def _match_score(address: str, query: str) -> float:
+                    addr_lower = address.lower()
+                    addr_tokens = _tokenize(addr_lower)
+                    tokens = _tokenize(query)
+                    if not tokens:
+                        return 0
+                    
+                    exact_matches = sum(1 for t in tokens if t in addr_lower)
+                    
+                    # Fuzzy matches: consider close spellings
+                    fuzzy_matches = 0
+                    for t in tokens:
+                        if t in addr_lower:
+                            continue
+                        best_sim = max((_similar(t, at) for at in addr_tokens), default=0)
+                        if best_sim >= 0.72:  # allow mild typos (e.g., "garedns" vs "gardens")
+                            fuzzy_matches += 1
+                    
+                    coverage = (exact_matches + fuzzy_matches) / len(tokens)
+                    
+                    # Bonus if all tokens (exact+fuzzy) are covered
+                    bonus_all = 0.5 if (exact_matches + fuzzy_matches) == len(tokens) else 0
+                    
+                    # Bonus if numeric street number matches
+                    nums = [t for t in tokens if t.isdigit()]
+                    bonus_num = 0.3 if nums and any(n in addr_lower for n in nums) else 0
+                    
+                    # City/state phrase bonus (helps "san francisco" vs LA)
+                    city_phrases = ["san francisco", "los angeles", "new york", "nyc", "chicago", "seattle", "boston", "austin"]
+                    bonus_city = 0.4 if any(p in addr_lower and p in query.lower() for p in city_phrases) else 0
+                    
+                    # Fuzzy similarity average as tie-breaker
+                    avg_sim = 0
+                    if tokens:
+                        sims = []
+                        for t in tokens:
+                            sims.append(max((_similar(t, at) for at in addr_tokens), default=0))
+                        avg_sim = sum(sims) / len(tokens)
+                    
+                    return (
+                        coverage * 2
+                        + exact_matches * 0.2
+                        + fuzzy_matches * 0.1
+                        + bonus_all
+                        + bonus_num
+                        + bonus_city
+                        + avg_sim * 0.5
+                    )
+                
+                best_result = search_results[0]
+                best_score = _match_score(best_result.get("address", "") or "", property_name)
+                for candidate in search_results[1:]:
+                    score = _match_score(candidate.get("address", "") or "", property_name)
+                    if score > best_score:
+                        best_result = candidate
+                        best_score = score
+                
+                result_address = best_result.get("address", "")
+                print(f"   Using best-matched search result: {result_address} (score={best_score:.2f})")
                 
                 # Method 1: Try to get property_id from result metadata (now includes DB id)
-                found_property_id = first_result.get("id") or first_result.get("property_id")
+                found_property_id = best_result.get("id") or best_result.get("property_id")
                 
                 if found_property_id:
                     print(f"   Found property_id in metadata: {found_property_id}")
