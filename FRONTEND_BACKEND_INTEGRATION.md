@@ -3020,9 +3020,10 @@ These endpoints require authentication and are for the dashboard UI:
 - `PUT /api/bookings/{booking_id}` - Update booking (NEW)
 - `PATCH /api/bookings/{booking_id}` - Update booking (NEW, alias for PUT)
 - `DELETE /api/bookings/{booking_id}` - Delete booking (NEW)
-- `POST /api/bookings/{booking_id}/approve` - Approve booking
-- `POST /api/bookings/{booking_id}/deny` - Deny booking
-- `POST /api/bookings/{booking_id}/reschedule` - Reschedule booking
+- `DELETE /api/bookings/{booking_id}/delete` - Hard delete denied booking (assigned approver only)
+- `POST /api/bookings/{booking_id}/approve` - Approve booking (auth user is approver; optional approver_id must match if provided)
+- `POST /api/bookings/{booking_id}/deny` - Deny booking (auth user is approver; optional approver_id must match if provided)
+- `POST /api/bookings/{booking_id}/reschedule` - Reschedule booking (auth user is approver; optional approver_id must match if provided)
 - `POST /api/bookings/{booking_id}/cancel` - Cancel booking (by approver)
 - `POST /api/properties/{property_id}/assign` - Assign property to realtor
 

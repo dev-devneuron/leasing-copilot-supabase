@@ -9719,7 +9719,7 @@ async def get_user_bookings(
 @app.post("/api/bookings/{booking_id}/approve")
 async def approve_booking(
     booking_id: int,
-    approver_id: int = Body(...),
+    approver_id: Optional[int] = Body(None),
     note: Optional[str] = Body(None),
     user_data: dict = Depends(get_current_user_data)
 ):
@@ -9729,6 +9729,10 @@ async def approve_booking(
     """
     user_type = user_data["user_type"]
     user_id = user_data["id"]
+    
+    # Use token user as approver; optional body approver_id must match if provided
+    if approver_id is not None and approver_id != user_id:
+        raise HTTPException(status_code=403, detail="Approver mismatch. The requester must be the assigned approver.")
     
     with Session(engine) as session:
         # Start transaction
@@ -9845,13 +9849,16 @@ async def approve_booking(
 @app.post("/api/bookings/{booking_id}/deny")
 async def deny_booking(
     booking_id: int,
-    approver_id: int = Body(...),
+    approver_id: Optional[int] = Body(None),
     reason: Optional[str] = Body(None),
     user_data: dict = Depends(get_current_user_data)
 ):
     """Deny a booking request."""
     user_type = user_data["user_type"]
     user_id = user_data["id"]
+    
+    if approver_id is not None and approver_id != user_id:
+        raise HTTPException(status_code=403, detail="Approver mismatch. The requester must be the assigned approver.")
     
     with Session(engine) as session:
         booking = session.get(PropertyTourBooking, booking_id)
@@ -9886,13 +9893,16 @@ async def deny_booking(
 async def reschedule_booking(
     booking_id: int,
     proposed_slots: List[Dict[str, str]] = Body(...),  # Array of {startAt, endAt}
-    approver_id: int = Body(...),
+    approver_id: Optional[int] = Body(None),
     note: Optional[str] = Body(None),
     user_data: dict = Depends(get_current_user_data)
 ):
     """Reschedule a booking - approver suggests alternative slots."""
     user_type = user_data["user_type"]
     user_id = user_data["id"]
+    
+    if approver_id is not None and approver_id != user_id:
+        raise HTTPException(status_code=403, detail="Approver mismatch. The requester must be the assigned approver.")
     
     with Session(engine) as session:
         booking = session.get(PropertyTourBooking, booking_id)
@@ -10000,6 +10010,51 @@ async def cancel_booking(
             "bookingId": booking.booking_id,
             "status": "cancelled",
             "message": "Booking cancelled successfully"
+        })
+
+
+# Hard Delete Booking (only if denied)
+@app.delete("/api/bookings/{booking_id}/delete")
+async def delete_booking(
+    booking_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Permanently delete a booking. Allowed only if:
+    - Status is 'denied'
+    - Caller is the assigned approver
+    """
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    with Session(engine) as session:
+        booking = session.get(PropertyTourBooking, booking_id)
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        
+        if booking.assigned_to_user_id != user_id or booking.assigned_to_user_type != user_type:
+            raise HTTPException(status_code=403, detail="Only the assigned approver can delete this booking")
+        
+        if booking.status != "denied":
+            raise HTTPException(status_code=400, detail=f"Only denied bookings can be deleted (current status: {booking.status})")
+        
+        # Delete associated blocking slot if any (should not exist for denied, but be safe)
+        blocking_slot = session.exec(
+            select(AvailabilitySlot).where(
+                AvailabilitySlot.booking_id == booking_id,
+                AvailabilitySlot.slot_type == "booking"
+            )
+        ).first()
+        if blocking_slot:
+            session.delete(blocking_slot)
+        
+        session.delete(booking)
+        session.commit()
+        
+        return JSONResponse(content={
+            "bookingId": booking_id,
+            "status": "deleted",
+            "message": "Booking deleted permanently"
         })
 
 
