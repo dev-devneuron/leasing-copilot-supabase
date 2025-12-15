@@ -8169,6 +8169,37 @@ def _compute_available_slots(
         from_date = from_date.replace(tzinfo=None)
     if to_date.tzinfo is not None:
         to_date = to_date.replace(tzinfo=None)
+
+    # Normalize busy/booking datetimes to naive UTC for consistent comparison
+    normalized_busy_slots = []
+    for busy in busy_slots:
+        try:
+            busy_start = busy.start_at
+            busy_end = busy.end_at
+            if busy_start is None or busy_end is None:
+                continue
+            if busy_start.tzinfo is not None:
+                busy_start = busy_start.astimezone(pytz.utc).replace(tzinfo=None)
+            if busy_end.tzinfo is not None:
+                busy_end = busy_end.astimezone(pytz.utc).replace(tzinfo=None)
+            normalized_busy_slots.append((busy_start, busy_end))
+        except Exception as e:
+            print(f"⚠️  Skipping busy slot due to datetime error: {e}")
+
+    normalized_approved_bookings = []
+    for booking in approved_bookings:
+        try:
+            b_start = booking.start_at
+            b_end = booking.end_at
+            if b_start is None or b_end is None:
+                continue
+            if b_start.tzinfo is not None:
+                b_start = b_start.astimezone(pytz.utc).replace(tzinfo=None)
+            if b_end.tzinfo is not None:
+                b_end = b_end.astimezone(pytz.utc).replace(tzinfo=None)
+            normalized_approved_bookings.append((b_start, b_end))
+        except Exception as e:
+            print(f"⚠️  Skipping approved booking due to datetime error: {e}")
     
     current_date = from_date.replace(hour=0, minute=0, second=0, microsecond=0)
     
@@ -8191,15 +8222,15 @@ def _compute_available_slots(
             
             # Check if slot conflicts with busy slots
             is_busy = False
-            for busy in busy_slots:
-                if not (slot_end <= busy.start_at or slot_start >= busy.end_at):
+            for busy_start, busy_end in normalized_busy_slots:
+                if not (slot_end <= busy_start or slot_start >= busy_end):
                     is_busy = True
                     break
-            
+
             # Check if slot conflicts with approved bookings
             if not is_busy:
-                for booking in approved_bookings:
-                    if not (slot_end <= booking.start_at or slot_start >= booking.end_at):
+                for b_start, b_end in normalized_approved_bookings:
+                    if not (slot_end <= b_start or slot_start >= b_end):
                         is_busy = True
                         break
             
@@ -10727,6 +10758,13 @@ def _normalize_phone_robust(phone: str, field_name: str = "phone") -> str:
     # Use existing normalization function
     from DB.user_lookup import normalize_phone_number
     normalized = normalize_phone_number(phone)
+    
+    # If normalization failed or returned too short, fall back to digits-only version
+    import re
+    if not normalized or len(normalized) < 10:
+        digits_only = re.sub(r"\D", "", phone)
+        if len(digits_only) >= 10:
+            normalized = digits_only
     
     # Validate normalized result
     if not normalized or len(normalized) < 10:
