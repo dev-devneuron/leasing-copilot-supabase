@@ -150,7 +150,7 @@ class PropertyManager(SQLModel, table=True):
         sa_relationship_kwargs={"foreign_keys": "[PropertyManager.purchased_phone_number_id]"}
     )
     tenants: List["Tenant"] = Relationship()
-    maintenance_requests: List["MaintenanceRequest"] = Relationship()
+    maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="property_manager")
 
 
 class Realtor(SQLModel, table=True):
@@ -722,8 +722,8 @@ class MaintenanceRequest(SQLModel, table=True):
     # Relationships
     tenant: Optional["Tenant"] = Relationship(back_populates="maintenance_requests")
     property: Optional["ApartmentListing"] = Relationship()
-    property_manager: Optional["PropertyManager"] = Relationship()
-    assigned_realtor: Optional["Realtor"] = Relationship()
+    property_manager: Optional["PropertyManager"] = Relationship(back_populates="maintenance_requests")
+    assigned_realtor: Optional["Realtor"] = Relationship(back_populates="assigned_maintenance_requests")
 
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:

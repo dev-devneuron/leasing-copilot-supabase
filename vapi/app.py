@@ -10509,6 +10509,93 @@ async def check_property_availability_vapi(
         raise
 
 
+# GET endpoint for frontend (uses property_id in path)
+@app.get("/vapi/properties/{property_id}/availability")
+async def get_property_availability_by_id(
+    property_id: int,
+    from_date: Optional[str] = None,  # Query parameter
+    to_date: Optional[str] = None     # Query parameter
+):
+    """
+    Get availability for a property by property_id (for frontend/UI).
+    
+    Query parameters:
+    - from: Start date in ISO format (optional, defaults to now)
+    - to: End date in ISO format (optional, defaults to 2 weeks from now)
+    
+    Returns:
+    {
+        "availableSlots": [...]
+    }
+    """
+    # Default date range to next 2 weeks if not provided
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    if not from_date:
+        from_date = now.isoformat()
+    if not to_date:
+        to_date = (now + timedelta(days=14)).isoformat()
+    
+    # Robust datetime parsing
+    try:
+        from_dt = _parse_datetime_robust(from_date, "from_date")
+        to_dt = _parse_datetime_robust(to_date, "to_date")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error parsing dates: {str(e)}. Please use ISO format (e.g., 2025-12-01T00:00:00Z)"
+        )
+    
+    # Validate date range
+    if to_dt <= from_dt:
+        raise HTTPException(
+            status_code=400,
+            detail="to_date must be after from_date. Please provide a valid date range."
+        )
+    
+    # Validate range is not too large (max 30 days)
+    days_diff = (to_dt - from_dt).days
+    if days_diff > 30:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date range is too large ({days_diff} days). Maximum allowed range is 30 days. Please use a smaller date range."
+        )
+    
+    with Session(engine) as session:
+        # Verify property exists
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found.")
+        
+        # Get assigned user
+        assigned_user = _get_property_assigned_user(session, property_id)
+        if not assigned_user:
+            raise HTTPException(
+                status_code=400,
+                detail="Property has no assigned PM or Realtor. Please assign a user to the property first."
+            )
+        
+        # Get availability
+        prefs = _get_user_calendar_preferences(session, assigned_user["user_id"], assigned_user["user_type"])
+        # Ensure dates are naive for _compute_available_slots
+        from_dt_naive = from_dt.replace(tzinfo=None) if from_dt.tzinfo else from_dt
+        to_dt_naive = to_dt.replace(tzinfo=None) if to_dt.tzinfo else to_dt
+        
+        available_slots = _compute_available_slots(
+            session,
+            assigned_user["user_id"],
+            assigned_user["user_type"],
+            from_dt_naive,
+            to_dt_naive
+        )
+        
+        # Return simplified format for frontend
+        return JSONResponse(content={
+            "availableSlots": available_slots
+        })
+
+
 @app.post("/vapi/properties/availability")
 async def get_property_availability_vapi(
     http_request: Request,  # FastAPI will inject this - must be first
