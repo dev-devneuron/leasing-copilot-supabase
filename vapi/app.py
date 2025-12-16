@@ -1814,18 +1814,60 @@ async def submit_maintenance_request_get():
 
 # ------------------ Calendar Tools ------------------ #
 @app.post("/get_date/")
-def get_date(request: VapiRequest):
-    for tool_call in request.message.toolCalls:
-        if tool_call.function.name == "getDate":
-            return {
-                "results": [
-                    {
-                        "toolCallId": tool_call.id,
-                        "result": {"date": datetime.now().date().isoformat()},
-                    }
-                ]
-            }
-    return {"error": "Invalid tool call"}
+async def get_date(
+    http_request: Request,  # FastAPI will inject this - must be first
+    request: Optional[VapiRequest] = None
+):
+    """
+    Get the current date.
+    
+    Accepts BOTH formats:
+    1. VapiRequest format with toolCalls (from VAPI)
+    2. Regular JSON body with direct parameters (from other clients)
+    """
+    tool_call_id = None
+    request_body = {}
+    
+    # Parse request body first (most reliable method)
+    try:
+        request_body = await http_request.json()
+        
+        # Check if body has message.toolCalls structure (VAPI format)
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                func = tool_call.get("function", {})
+                func_name = func.get("name", "")
+                
+                # Accept any tool call name for this endpoint (lenient)
+                # But prefer matching names
+                if func_name in ["getDate", "getCurrentDate", "getToday", "get_date"]:
+                    tool_call_id = tool_call.get("id")
+                    break
+                elif not tool_call_id:  # Use first tool call ID as fallback
+                    tool_call_id = tool_call.get("id")
+    except Exception as e:
+        print(f"⚠️  Error parsing request body: {e}")
+        # Continue - will try VapiRequest object next
+    
+    # Fallback: Extract from VapiRequest toolCalls if provided
+    if not tool_call_id and request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
+        for tool_call in request.message.toolCalls:
+            if tool_call.function.name in ["getDate", "getCurrentDate", "getToday", "get_date"]:
+                tool_call_id = tool_call.id
+                break
+            elif not tool_call_id:  # Use first tool call ID as fallback
+                tool_call_id = tool_call.id
+    
+    # Get current date
+    current_date = datetime.now().date().isoformat()
+    result = {"date": current_date}
+    
+    # Return in VAPI format if toolCallId is present, otherwise return direct JSON
+    if tool_call_id:
+        return {"results": [{"toolCallId": tool_call_id, "result": result}]}
+    else:
+        return JSONResponse(content=result)
 
 
 @app.post("/book_visit/")
