@@ -3292,6 +3292,12 @@ async function handleDeleteSlot(slotId) {
 **4. Get All Calendar Events**
 - **Endpoint:** `GET /api/users/{user_id}/calendar-events?from_date={ISO_DATE}&to_date={ISO_DATE}`
 - **Description:** Get all calendar events (bookings + availability slots) for calendar display
+
+**📋 Quick Reference - Time Fields:**
+- **`startAt` / `endAt`** → Use for **calendar positioning** (UTC times, already converted)
+- **`customerSentStartAt` / `customerSentEndAt`** → Use for **display in booking modal** (original customer time strings)
+- **`timezone`** → Customer's timezone for reference
+- **⚠️ IMPORTANT:** Only create ONE calendar event per booking using `startAt`/`endAt`. Do NOT create a second event from customer times!
 - **Response:**
 ```json
 {
@@ -3308,10 +3314,10 @@ async function handleDeleteSlot(slotId) {
       "propertyAddress": "123 Main St",
       "visitorName": "John Doe",
       "visitorPhone": "+15409773737",
-      "startAt": "2025-12-01T16:00:00Z",
-      "endAt": "2025-12-01T17:00:00Z",
-      "customerSentStartAt": "2025-12-01T16:00:00",  // Original time as customer sent
-      "customerSentEndAt": "2025-12-01T17:00:00",  // Original time as customer sent
+      "startAt": "2025-12-16T17:00:00Z",  // UTC time for calendar positioning
+      "endAt": "2025-12-16T18:00:00Z",    // UTC time for calendar positioning
+      "customerSentStartAt": "2025-12-16 at 12:00 PM",  // Original time as customer mentioned (for display only)
+      "customerSentEndAt": "2025-12-16 at 1:00 PM",     // Original time as customer mentioned (for display only)
       "timezone": "America/New_York",
       "status": "approved",
       "callRecord": {
@@ -3335,6 +3341,24 @@ async function handleDeleteSlot(slotId) {
   "total": 2
 }
 ```
+
+**⚠️ CRITICAL: Avoiding Duplicate Bookings on Calendar**
+
+The backend returns **ONE event per booking**. To avoid showing duplicate bookings on the calendar:
+
+1. **Use `startAt` and `endAt` (UTC) for calendar positioning** - These are already correctly converted from the customer's local time to UTC. Calendar libraries work in UTC internally, so use these fields to position events on the calendar.
+
+2. **Use `customerSentStartAt` and `customerSentEndAt` for display in booking modal** - These show the original time the customer mentioned (e.g., "2025-12-16 at 12:00 PM"). Display these in the booking details modal, NOT for calendar positioning.
+
+3. **DO NOT create a second calendar event from customer times** - The backend already handles timezone conversion. Creating events from both UTC times and customer times will result in duplicate bookings.
+
+**Example:**
+- Customer says: "12:00 PM" in America/New_York timezone
+- Backend stores:
+  - `startAt`: `"2025-12-16T17:00:00Z"` (5 PM UTC = 12 PM EST) ← **Use this for calendar**
+  - `customerSentStartAt`: `"2025-12-16 at 12:00 PM"` ← **Use this for display in modal**
+- Calendar should show ONE event at 5 PM UTC (which displays as 12 PM in EST timezone)
+- Booking modal should show "12:00 PM" as the customer mentioned time
 
 **Implementation Guide:**
 
@@ -3379,6 +3403,73 @@ async function handleDeleteSlot(slotId) {
 - Display availability slots (holidays, off days) as background colors or overlays
 - Full-day events should span entire day in calendar view
 - Show call record indicator (📞 icon) on bookings that have linked call recordings
+
+**⚠️ IMPORTANT: Time Handling for Calendar Events**
+
+**For Calendar Positioning (use these fields):**
+- `startAt` - UTC datetime string (e.g., `"2025-12-16T17:00:00Z"`)
+- `endAt` - UTC datetime string (e.g., `"2025-12-16T18:00:00Z"`)
+- These are already correctly converted from customer's local time to UTC
+- Use these to position events on the calendar (calendar libraries work in UTC)
+
+**For Booking Modal Display (use these fields):**
+- `customerSentStartAt` - Original time string as customer mentioned (e.g., `"2025-12-16 at 12:00 PM"`)
+- `customerSentEndAt` - Original time string as customer mentioned (e.g., `"2025-12-16 at 1:00 PM"`)
+- `timezone` - Customer's timezone (e.g., `"America/New_York"`)
+- Display these in the booking details modal to show "as customer mentioned" times
+
+**Example Implementation:**
+```javascript
+// ✅ CORRECT: Use startAt/endAt for calendar, customerSentStartAt/EndAt for modal
+function renderCalendarEvent(booking) {
+  // For calendar positioning - use UTC times
+  const calendarEvent = {
+    id: booking.id,
+    title: `${booking.visitorName} - ${booking.propertyAddress}`,
+    start: new Date(booking.startAt),  // UTC time
+    end: new Date(booking.endAt),       // UTC time
+    // ... other calendar properties
+  };
+  return calendarEvent;
+}
+
+function renderBookingModal(booking) {
+  // For display in modal - show customer's original time
+  const displayStart = booking.customerSentStartAt || booking.startAt;
+  const displayEnd = booking.customerSentEndAt || booking.endAt;
+  
+  return (
+    <div>
+      <h3>Booking Time</h3>
+      <p>Start: {displayStart}</p>
+      <p>End: {displayEnd}</p>
+      <p>Timezone: {booking.timezone}</p>
+      {/* Show UTC times for reference if needed */}
+      <details>
+        <summary>UTC Times (for reference)</summary>
+        <p>Start (UTC): {booking.startAt}</p>
+        <p>End (UTC): {booking.endAt}</p>
+      </details>
+    </div>
+  );
+}
+
+// ❌ WRONG: Don't create duplicate events
+function renderCalendarEventWRONG(booking) {
+  // DON'T do this - creates duplicate bookings!
+  const events = [
+    {
+      start: new Date(booking.startAt),  // UTC event
+      // ...
+    },
+    {
+      start: parseCustomerTime(booking.customerSentStartAt),  // Customer time event - WRONG!
+      // ...
+    }
+  ];
+  return events;  // This creates 2 events for 1 booking!
+}
+```
 
 **Example Implementation:**
 ```javascript
@@ -3438,6 +3529,83 @@ async function getCalendarEvents(fromDate, toDate) {
     }
   );
   return response.json();
+}
+
+// ✅ CORRECT: Render calendar events (one event per booking)
+function renderCalendarEvents(events) {
+  const calendarEvents = events.map(event => {
+    if (event.type === 'booking') {
+      return {
+        id: event.id,
+        title: `${event.visitorName} - ${event.propertyAddress}`,
+        start: new Date(event.startAt),  // Use UTC time for calendar positioning
+        end: new Date(event.endAt),      // Use UTC time for calendar positioning
+        extendedProps: {
+          bookingId: event.bookingId,
+          status: event.status,
+          // Store customer times for modal display
+          customerSentStartAt: event.customerSentStartAt,
+          customerSentEndAt: event.customerSentEndAt,
+          timezone: event.timezone,
+          visitorName: event.visitorName,
+          visitorPhone: event.visitorPhone,
+          propertyAddress: event.propertyAddress,
+          callRecord: event.callRecord
+        },
+        className: `booking-status-${event.status}`
+      };
+    } else if (event.type === 'availability_slot') {
+      return {
+        id: event.id,
+        title: event.slotType === 'holiday' ? 'Holiday' : 'Unavailable',
+        start: new Date(event.startAt),
+        end: new Date(event.endAt),
+        allDay: event.isFullDay,
+        extendedProps: {
+          slotId: event.slotId,
+          slotType: event.slotType
+        },
+        className: 'availability-slot',
+        display: 'background'  // Show as background overlay
+      };
+    }
+  });
+  return calendarEvents;
+}
+
+// Display booking details in modal
+function showBookingModal(bookingEvent) {
+  const booking = bookingEvent.extendedProps;
+  
+  // Use customer's original time for display
+  const displayStart = booking.customerSentStartAt || bookingEvent.start.toISOString();
+  const displayEnd = booking.customerSentEndAt || bookingEvent.end.toISOString();
+  
+  return `
+    <div class="booking-modal">
+      <h2>Booking #${booking.bookingId}</h2>
+      <p><strong>Visitor:</strong> ${booking.visitorName}</p>
+      <p><strong>Phone:</strong> ${booking.visitorPhone}</p>
+      <p><strong>Property:</strong> ${booking.propertyAddress}</p>
+      <p><strong>Status:</strong> ${booking.status}</p>
+      
+      <h3>Booking Time (as customer mentioned):</h3>
+      <p>Start: ${displayStart}</p>
+      <p>End: ${displayEnd}</p>
+      <p>Timezone: ${booking.timezone}</p>
+      
+      ${booking.callRecord ? `
+        <div class="call-record">
+          <h4>📞 Call Recording</h4>
+          <audio controls src="${booking.callRecord.callRecordingUrl}"></audio>
+          <details>
+            <summary>View Transcript</summary>
+            <pre>${booking.callRecord.callTranscript}</pre>
+          </details>
+        </div>
+      ` : ''}
+    </div>
+  `;
 }
 ```
 

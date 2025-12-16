@@ -9601,10 +9601,21 @@ async def get_calendar_events(
         slots = session.exec(slots_query).all()
         
         # Format bookings (using pre-fetched property map - no N+1 queries)
+        # IMPORTANT: Use booking.start_at/end_at (UTC) for calendar positioning
+        # These are already correctly converted from customer's local time to UTC
+        # Include customer_sent_start_at/end_at for display purposes only
         booking_events = []
         for booking in bookings:
             property_listing = property_map.get(booking.property_id)
             property_meta = property_listing.listing_metadata or {} if property_listing else {}
+            
+            # Ensure start_at and end_at are timezone-aware (UTC)
+            start_at_utc = booking.start_at
+            end_at_utc = booking.end_at
+            if start_at_utc.tzinfo is None:
+                start_at_utc = start_at_utc.replace(tzinfo=timezone.utc)
+            if end_at_utc.tzinfo is None:
+                end_at_utc = end_at_utc.replace(tzinfo=timezone.utc)
             
             booking_events.append({
                 "id": f"booking_{booking.booking_id}",
@@ -9615,8 +9626,14 @@ async def get_calendar_events(
                 "visitorName": booking.visitor_name,
                 "visitorPhone": booking.visitor_phone,
                 "visitorEmail": booking.visitor_email,
-                "startAt": booking.start_at.isoformat(),
-                "endAt": booking.end_at.isoformat(),
+                # Use UTC times for calendar positioning (already correctly converted from customer's local time)
+                # Calendar libraries work in UTC internally, so this ensures correct positioning
+                "startAt": start_at_utc.isoformat(),
+                "endAt": end_at_utc.isoformat(),
+                # Include customer's original time strings for display in UI
+                # Frontend should use these for showing "as customer mentioned" times
+                "customerSentStartAt": booking.customer_sent_start_at,
+                "customerSentEndAt": booking.customer_sent_end_at,
                 "status": booking.status,
                 "timezone": booking.timezone,
                 "notes": booking.notes,
