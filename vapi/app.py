@@ -1859,9 +1859,55 @@ async def get_date(
             elif not tool_call_id:  # Use first tool call ID as fallback
                 tool_call_id = tool_call.id
     
-    # Get current date
-    current_date = datetime.now().date().isoformat()
-    result = {"date": current_date}
+    # Get current date/time in UTC (best practice for APIs)
+    now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+    current_date = now_utc.date()
+    
+    # ISO 8601 formats (standard for APIs)
+    iso_date = current_date.isoformat()  # "2025-01-15"
+    iso_datetime = now_utc.isoformat().replace("+00:00", "Z")  # "2025-01-15T08:38:27Z"
+    timestamp_ms = int(now_utc.timestamp() * 1000)  # Unix timestamp in milliseconds
+    
+    # Day of week information
+    day_of_week = now_utc.strftime("%A")  # Full day name (e.g., "Wednesday")
+    day_of_week_short = now_utc.strftime("%a")  # Short day name (e.g., "Wed")
+    day_number = now_utc.weekday()  # 0 = Monday, 6 = Sunday
+    
+    # Month information
+    month_name = now_utc.strftime("%B")  # Full month name (e.g., "January")
+    month_name_short = now_utc.strftime("%b")  # Short month name (e.g., "Jan")
+    day_of_month = now_utc.day
+    year = now_utc.year
+    
+    # Human-readable formats (for VAPI voice responses)
+    human_readable_date = now_utc.strftime("%A, %B %d, %Y")  # "Wednesday, January 15, 2025"
+    human_readable_datetime = now_utc.strftime("%A, %B %d, %Y at %I:%M %p UTC")  # "Wednesday, January 15, 2025 at 08:38 AM UTC"
+    
+    result = {
+        # ISO 8601 formats (standard, machine-readable)
+        "date": iso_date,  # "2025-01-15"
+        "datetime": iso_datetime,  # "2025-01-15T08:38:27Z"
+        "timestampMs": timestamp_ms,  # Unix timestamp in milliseconds
+        
+        # Day of week
+        "dayOfWeek": day_of_week,  # Full name: "Wednesday"
+        "dayOfWeekShort": day_of_week_short,  # Short: "Wed"
+        "dayNumber": day_number,  # 0-6 (0=Monday, 6=Sunday)
+        
+        # Date components
+        "dayOfMonth": day_of_month,  # 1-31
+        "month": now_utc.month,  # 1-12
+        "monthName": month_name,  # Full: "January"
+        "monthNameShort": month_name_short,  # Short: "Jan"
+        "year": year,
+        
+        # Human-readable formats (for VAPI voice responses)
+        "humanReadable": human_readable_date,  # "Wednesday, January 15, 2025"
+        "humanReadableWithTime": human_readable_datetime,  # "Wednesday, January 15, 2025 at 08:38 AM UTC"
+        
+        # Timezone information
+        "timezone": "UTC"
+    }
     
     # Return in VAPI format if toolCallId is present, otherwise return direct JSON
     if tool_call_id:
