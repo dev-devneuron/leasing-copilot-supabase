@@ -11496,15 +11496,55 @@ async def get_bookings_by_visitor_vapi(
     VAPI calls this to check booking status or get booking details.
     No property_id needed - only user-provided info (name, phone).
     """
-    # Parse request body once
+    # Parse request body first (most reliable method)
     request_body = {}
     tool_call_id = None
     
-    # Extract parameters from VapiRequest toolCalls if provided
-    if request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
+    try:
+        request_body = await http_request.json()
+        
+        # Check if body has message.toolCalls structure (VAPI format)
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                func = tool_call.get("function", {})
+                func_name = func.get("name", "")
+                
+                if func_name in ["getBookingStatus", "checkBooking", "getBookings", "getBookingsByVisitor"]:
+                    # Extract toolCallId
+                    tool_call_id = tool_call.get("id")
+                    args = func.get("arguments", {})
+                    
+                    # Handle both string and object formats
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except:
+                            args = {}
+                    elif not isinstance(args, dict):
+                        args = {}
+                    
+                    visitor_phone = visitor_phone or args.get("visitor_phone") or args.get("visitorPhone")
+                    visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
+                    status = status or args.get("status")
+                    break
+        
+        # If not found in toolCalls, try direct body parameters
+        if not visitor_phone and not visitor_name:
+            visitor_phone = request_body.get("visitor_phone") or request_body.get("visitorPhone")
+            visitor_name = request_body.get("visitor_name") or request_body.get("visitorName")
+            status = status or request_body.get("status")
+            
+    except Exception as e:
+        print(f"⚠️  Error parsing request body: {e}")
+        # Continue - will try VapiRequest object next
+    
+    # Fallback: Extract parameters from VapiRequest toolCalls if provided
+    if (not visitor_phone and not visitor_name) and request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls') and request.message.toolCalls:
         for tool_call in request.message.toolCalls:
             if tool_call.function.name in ["getBookingStatus", "checkBooking", "getBookings", "getBookingsByVisitor"]:
-                tool_call_id = tool_call.id
+                if not tool_call_id:
+                    tool_call_id = tool_call.id
                 args = tool_call.function.arguments
                 if isinstance(args, str):
                     try:
@@ -11516,22 +11556,6 @@ async def get_bookings_by_visitor_vapi(
                 visitor_name = visitor_name or args.get("visitor_name") or args.get("visitorName")
                 status = status or args.get("status")
                 break
-    
-    # If still missing, try to get from request body directly
-    if not visitor_phone and not visitor_name:
-        try:
-            request_body = await http_request.json()
-            # Extract toolCallId from body if present
-            if not tool_call_id and request_body.get("message") and request_body["message"].get("toolCalls"):
-                tool_calls = request_body["message"]["toolCalls"]
-                if tool_calls and len(tool_calls) > 0:
-                    tool_call_id = tool_calls[0].get("id")
-            
-            visitor_phone = visitor_phone or request_body.get("visitor_phone") or request_body.get("visitorPhone")
-            visitor_name = visitor_name or request_body.get("visitor_name") or request_body.get("visitorName")
-            status = status or request_body.get("status")
-        except:
-            pass  # Body might not be JSON or already consumed
     
     if not visitor_phone and not visitor_name:
         raise HTTPException(
