@@ -1862,9 +1862,11 @@ async def get_date(
     # Get current date/time in UTC (best practice for APIs)
     now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
     current_date = now_utc.date()
+    current_time = now_utc.time()
     
     # ISO 8601 formats (standard for APIs)
     iso_date = current_date.isoformat()  # "2025-01-15"
+    iso_time = current_time.strftime("%H:%M:%S")  # "08:38:27"
     iso_datetime = now_utc.isoformat().replace("+00:00", "Z")  # "2025-01-15T08:38:27Z"
     timestamp_ms = int(now_utc.timestamp() * 1000)  # Unix timestamp in milliseconds
     
@@ -1879,33 +1881,32 @@ async def get_date(
     day_of_month = now_utc.day
     year = now_utc.year
     
+    # Time components
+    hour_24 = now_utc.hour  # 0-23
+    hour_12 = int(now_utc.strftime("%I"))  # 1-12
+    minute = now_utc.minute
+    second = now_utc.second
+    am_pm = now_utc.strftime("%p")  # "AM" or "PM"
+    
     # Human-readable formats (for VAPI voice responses)
     human_readable_date = now_utc.strftime("%A, %B %d, %Y")  # "Wednesday, January 15, 2025"
+    human_readable_time = now_utc.strftime("%I:%M %p")  # "08:38 AM"
     human_readable_datetime = now_utc.strftime("%A, %B %d, %Y at %I:%M %p UTC")  # "Wednesday, January 15, 2025 at 08:38 AM UTC"
     
+    # VAPI-friendly response: Simple, concise, easy to speak
+    # Primary fields for VAPI to use in voice responses
     result = {
-        # ISO 8601 formats (standard, machine-readable)
-        "date": iso_date,  # "2025-01-15"
-        "datetime": iso_datetime,  # "2025-01-15T08:38:27Z"
-        "timestampMs": timestamp_ms,  # Unix timestamp in milliseconds
+        # Primary fields for VAPI (use these for voice responses)
+        "today": f"{day_of_week}, {month_name} {day_of_month}, {year}",  # "Wednesday, December 17, 2025"
+        "currentTime": human_readable_time,  # "02:30 PM"
+        "dayOfWeek": day_of_week,  # "Wednesday"
         
-        # Day of week
-        "dayOfWeek": day_of_week,  # Full name: "Wednesday"
-        "dayOfWeekShort": day_of_week_short,  # Short: "Wed"
-        "dayNumber": day_number,  # 0-6 (0=Monday, 6=Sunday)
+        # ISO formats (for any calculations/comparisons)
+        "date": iso_date,  # "2025-12-17"
+        "time": iso_time,  # "14:30:45"
+        "datetime": iso_datetime,  # "2025-12-17T14:30:45Z"
         
-        # Date components
-        "dayOfMonth": day_of_month,  # 1-31
-        "month": now_utc.month,  # 1-12
-        "monthName": month_name,  # Full: "January"
-        "monthNameShort": month_name_short,  # Short: "Jan"
-        "year": year,
-        
-        # Human-readable formats (for VAPI voice responses)
-        "humanReadable": human_readable_date,  # "Wednesday, January 15, 2025"
-        "humanReadableWithTime": human_readable_datetime,  # "Wednesday, January 15, 2025 at 08:38 AM UTC"
-        
-        # Timezone information
+        # Timezone
         "timezone": "UTC"
     }
     
