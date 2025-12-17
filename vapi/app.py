@@ -2107,17 +2107,57 @@ def get_slots(request: VapiRequest):
                     if datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00")).date() == date_obj
                 ]
                 
-                # Select 3-4 best slots (prefer variety: morning, afternoon, evening)
-                if requested_date_slots:
+                # Check if requested date is a working day
+                working_days = prefs.get("workingDays", [0, 1, 2, 3, 4])  # Default: Mon-Fri
+                requested_day_of_week = date_obj.weekday()
+                is_working_day = requested_day_of_week in working_days
+                
+                # If no slots on requested date, get alternative slots from next 2-3 working days
+                alternative_slots = []
+                alternative_dates = []
+                if not requested_date_slots:
+                    # Find next 3 working days and get slots from them
+                    check_date = date_obj + timedelta(days=1)
+                    working_days_found = 0
+                    max_days_to_check = 10  # Don't look more than 10 days ahead
+                    days_checked = 0
+                    
+                    while working_days_found < 3 and days_checked < max_days_to_check:
+                        if check_date.weekday() in working_days:
+                            # Get slots for this working day
+                            alt_from_dt = datetime.combine(check_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+                            alt_to_dt = datetime.combine(check_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+                            
+                            alt_slots = _compute_available_slots(
+                                session,
+                                assigned_user["user_id"],
+                                assigned_user["user_type"],
+                                alt_from_dt,
+                                alt_to_dt
+                            )
+                            
+                            if alt_slots:
+                                alternative_dates.append(check_date)
+                                alternative_slots.extend(alt_slots)
+                                working_days_found += 1
+                        
+                        check_date += timedelta(days=1)
+                        days_checked += 1
+                
+                # Helper function to select diverse slots
+                def select_diverse_slots(slots, max_slots=4):
+                    if not slots:
+                        return []
+                    
                     # Sort by time
-                    requested_date_slots.sort(key=lambda x: x["startAt"])
+                    slots.sort(key=lambda x: x["startAt"])
                     
                     # Categorize slots by time of day
                     morning_slots = []  # 8 AM - 12 PM
                     afternoon_slots = []  # 12 PM - 5 PM
                     evening_slots = []  # 5 PM - 9 PM
                     
-                    for slot in requested_date_slots:
+                    for slot in slots:
                         slot_dt = datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00"))
                         hour = slot_dt.hour
                         
@@ -2129,33 +2169,30 @@ def get_slots(request: VapiRequest):
                             evening_slots.append(slot)
                     
                     # Select diverse slots (prefer 1-2 from each category)
-                    selected_slots = []
+                    selected = []
                     if morning_slots:
-                        selected_slots.append(morning_slots[0])
+                        selected.append(morning_slots[0])
                     if afternoon_slots:
-                        selected_slots.append(afternoon_slots[0])
+                        selected.append(afternoon_slots[0])
                     if evening_slots:
-                        selected_slots.append(evening_slots[0])
+                        selected.append(evening_slots[0])
                     
-                    # Add more slots if we have less than 3
-                    remaining_slots = [s for s in requested_date_slots if s not in selected_slots]
-                    while len(selected_slots) < 3 and remaining_slots:
-                        selected_slots.append(remaining_slots.pop(0))
+                    # Add more slots if we have less than max
+                    remaining = [s for s in slots if s not in selected]
+                    while len(selected) < max_slots and remaining:
+                        selected.append(remaining.pop(0))
                     
-                    # Limit to 4 slots max
-                    selected_slots = selected_slots[:4]
-                else:
-                    selected_slots = []
+                    return selected[:max_slots]
                 
-                # Format response for VAPI
-                if selected_slots:
-                    # Format slots in a readable way
-                    slot_descriptions = []
-                    for slot in selected_slots:
+                # Helper function to format slots
+                def format_slots(slots):
+                    descriptions = []
+                    for slot in slots:
                         start_dt = datetime.fromisoformat(slot["startAt"].replace("Z", "+00:00"))
                         end_dt = datetime.fromisoformat(slot["endAt"].replace("Z", "+00:00"))
                         
-                        # Format time in readable format
+                        # Format date and time
+                        date_str = start_dt.strftime("%A, %B %d")  # e.g., "Monday, December 29"
                         start_time = start_dt.strftime("%I:%M %p")
                         end_time = end_dt.strftime("%I:%M %p")
                         
@@ -2168,26 +2205,80 @@ def get_slots(request: VapiRequest):
                         else:
                             time_of_day = "evening"
                         
-                        slot_descriptions.append(f"{start_time} - {end_time} ({time_of_day})")
+                        descriptions.append({
+                            "date": date_str,
+                            "time": f"{start_time} - {end_time}",
+                            "timeOfDay": time_of_day,
+                            "formatted": f"{date_str}: {start_time} - {end_time} ({time_of_day})"
+                        })
+                    return descriptions
+                
+                # Select slots
+                selected_slots = select_diverse_slots(requested_date_slots, 4)
+                
+                # Format response for VAPI
+                if selected_slots:
+                    # Format slots in a readable way
+                    slot_descriptions = format_slots(selected_slots)
                     
-                    result_text = f"Available time slots on {date_obj.strftime('%B %d, %Y')}:\n"
-                    result_text += "\n".join([f"• {desc}" for desc in slot_descriptions])
+                    result_text = f"Available time slots on {date_obj.strftime('%A, %B %d, %Y')}:\n"
+                    result_text += "\n".join([f"• {desc['time']} ({desc['timeOfDay']})" for desc in slot_descriptions])
                     result_text += f"\n\nTotal: {len(selected_slots)} available slot(s)"
                     
                     result_data = {
                         "date": date_obj.strftime("%Y-%m-%d"),
+                        "dayOfWeek": date_obj.strftime("%A"),
                         "availableSlots": selected_slots,
-                        "formattedSlots": slot_descriptions,
+                        "formattedSlots": [desc['formatted'] for desc in slot_descriptions],
                         "totalSlots": len(selected_slots),
                         "message": result_text
                     }
-                else:
+                elif alternative_slots:
+                    # No slots on requested date, but we have alternatives
+                    selected_alternatives = select_diverse_slots(alternative_slots, 6)  # More slots since multiple days
+                    alt_descriptions = format_slots(selected_alternatives)
+                    
+                    # Explain why requested date has no slots
+                    if not is_working_day:
+                        day_name = date_obj.strftime("%A")
+                        reason = f"{day_name} is not a working day."
+                    else:
+                        reason = "All time slots are already booked."
+                    
+                    result_text = f"No available slots on {date_obj.strftime('%A, %B %d, %Y')}. {reason}\n\n"
+                    result_text += "Here are alternative slots on the next available working days:\n"
+                    result_text += "\n".join([f"• {desc['formatted']}" for desc in alt_descriptions])
+                    
                     result_data = {
                         "date": date_obj.strftime("%Y-%m-%d"),
+                        "dayOfWeek": date_obj.strftime("%A"),
+                        "isWorkingDay": is_working_day,
                         "availableSlots": [],
                         "formattedSlots": [],
                         "totalSlots": 0,
-                        "message": f"No available time slots found for {date_obj.strftime('%B %d, %Y')}. Please try a different date."
+                        "alternativeSlots": selected_alternatives,
+                        "alternativeFormattedSlots": [desc['formatted'] for desc in alt_descriptions],
+                        "alternativeDates": [d.strftime("%Y-%m-%d") for d in alternative_dates],
+                        "message": result_text,
+                        "reason": reason
+                    }
+                else:
+                    # No slots at all
+                    if not is_working_day:
+                        day_name = date_obj.strftime("%A")
+                        reason = f"{day_name} is not a working day. Please try a weekday."
+                    else:
+                        reason = "All time slots are already booked. Please try a different date."
+                    
+                    result_data = {
+                        "date": date_obj.strftime("%Y-%m-%d"),
+                        "dayOfWeek": date_obj.strftime("%A"),
+                        "isWorkingDay": is_working_day,
+                        "availableSlots": [],
+                        "formattedSlots": [],
+                        "totalSlots": 0,
+                        "message": f"No available time slots found for {date_obj.strftime('%A, %B %d, %Y')}. {reason}",
+                        "reason": reason
                     }
                 
                 return {
@@ -8291,9 +8382,20 @@ def _compute_available_slots(
     
     current_date = from_date.replace(hour=0, minute=0, second=0, microsecond=0)
     
+    # Get working days from preferences (default: Monday-Friday = [0,1,2,3,4])
+    working_days = prefs.get("workingDays", [0, 1, 2, 3, 4])
+    
     while current_date <= to_date:
         # Convert to user's timezone (current_date should be naive)
         current_date_tz = pytz.utc.localize(current_date).astimezone(user_tz)
+        
+        # Check if this day is a working day (0=Monday, 6=Sunday)
+        day_of_week = current_date_tz.weekday()
+        if day_of_week not in working_days:
+            # Skip non-working days
+            current_date += timedelta(days=1)
+            continue
+        
         work_start_dt = current_date_tz.replace(hour=work_start.hour, minute=work_start.minute, second=0, microsecond=0)
         work_end_dt = current_date_tz.replace(hour=work_end.hour, minute=work_end.minute, second=0, microsecond=0)
         
