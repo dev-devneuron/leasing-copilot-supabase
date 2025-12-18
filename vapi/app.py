@@ -9975,6 +9975,28 @@ async def get_user_bookings(
         })
 
 
+def _check_booking_permission(session: Session, booking: PropertyTourBooking, user_id: int, user_type: str) -> bool:
+    """
+    Check if a user has permission to manage a booking.
+    Returns True if:
+    1. User is the assigned approver, OR
+    2. User is a property_manager who owns the property associated with the booking
+    """
+    # Check if user is the assigned approver
+    if booking.assigned_to_user_id == user_id and booking.assigned_to_user_type == user_type:
+        return True
+    
+    # If user is a property manager, check if they own the property
+    if user_type == "property_manager":
+        property_listing = session.get(ApartmentListing, booking.property_id)
+        if property_listing:
+            source = session.get(Source, property_listing.source_id)
+            if source and source.property_manager_id == user_id:
+                return True
+    
+    return False
+
+
 # Approve Booking
 @app.post("/api/bookings/{booking_id}/approve")
 async def approve_booking(
@@ -9992,7 +10014,7 @@ async def approve_booking(
     
     # Use token user as approver; optional body approver_id must match if provided
     if approver_id is not None and approver_id != user_id:
-        raise HTTPException(status_code=403, detail="Approver mismatch. The requester must be the assigned approver.")
+        raise HTTPException(status_code=403, detail="Approver mismatch. The approver_id must match the authenticated user.")
     
     with Session(engine) as session:
         # Start transaction
@@ -10000,9 +10022,9 @@ async def approve_booking(
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         
-        # Verify caller is the approver
-        if booking.assigned_to_user_id != user_id or booking.assigned_to_user_type != user_type:
-            raise HTTPException(status_code=403, detail="Only the assigned approver can approve this booking")
+        # Verify caller has permission (assigned approver or PM who owns the property)
+        if not _check_booking_permission(session, booking, user_id, user_type):
+            raise HTTPException(status_code=403, detail="Only the assigned approver or property manager who owns the property can approve this booking")
         
         if booking.status != "pending":
             raise HTTPException(status_code=400, detail=f"Booking is not pending (current status: {booking.status})")
@@ -10118,15 +10140,16 @@ async def deny_booking(
     user_id = user_data["id"]
     
     if approver_id is not None and approver_id != user_id:
-        raise HTTPException(status_code=403, detail="Approver mismatch. The requester must be the assigned approver.")
+        raise HTTPException(status_code=403, detail="Approver mismatch. The approver_id must match the authenticated user.")
     
     with Session(engine) as session:
         booking = session.get(PropertyTourBooking, booking_id)
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         
-        if booking.assigned_to_user_id != user_id or booking.assigned_to_user_type != user_type:
-            raise HTTPException(status_code=403, detail="Only the assigned approver can deny this booking")
+        # Verify caller has permission (assigned approver or PM who owns the property)
+        if not _check_booking_permission(session, booking, user_id, user_type):
+            raise HTTPException(status_code=403, detail="Only the assigned approver or property manager who owns the property can deny this booking")
         
         if booking.status != "pending":
             raise HTTPException(status_code=400, detail=f"Booking is not pending (current status: {booking.status})")
@@ -10162,15 +10185,16 @@ async def reschedule_booking(
     user_id = user_data["id"]
     
     if approver_id is not None and approver_id != user_id:
-        raise HTTPException(status_code=403, detail="Approver mismatch. The requester must be the assigned approver.")
+        raise HTTPException(status_code=403, detail="Approver mismatch. The approver_id must match the authenticated user.")
     
     with Session(engine) as session:
         booking = session.get(PropertyTourBooking, booking_id)
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         
-        if booking.assigned_to_user_id != user_id or booking.assigned_to_user_type != user_type:
-            raise HTTPException(status_code=403, detail="Only the assigned approver can reschedule this booking")
+        # Verify caller has permission (assigned approver or PM who owns the property)
+        if not _check_booking_permission(session, booking, user_id, user_type):
+            raise HTTPException(status_code=403, detail="Only the assigned approver or property manager who owns the property can reschedule this booking")
         
         if booking.status not in ["pending", "rescheduled"]:
             raise HTTPException(status_code=400, detail=f"Cannot reschedule booking with status: {booking.status}")
@@ -10223,10 +10247,8 @@ async def cancel_booking(
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         
-        # Check if user is the approver or visitor (by phone)
-        is_approver = (
-            booking.assigned_to_user_id == user_id and booking.assigned_to_user_type == user_type
-        )
+        # Check if user has permission (assigned approver, PM who owns the property, or visitor)
+        is_approver = _check_booking_permission(session, booking, user_id, user_type)
         is_visitor = False  # In a real system, you'd verify visitor identity
         
         if not is_approver and not is_visitor:
@@ -10292,8 +10314,9 @@ async def delete_booking(
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         
-        if booking.assigned_to_user_id != user_id or booking.assigned_to_user_type != user_type:
-            raise HTTPException(status_code=403, detail="Only the assigned approver can delete this booking")
+        # Verify caller has permission (assigned approver or PM who owns the property)
+        if not _check_booking_permission(session, booking, user_id, user_type):
+            raise HTTPException(status_code=403, detail="Only the assigned approver or property manager who owns the property can delete this booking")
         
         if booking.status != "denied":
             raise HTTPException(status_code=400, detail=f"Only denied bookings can be deleted (current status: {booking.status})")
@@ -10342,13 +10365,9 @@ async def update_booking(
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         
-        # Check if user is the approver
-        is_approver = (
-            booking.assigned_to_user_id == user_id and booking.assigned_to_user_type == user_type
-        )
-        
-        if not is_approver:
-            raise HTTPException(status_code=403, detail="Only the assigned approver can update this booking")
+        # Verify caller has permission (assigned approver or PM who owns the property)
+        if not _check_booking_permission(session, booking, user_id, user_type):
+            raise HTTPException(status_code=403, detail="Only the assigned approver or property manager who owns the property can update this booking")
         
         # Update fields if provided
         if visitor_name is not None:
