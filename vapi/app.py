@@ -7015,6 +7015,76 @@ def _derive_duration_from_recording(recording_url: str) -> Optional[int]:
     return None
 
 
+def _detect_opt_out(transcript: Optional[str], message: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    """
+    Detect opt-out from transcript, message, or payload.
+    
+    Checks for:
+    - Opt-out keywords in transcript ("stop", "don't call", "remove me", etc.)
+    - Explicit opt-out events in Vapi payload
+    - Keypad opt-out signals (if configured)
+    
+    Returns:
+        True if opt-out detected, False otherwise
+    """
+    if not transcript and not message and not payload:
+        return False
+    
+    # Opt-out keywords (case-insensitive)
+    opt_out_keywords = [
+        "stop calling",
+        "don't call",
+        "do not call",
+        "remove me",
+        "take me off",
+        "unsubscribe",
+        "opt out",
+        "opt-out",
+        "no more calls",
+        "stop calling me",
+        "don't call me",
+        "never call",
+        "remove my number",
+        "delete my number"
+    ]
+    
+    # Check transcript for opt-out keywords
+    if transcript:
+        transcript_lower = transcript.lower()
+        for keyword in opt_out_keywords:
+            if keyword in transcript_lower:
+                print(f"🚫 Opt-out keyword detected in transcript: '{keyword}'")
+                return True
+    
+    # Check for explicit opt-out in message/payload
+    # Vapi might send explicit opt-out events
+    if message:
+        message_type = message.get("type", "").lower()
+        if "opt" in message_type and "out" in message_type:
+            print(f"🚫 Explicit opt-out event detected: {message_type}")
+            return True
+        
+        # Check for opt-out flag in message
+        if message.get("optOut") or message.get("opt_out") or message.get("optedOut"):
+            print(f"🚫 Opt-out flag detected in message")
+            return True
+    
+    # Check payload for opt-out indicators
+    if payload:
+        if payload.get("optOut") or payload.get("opt_out") or payload.get("optedOut"):
+            print(f"🚫 Opt-out flag detected in payload")
+            return True
+        
+        # Check for keypad input indicating opt-out (e.g., pressing 9)
+        # This would need to be configured in Vapi assistant
+        keypad_input = payload.get("keypadInput") or payload.get("keypad_input")
+        if keypad_input == "9" or keypad_input == "9#":  # Common opt-out keypad code
+            print(f"🚫 Opt-out keypad input detected: {keypad_input}")
+            return True
+    
+    return False
+
+
 def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[CallRecord]:
     """Import a single call from VAPI API response into database."""
     call_id = call_data.get("id") or call_data.get("callId")
@@ -7145,6 +7215,13 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
             # Keep default datetime.utcnow()
     
     # Create new record
+    # Determine call direction from metadata or default to inbound
+    call_direction = "inbound"  # Imported calls are typically inbound
+    if call_data.get("metadata") and isinstance(call_data.get("metadata"), dict):
+        metadata = call_data.get("metadata")
+        if metadata.get("callDirection") == "outbound":
+            call_direction = "outbound"
+    
     call_record = CallRecord(
         id=uuid.uuid4(),
         call_id=call_id,
@@ -7154,6 +7231,7 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
         call_status=call_status,
         call_duration=call_duration,
         caller_number=_normalize_bot_number(caller_number) if caller_number else None,
+        call_direction=call_direction,  # Set call direction
         call_metadata={
             "imported_from_vapi": True,
             "imported_at": datetime.utcnow().isoformat(),
@@ -7531,11 +7609,34 @@ async def vapi_webhook_hyphen(request: Request):
                     call_id=call_id,
                     realtor_number=realtor_number,
                     live_transcript_chunks=[],
+                    call_direction="inbound",  # Default to inbound
                 )
                 session.add(call_record)
             
             now = datetime.utcnow()
-            updated = False
+            updated = False  # Initialize updated flag
+            
+            # Auto-create contact and record consent for inbound callers
+            if caller_number_raw and not call_record.contact_id:
+                try:
+                    from DB.outbound_calling import get_or_create_contact, record_consent
+                    from DB.user_lookup import normalize_phone_number
+                    
+                    normalized_caller = normalize_phone_number(caller_number_raw)
+                    if normalized_caller:
+                        # Get or create contact
+                        contact = get_or_create_contact(normalized_caller, session)
+                        
+                        # Record consent from inbound call (existing business relationship)
+                        if not contact.consent_status:
+                            record_consent(normalized_caller, session, source="call")
+                        
+                        # Link call record to contact
+                        call_record.contact_id = contact.id
+                        call_record.caller_number = normalized_caller
+                        updated = True
+                except Exception as e:
+                    print(f"⚠️  Error creating contact for caller: {e}")
             
             # Store transcript from end-of-call-report
             if full_transcript:
@@ -7654,6 +7755,72 @@ async def vapi_webhook_hyphen(request: Request):
             call_record.updated_at = now
             updated = True
             
+            # ========================================================================
+            # OPT-OUT DETECTION AND PROCESSING (CRITICAL FOR COMPLIANCE)
+            # ========================================================================
+            # Check for opt-out in transcript or explicit opt-out events
+            if full_transcript or message_type:
+                opt_out_detected = _detect_opt_out(full_transcript, message, payload)
+                
+                if opt_out_detected:
+                    # Get caller number for opt-out processing
+                    caller_phone = call_record.caller_number or caller_number_raw
+                    
+                    if caller_phone:
+                        from DB.outbound_calling import record_opt_out
+                        from DB.user_lookup import normalize_phone_number
+                        
+                        try:
+                            normalized_phone = normalize_phone_number(caller_phone)
+                            
+                            # Record opt-out IMMEDIATELY (zero tolerance)
+                            record_opt_out(
+                                normalized_phone,
+                                session,
+                                method="voice",
+                                call_id=call_id
+                            )
+                            
+                            # Mark call record
+                            call_record.opt_out_triggered = True
+                            if call_record.call_metadata is None:
+                                call_record.call_metadata = {}
+                            call_record.call_metadata["opt_out_detected_at"] = now.isoformat()
+                            call_record.call_metadata["opt_out_method"] = "voice"
+                            updated = True
+                            
+                            print(f"🚫 OPT-OUT DETECTED AND RECORDED: {normalized_phone} (call_id: {call_id})")
+                        except Exception as e:
+                            print(f"⚠️  Error recording opt-out: {e}")
+            
+            # ========================================================================
+            # UPDATE CONTACT LAST_CALL_OUTCOME FOR OUTBOUND CALLS
+            # ========================================================================
+            # Determine and record call outcome for outbound calls to enable smart retry logic
+            if call_record.call_direction == "outbound" and call_record.contact_id:
+                try:
+                    from DB.outbound_calling import determine_call_outcome
+                    
+                    # Determine outcome from call data
+                    call_outcome = determine_call_outcome(
+                        call_status=call_record.call_status,
+                        call_duration=call_record.call_duration,
+                        transcript=call_record.transcript,
+                        opt_out_detected=call_record.opt_out_triggered
+                    )
+                    
+                    # Update Contact with outcome
+                    contact = session.get(Contact, call_record.contact_id)
+                    if contact:
+                        contact.last_call_outcome = call_outcome
+                        contact.updated_at = datetime.utcnow()
+                        session.add(contact)
+                        updated = True
+                        print(f"📊 Updated Contact.last_call_outcome: {call_outcome} for contact {contact.id} (call_id: {call_id})")
+                except Exception as e:
+                    print(f"⚠️  Error updating Contact.last_call_outcome: {e}")
+                    # Don't fail webhook processing if outcome update fails
+            
             if updated:
                 session.commit()
                 session.refresh(call_record)
@@ -7746,6 +7913,7 @@ async def vapi_webhook(request: Request):
                     call_id=call_id,
                     realtor_number=realtor_number,
                     live_transcript_chunks=[],
+                    call_direction="inbound",  # Default to inbound for webhook events
                 )
                 session.add(call_record)
             
@@ -7786,6 +7954,30 @@ async def vapi_webhook(request: Request):
                     call_record.caller_number = _normalize_bot_number(caller_number_raw)
                 call_record.updated_at = now
                 updated = True
+                
+                # Update Contact.last_call_outcome for outbound calls
+                if call_record.call_direction == "outbound" and call_record.contact_id:
+                    try:
+                        from DB.outbound_calling import determine_call_outcome
+                        
+                        # Determine outcome from call data
+                        call_outcome = determine_call_outcome(
+                            call_status=call_record.call_status,
+                            call_duration=call_record.call_duration,
+                            transcript=call_record.transcript,
+                            opt_out_detected=call_record.opt_out_triggered
+                        )
+                        
+                        # Update Contact with outcome
+                        contact = session.get(Contact, call_record.contact_id)
+                        if contact:
+                            contact.last_call_outcome = call_outcome
+                            contact.updated_at = datetime.utcnow()
+                            session.add(contact)
+                            updated = True
+                            print(f"📊 Updated Contact.last_call_outcome: {call_outcome} for contact {contact.id} (call_id: {call_id})")
+                    except Exception as e:
+                        print(f"⚠️  Error updating Contact.last_call_outcome: {e}")
                 
                 # Fetch recording URL from VAPI API (recordings are NOT in webhooks)
                 if not call_record.recording_url:
@@ -9062,6 +9254,30 @@ async def create_manual_booking(
             session.add(blocking_slot)
             session.commit()  # Single commit for both objects
             session.refresh(booking)
+            
+            # Update Contact.last_booking_at if contact exists (for outbound calling exclusion)
+            if normalized_phone:
+                try:
+                    from DB.outbound_calling import get_or_create_contact
+                    from DB.user_lookup import normalize_phone_number as normalize_phone_func
+                    
+                    # Ensure phone is normalized
+                    contact_phone = normalize_phone_func(normalized_phone)
+                    if contact_phone:
+                        contact = session.exec(
+                            select(Contact).where(Contact.phone_number == contact_phone)
+                        ).first()
+                        
+                        if contact:
+                            # Update last_booking_at to exclude from future outbound calls
+                            contact.last_booking_at = datetime.utcnow()
+                            contact.updated_at = datetime.utcnow()
+                            session.add(contact)
+                            session.commit()
+                            print(f"✅ Updated Contact.last_booking_at for {contact_phone}")
+                except Exception as e:
+                    print(f"⚠️  Error updating Contact.last_booking_at: {e}")
+                    # Don't fail booking creation if contact update fails
             session.refresh(blocking_slot)
         except Exception as db_error:
             session.rollback()
@@ -9496,6 +9712,30 @@ async def create_booking_request_vapi(
             session.add(booking)
             session.commit()
             session.refresh(booking)
+            
+            # Update Contact.last_booking_at if contact exists (for outbound calling exclusion)
+            if normalized_phone:
+                try:
+                    from DB.outbound_calling import get_or_create_contact
+                    from DB.user_lookup import normalize_phone_number as normalize_phone_func
+                    
+                    # Ensure phone is normalized
+                    contact_phone = normalize_phone_func(normalized_phone)
+                    if contact_phone:
+                        contact = session.exec(
+                            select(Contact).where(Contact.phone_number == contact_phone)
+                        ).first()
+                        
+                        if contact:
+                            # Update last_booking_at to exclude from future outbound calls
+                            contact.last_booking_at = datetime.utcnow()
+                            contact.updated_at = datetime.utcnow()
+                            session.add(contact)
+                            session.commit()
+                            print(f"✅ Updated Contact.last_booking_at for {contact_phone}")
+                except Exception as e:
+                    print(f"⚠️  Error updating Contact.last_booking_at: {e}")
+                    # Don't fail booking creation if contact update fails
             
             # Notify assigned user (don't fail booking creation if SMS fails)
             try:
@@ -10108,6 +10348,29 @@ async def approve_booking(
         session.commit()
         session.refresh(blocking_slot)
         session.refresh(booking)
+        
+        # Update Contact.last_booking_at if contact exists (for outbound calling exclusion)
+        if booking.visitor_phone:
+            try:
+                from DB.outbound_calling import get_or_create_contact
+                from DB.user_lookup import normalize_phone_number
+                
+                normalized_phone = normalize_phone_number(booking.visitor_phone)
+                if normalized_phone:
+                    contact = session.exec(
+                        select(Contact).where(Contact.phone_number == normalized_phone)
+                    ).first()
+                    
+                    if contact:
+                        # Update last_booking_at to exclude from future outbound calls
+                        contact.last_booking_at = datetime.utcnow()
+                        contact.updated_at = datetime.utcnow()
+                        session.add(contact)
+                        session.commit()
+                        print(f"✅ Updated Contact.last_booking_at for {normalized_phone} (booking approved)")
+            except Exception as e:
+                print(f"⚠️  Error updating Contact.last_booking_at on approval: {e}")
+                # Don't fail approval if contact update fails
         
         # Send confirmation to visitor
         property_listing = session.get(ApartmentListing, booking.property_id)
@@ -12341,6 +12604,371 @@ async def cancel_booking_vapi(
             return {"results": [{"toolCallId": tool_call_id, "result": response_data}]}
         else:
             return JSONResponse(content=response_data)
+
+
+# ============================================================================
+# OUTBOUND CALLING API ENDPOINTS
+# ============================================================================
+
+@app.post("/outbound-calls/process-queue")
+async def process_outbound_call_queue(
+    batch_size: int = Body(10, embed=True),
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Process a batch of eligible contacts for outbound calling.
+    
+    This endpoint:
+    1. Identifies follow-up candidates (called but didn't book)
+    2. Checks eligibility for each contact
+    3. Triggers calls for eligible contacts
+    
+    Auth: Required (Admin/PM only)
+    """
+    from DB.outbound_calling import process_outbound_call_queue
+    
+    # Only allow property managers or admins
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:  # Add "admin" if you have admin role
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can process outbound call queue"
+        )
+    
+    with Session(engine) as session:
+        result = process_outbound_call_queue(session, batch_size=batch_size)
+        
+        return {
+            "message": f"Processed {result['processed']} candidates",
+            "called": result["called"],
+            "skipped": result["skipped"],
+            "errors": result["errors"],
+            "results": result["results"]
+        }
+
+
+@app.get("/outbound-calls/candidates")
+async def get_outbound_call_candidates(
+    limit: int = 50,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Get list of candidates for outbound calling.
+    
+    Returns contacts who:
+    - Called Leasap before
+    - Did NOT book a tour
+    - Did NOT opt out
+    
+    Auth: Required (Admin/PM only)
+    """
+    from DB.outbound_calling import identify_follow_up_candidates, check_eligibility
+    
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can view outbound call candidates"
+        )
+    
+    with Session(engine) as session:
+        candidates = identify_follow_up_candidates(session, limit=limit)
+        
+        # Add eligibility status for each candidate
+        enriched_candidates = []
+        for candidate in candidates:
+            contact = candidate["contact"]
+            eligibility = check_eligibility(contact, session)
+            
+            enriched_candidates.append({
+                "contact_id": contact.id,
+                "phone_number": contact.phone_number,
+                "name": contact.name,
+                "email": contact.email,
+                "timezone": contact.timezone,
+                "consent_status": contact.consent_status,
+                "opted_out": contact.opted_out,
+                "call_attempt_count": contact.call_attempt_count,
+                "last_called_at": contact.last_called_at.isoformat() if contact.last_called_at else None,
+                "last_call_id": candidate.get("last_call_id"),
+                "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
+                "eligible": eligibility["eligible"],
+                "eligibility_reason": eligibility["reason"],
+                "eligibility_checks": eligibility["checks"]
+            })
+        
+        return {
+            "candidates": enriched_candidates,
+            "total": len(enriched_candidates)
+        }
+
+
+@app.post("/outbound-calls/trigger")
+async def trigger_single_outbound_call(
+    phone_number: str = Body(..., embed=True),
+    assistant_id: Optional[str] = Body(None, embed=True),
+    from_number: Optional[str] = Body(None, embed=True),
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Manually trigger a single outbound call.
+    
+    This endpoint checks eligibility before triggering the call.
+    
+    Auth: Required (Admin/PM only)
+    """
+    from DB.outbound_calling import get_or_create_contact, check_eligibility, trigger_outbound_call
+    from DB.user_lookup import normalize_phone_number
+    
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can trigger outbound calls"
+        )
+    
+    # Normalize phone number
+    try:
+        normalized_phone = normalize_phone_number(phone_number)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid phone number format: {str(e)}"
+        )
+    
+    with Session(engine) as session:
+        # Get or create contact
+        contact = get_or_create_contact(normalized_phone, session)
+        
+        # Check eligibility
+        eligibility = check_eligibility(contact, session)
+        
+        if not eligibility["eligible"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
+            )
+        
+        # Trigger call
+        result = trigger_outbound_call(
+            contact,
+            assistant_id=assistant_id,
+            from_number=from_number,
+            session=session
+        )
+        
+        if not result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to trigger call: {result.get('error')}"
+            )
+        
+        return {
+            "message": "Outbound call triggered successfully",
+            "call_id": result["call_id"],
+            "contact_id": contact.id,
+            "phone_number": normalized_phone
+        }
+
+
+@app.get("/outbound-calls/contacts")
+async def get_contacts(
+    limit: int = 50,
+    offset: int = 0,
+    opted_out: Optional[bool] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Get list of contacts with their consent and opt-out status.
+    
+    Auth: Required (Admin/PM only)
+    """
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can view contacts"
+        )
+    
+    with Session(engine) as session:
+        query = select(Contact)
+        
+        # Filter by opt-out status if provided
+        if opted_out is not None:
+            query = query.where(Contact.opted_out == opted_out)
+        
+        # Order by created_at desc
+        query = query.order_by(Contact.created_at.desc())
+        
+        # Apply limit and offset
+        contacts = session.exec(query.offset(offset).limit(limit)).all()
+        total = session.exec(select(func.count(Contact.id))).first()
+        
+        return {
+            "contacts": [{
+                "id": c.id,
+                "phone_number": c.phone_number,
+                "name": c.name,
+                "email": c.email,
+                "timezone": c.timezone,
+                "consent_status": c.consent_status,
+                "consent_source": c.consent_source,
+                "consent_timestamp": c.consent_timestamp.isoformat() if c.consent_timestamp else None,
+                "opted_out": c.opted_out,
+                "opt_out_timestamp": c.opt_out_timestamp.isoformat() if c.opt_out_timestamp else None,
+                "opt_out_method": c.opt_out_method,
+                "internal_dnc": c.internal_dnc,
+                "national_dnc": c.national_dnc,
+                "call_attempt_count": c.call_attempt_count,
+                "last_called_at": c.last_called_at.isoformat() if c.last_called_at else None,
+                "created_at": c.created_at.isoformat(),
+                "updated_at": c.updated_at.isoformat()
+            } for c in contacts],
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+
+
+@app.post("/outbound-calls/contacts/{contact_id}/opt-out")
+async def manually_opt_out_contact(
+    contact_id: int,
+    method: str = Body("manual", embed=True),
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Manually opt out a contact (for admin/PM use).
+    
+    Auth: Required (Admin/PM only)
+    """
+    from DB.outbound_calling import record_opt_out
+    
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can opt out contacts"
+        )
+    
+    with Session(engine) as session:
+        contact = session.get(Contact, contact_id)
+        if not contact:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        
+        record_opt_out(
+            contact.phone_number,
+            session,
+            method=method,
+            call_id=None
+        )
+        
+        return {
+            "message": "Contact opted out successfully",
+            "contact_id": contact_id,
+            "phone_number": contact.phone_number
+        }
+
+
+@app.post("/outbound-calls/contacts/{contact_id}/consent")
+async def record_contact_consent(
+    contact_id: int,
+    source: str = Body("manual", embed=True),
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Record consent for a contact (for admin/PM use).
+    
+    Auth: Required (Admin/PM only)
+    """
+    from DB.outbound_calling import record_consent
+    
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can record consent"
+        )
+    
+    with Session(engine) as session:
+        contact = session.get(Contact, contact_id)
+        if not contact:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        
+        record_consent(
+            contact.phone_number,
+            session,
+            source=source
+        )
+        
+        return {
+            "message": "Consent recorded successfully",
+            "contact_id": contact_id,
+            "phone_number": contact.phone_number
+        }
+
+
+@app.get("/outbound-calls/analytics")
+async def get_outbound_calling_analytics(
+    days: int = 30,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Get analytics for outbound calling system.
+    
+    Returns:
+    - Total calls made
+    - Calls that resulted in bookings
+    - Opt-outs triggered
+    - Success rate
+    
+    Auth: Required (Admin/PM only)
+    """
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can view analytics"
+        )
+    
+    cutoff_date = datetime.utcnow() - timedelta(days=days)
+    
+    with Session(engine) as session:
+        # Get outbound calls in time period
+        outbound_calls = session.exec(
+            select(CallRecord)
+            .where(CallRecord.call_direction == "outbound")
+            .where(CallRecord.created_at >= cutoff_date)
+        ).all()
+        
+        # Get opt-outs from calls
+        opt_out_calls = [c for c in outbound_calls if c.opt_out_triggered]
+        
+        # Get bookings that might have resulted from outbound calls
+        # (This is approximate - we'd need to link bookings to calls more explicitly)
+        bookings_after_calls = session.exec(
+            select(PropertyTourBooking)
+            .where(PropertyTourBooking.created_at >= cutoff_date)
+            .where(PropertyTourBooking.status.in_(["approved", "pending"]))
+        ).all()
+        
+        # Try to match bookings to outbound calls by phone number
+        bookings_from_calls = 0
+        for booking in bookings_after_calls:
+            for call in outbound_calls:
+                if call.caller_number and booking.visitor_phone:
+                    if call.caller_number.replace("+", "") == booking.visitor_phone.replace("+", ""):
+                        if booking.created_at > call.created_at:
+                            bookings_from_calls += 1
+                            break
+        
+        return {
+            "period_days": days,
+            "total_outbound_calls": len(outbound_calls),
+            "opt_outs_triggered": len(opt_out_calls),
+            "bookings_resulting": bookings_from_calls,
+            "success_rate": (bookings_from_calls / len(outbound_calls) * 100) if outbound_calls else 0,
+            "opt_out_rate": (len(opt_out_calls) / len(outbound_calls) * 100) if outbound_calls else 0
+        }
 
 
 if __name__ == "__main__":

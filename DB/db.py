@@ -577,6 +577,50 @@ class CallForwardingEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class Contact(SQLModel, table=True):
+    """
+    Contact/Lead table for outbound calling compliance and tracking.
+    
+    This table is the primary legal defense for outbound calling operations.
+    Tracks consent, opt-out status, and call history for TCPA compliance.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Contact identification
+    phone_number: str = Field(index=True, unique=True)  # E.164 format: +14125551234
+    timezone: Optional[str] = Field(default="America/New_York")  # Contact's timezone for time window enforcement
+    
+    # Consent tracking (MANDATORY for legal compliance)
+    consent_status: bool = Field(default=False, index=True)  # True if contact has consented to calls
+    consent_source: Optional[str] = None  # 'call', 'form', 'sms', 'explicit', 'existing_relationship'
+    consent_timestamp: Optional[datetime] = None  # When consent was obtained
+    
+    # Opt-out tracking (ZERO TOLERANCE - must be immediate and permanent)
+    opted_out: bool = Field(default=False, index=True)  # True if contact has opted out
+    opt_out_timestamp: Optional[datetime] = None  # When opt-out occurred
+    opt_out_method: Optional[str] = None  # 'voice', 'keypad', 'sms', 'web', 'manual'
+    opt_out_call_id: Optional[str] = None  # Call ID where opt-out occurred
+    
+    # DNC (Do Not Call) tracking
+    internal_dnc: bool = Field(default=False, index=True)  # Internal DNC list
+    national_dnc: bool = Field(default=False, index=True)  # National DNC registry (if applicable)
+    
+    # Call attempt tracking
+    last_called_at: Optional[datetime] = Field(default=None, index=True)  # Last outbound call attempt
+    call_attempt_count: int = Field(default=0)  # Total outbound call attempts
+    last_call_outcome: Optional[str] = Field(default=None, index=True)  # 'no_answer' | 'voicemail' | 'hangup' | 'connected' | 'opt_out' | 'connected_and_declined'
+    last_booking_at: Optional[datetime] = None  # Last time they booked a tour (if applicable)
+    
+    # Contact metadata
+    name: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None  # Internal notes about this contact
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class CallRecord(SQLModel, table=True):
     """Stores call records from VAPI including transcripts and recordings."""
     id: Optional[UUID] = Field(default=None, primary_key=True)
@@ -595,12 +639,22 @@ class CallRecord(SQLModel, table=True):
     call_duration: Optional[int] = None  # Duration in seconds
     call_status: Optional[str] = None  # e.g., "ended", "failed", "no-answer"
     caller_number: Optional[str] = Field(default=None, index=True)  # Phone number of the caller (indexed for search)
+    
+    # Outbound calling fields
+    call_direction: str = Field(default="inbound", index=True)  # 'inbound' | 'outbound'
+    contact_id: Optional[int] = Field(default=None, foreign_key="contact.id", index=True)  # Link to Contact table
+    assistant_id: Optional[str] = None  # VAPI assistant ID used for the call
+    opt_out_triggered: bool = Field(default=False, index=True)  # True if opt-out occurred during this call
+    
     call_metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         sa_column=Column(JSONB)  # Store additional VAPI event data
     )
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    contact: Optional["Contact"] = Relationship()
 
 
 class Tenant(SQLModel, table=True):
