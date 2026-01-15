@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
 # CORS allowed origins
 origins = [
     "https://react-app-form.onrender.com",
-    "https://leaseap.com",
+    "https://leasap.com",  # Fixed typo: was "leaseap.com"
     "https://www.leasap.com",
     "http://localhost:3000",
     "http://localhost:5173",
@@ -138,6 +138,7 @@ app = FastAPI(
 )
 
 # CORS middleware configuration
+# IMPORTANT: CORS middleware must be added early to ensure headers are always included
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -12708,6 +12709,21 @@ async def get_outbound_call_candidates(
             "total": len(enriched_candidates)
         }
 
+
+@app.options("/outbound-calls/trigger")
+async def options_outbound_calls_trigger(request: Request):
+    """Handle CORS preflight for outbound calls trigger endpoint."""
+    origin = request.headers.get("Origin", "")
+    allowed_origin = origin if origin in origins else origins[0] if origins else "*"
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": allowed_origin,
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
 
 @app.post("/outbound-calls/trigger")
 async def trigger_single_outbound_call(
