@@ -12696,7 +12696,8 @@ async def get_outbound_call_candidates(
                 "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
                 "eligible": eligibility["eligible"],
                 "eligibility_reason": eligibility["reason"],
-                "eligibility_checks": eligibility["checks"]
+                "eligibility_checks": eligibility["checks"],
+                "bypassed_for_testing": eligibility.get("bypassed_for_testing", False)  # Include bypass flag
             })
         
         return {
@@ -12770,12 +12771,19 @@ async def trigger_single_outbound_call(
                 detail=f"Failed to trigger call: {result.get('error')}"
             )
         
-        return {
+        response_data = {
             "message": "Outbound call triggered successfully",
             "call_id": result["call_id"],
             "contact_id": contact.id,
             "phone_number": normalized_phone
         }
+        
+        # Include bypass warning if eligibility was bypassed
+        if eligibility.get("bypassed_for_testing"):
+            response_data["warning"] = "⚠️ Testing mode: Eligibility checks were bypassed"
+            response_data["eligibility_reason"] = eligibility["reason"]
+        
+        return response_data
 
 
 @app.get("/outbound-calls/contacts")

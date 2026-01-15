@@ -279,7 +279,44 @@ Great UX idea: from Outbound Calling UI, provide:
 
 ---
 
-## 9) Engineering checklist (avoid regressions)
+## 9) Testing Mode (Temporary - For Development Only)
+
+### Backend Testing Bypass
+
+The backend has a temporary testing mode that bypasses all eligibility checks. This is controlled by the environment variable `DISABLE_ELIGIBILITY_CHECKS=true`.
+
+**When bypass is enabled:**
+- Backend returns `eligible=true` even when checks fail
+- Response includes `bypassed_for_testing=true` flag
+- Response includes `eligibility_reason` showing what would have blocked it
+- API calls succeed even if consent/time window/cooldown checks fail
+
+**Frontend handling for testing mode:**
+- Check for `bypassed_for_testing` flag in eligibility response
+- If `true`, allow the "Call" button even if `eligible=false` (show warning badge)
+- Display warning: "⚠️ Testing Mode: Eligibility checks bypassed"
+- Show the original `eligibility_reason` so user knows what's being bypassed
+
+**Example frontend code:**
+```javascript
+// Allow call if eligible OR if bypassed for testing
+const canCall = candidate.eligible || candidate.eligibility_checks?.bypassed_for_testing;
+
+// Show warning if bypassed
+if (candidate.eligibility_checks?.bypassed_for_testing) {
+  // Show warning badge: "⚠️ Testing Mode"
+  // Still enable the "Call" button
+}
+```
+
+**⚠️ IMPORTANT**: This is for testing only. Before production:
+1. Backend: Set `DISABLE_ELIGIBILITY_CHECKS=false` or remove from `.env`
+2. Frontend: Remove any testing mode bypass logic
+3. Verify eligibility checks block calls correctly
+
+---
+
+## 10) Engineering checklist (avoid regressions)
 
 - **Routing**: add a PM-only route; don’t break Realtor navigation.
 - **Auth**: reuse the same token plumbing; don’t store tokens in unsafe places.
@@ -295,7 +332,7 @@ Great UX idea: from Outbound Calling UI, provide:
 
 ---
 
-## 10) Final note (creativity + compliance)
+## 11) Final note (creativity + compliance)
 
 Make it visually awesome—great table UX, good filters, clear badges, smart details drawer, perfect empty states.
 
