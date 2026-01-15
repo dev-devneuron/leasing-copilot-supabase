@@ -452,52 +452,66 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
         if not call.caller_number:
             continue
         
-        phone = normalize_phone_number(call.caller_number)
+        try:
+            phone = normalize_phone_number(call.caller_number)
+        except Exception as e:
+            # Skip calls with invalid phone numbers
+            print(f"⚠️  Skipping call {call.call_id} with invalid phone number {call.caller_number}: {e}")
+            continue
         
         # Skip if already processed
         if phone in seen_phones:
             continue
         seen_phones.add(phone)
         
-        # Check if they have a booking
-        has_booking = session.exec(
-            select(PropertyTourBooking)
-            .where(PropertyTourBooking.visitor_phone == phone)
-            .where(PropertyTourBooking.status.in_(["approved", "pending"]))
-        ).first() is not None
-        
-        if has_booking:
-            continue  # Skip if they already booked
-        
-        # Get or create contact
-        contact = session.exec(
-            select(Contact).where(Contact.phone_number == phone)
-        ).first()
-        
-        if not contact:
-            # Create contact with consent from previous call
-            contact = get_or_create_contact(
-                phone,
-                session,
-                timezone="America/New_York"  # Default, can be updated
-            )
-            # Record consent from previous inbound call
-            record_consent(phone, session, source="call")
-        
-        # Check if already opted out
-        if contact.opted_out:
+        try:
+            # Check if they have a booking
+            has_booking = session.exec(
+                select(PropertyTourBooking)
+                .where(PropertyTourBooking.visitor_phone == phone)
+                .where(PropertyTourBooking.status.in_(["approved", "pending"]))
+            ).first() is not None
+            
+            if has_booking:
+                continue  # Skip if they already booked
+            
+            # Get or create contact
+            contact = session.exec(
+                select(Contact).where(Contact.phone_number == phone)
+            ).first()
+            
+            if not contact:
+                # Create contact with consent from previous call
+                try:
+                    contact = get_or_create_contact(
+                        phone,
+                        session,
+                        timezone="America/New_York"  # Default, can be updated
+                    )
+                    # Record consent from previous inbound call
+                    record_consent(phone, session, source="call")
+                except Exception as e:
+                    print(f"⚠️  Error creating contact for {phone}: {e}")
+                    continue  # Skip this candidate
+            
+            # Check if already opted out
+            if contact.opted_out:
+                continue
+            
+            # Add to candidates
+            candidates.append({
+                "contact": contact,
+                "last_call_id": call.call_id,
+                "last_call_at": call.created_at,
+                "call_transcript": call.transcript,
+            })
+            
+            if len(candidates) >= limit:
+                break
+        except Exception as e:
+            # Skip this candidate on any error and continue
+            print(f"⚠️  Error processing candidate {phone}: {e}")
             continue
-        
-        # Add to candidates
-        candidates.append({
-            "contact": contact,
-            "last_call_id": call.call_id,
-            "last_call_at": call.created_at,
-            "call_transcript": call.transcript,
-        })
-        
-        if len(candidates) >= limit:
-            break
     
     return candidates
 

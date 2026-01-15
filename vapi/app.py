@@ -12748,48 +12748,88 @@ async def get_outbound_call_candidates(
     
     Auth: Required (Admin/PM only)
     """
+    import traceback
     from DB.outbound_calling import identify_follow_up_candidates, check_eligibility
     
-    user_type = current_user.get("user_type")
-    if user_type not in ["property_manager"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only property managers can view outbound call candidates"
-        )
-    
-    with Session(engine) as session:
-        candidates = identify_follow_up_candidates(session, limit=limit)
+    try:
+        user_type = current_user.get("user_type")
+        if user_type not in ["property_manager"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only property managers can view outbound call candidates"
+            )
         
-        # Add eligibility status for each candidate
-        enriched_candidates = []
-        for candidate in candidates:
-            contact = candidate["contact"]
-            eligibility = check_eligibility(contact, session)
+        try:
+            with Session(engine) as session:
+                try:
+                    candidates = identify_follow_up_candidates(session, limit=limit)
+                except Exception as e:
+                    print(f"❌ Error identifying candidates: {e}")
+                    traceback.print_exc()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error identifying candidates: {str(e)}"
+                    )
+                
+                # Add eligibility status for each candidate
+                enriched_candidates = []
+                for candidate in candidates:
+                    try:
+                        contact = candidate["contact"]
+                        eligibility = check_eligibility(contact, session)
+                        
+                        enriched_candidates.append({
+                            "contact_id": contact.id,
+                            "phone_number": contact.phone_number,
+                            "name": contact.name,
+                            "email": contact.email,
+                            "timezone": contact.timezone,
+                            "consent_status": contact.consent_status,
+                            "opted_out": contact.opted_out,
+                            "call_attempt_count": contact.call_attempt_count,
+                            "last_call_outcome": getattr(contact, "last_call_outcome", None),
+                            "last_called_at": contact.last_called_at.isoformat() if contact.last_called_at else None,
+                            "last_booking_at": contact.last_booking_at.isoformat() if getattr(contact, "last_booking_at", None) else None,
+                            "last_call_id": candidate.get("last_call_id"),
+                            "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
+                            "eligible": eligibility["eligible"],
+                            "eligibility_reason": eligibility["reason"],
+                            "eligibility_checks": eligibility["checks"],
+                            "bypassed_for_testing": eligibility.get("bypassed_for_testing", False)  # Include bypass flag
+                        })
+                    except Exception as e:
+                        print(f"❌ Error processing candidate: {e}")
+                        traceback.print_exc()
+                        # Skip this candidate and continue with others
+                        continue
+                
+                # Return empty list if no candidates found (not an error)
+                return {
+                    "candidates": enriched_candidates,
+                    "total": len(enriched_candidates)
+                }
+                
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is
+            raise
+        except Exception as e:
+            print(f"❌ Unexpected error in get_outbound_call_candidates: {e}")
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Internal server error: {str(e)}"
+            )
             
-            enriched_candidates.append({
-                "contact_id": contact.id,
-                "phone_number": contact.phone_number,
-                "name": contact.name,
-                "email": contact.email,
-                "timezone": contact.timezone,
-                "consent_status": contact.consent_status,
-                "opted_out": contact.opted_out,
-                "call_attempt_count": contact.call_attempt_count,
-                "last_call_outcome": getattr(contact, "last_call_outcome", None),
-                "last_called_at": contact.last_called_at.isoformat() if contact.last_called_at else None,
-                "last_booking_at": contact.last_booking_at.isoformat() if getattr(contact, "last_booking_at", None) else None,
-                "last_call_id": candidate.get("last_call_id"),
-                "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
-                "eligible": eligibility["eligible"],
-                "eligibility_reason": eligibility["reason"],
-                "eligibility_checks": eligibility["checks"],
-                "bypassed_for_testing": eligibility.get("bypassed_for_testing", False)  # Include bypass flag
-            })
-        
-        return {
-            "candidates": enriched_candidates,
-            "total": len(enriched_candidates)
-        }
+    except HTTPException:
+        # Re-raise HTTP exceptions (already handled)
+        raise
+    except Exception as e:
+        print(f"❌ Top-level error in get_outbound_call_candidates: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 
 @app.options("/outbound-calls/trigger")
@@ -13161,22 +13201,45 @@ async def get_outbound_calling_analytics(
         ).all()
         
         # Try to match bookings to outbound calls by phone number
+        # Use proper phone number normalization for matching
+        from DB.user_lookup import normalize_phone_number
         bookings_from_calls = 0
         for booking in bookings_after_calls:
+            if not booking.visitor_phone:
+                continue
+            try:
+                booking_phone = normalize_phone_number(booking.visitor_phone)
+            except Exception:
+                continue
+            
             for call in outbound_calls:
-                if call.caller_number and booking.visitor_phone:
-                    if call.caller_number.replace("+", "") == booking.visitor_phone.replace("+", ""):
+                if not call.caller_number:
+                    continue
+                try:
+                    call_phone = normalize_phone_number(call.caller_number)
+                    if call_phone == booking_phone:
                         if booking.created_at > call.created_at:
                             bookings_from_calls += 1
                             break
+                except Exception:
+                    continue
+        
+        # Calculate rates safely to avoid division by zero or NaN
+        total_calls = len(outbound_calls)
+        if total_calls > 0:
+            success_rate = round((bookings_from_calls / total_calls) * 100, 2)
+            opt_out_rate = round((len(opt_out_calls) / total_calls) * 100, 2)
+        else:
+            success_rate = 0.0
+            opt_out_rate = 0.0
         
         return {
             "period_days": days,
-            "total_outbound_calls": len(outbound_calls),
+            "total_outbound_calls": total_calls,
             "opt_outs_triggered": len(opt_out_calls),
             "bookings_resulting": bookings_from_calls,
-            "success_rate": (bookings_from_calls / len(outbound_calls) * 100) if outbound_calls else 0,
-            "opt_out_rate": (len(opt_out_calls) / len(outbound_calls) * 100) if outbound_calls else 0
+            "success_rate": success_rate,
+            "opt_out_rate": opt_out_rate
         }
 
 
