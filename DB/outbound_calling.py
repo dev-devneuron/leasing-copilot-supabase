@@ -13,6 +13,7 @@ Key Principle: Backend decides who to call, Vapi only executes.
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 import pytz
+import uuid
 from sqlmodel import Session, select
 from sqlalchemy import or_
 from .db import Contact, CallRecord, PropertyTourBooking, PropertyManager, PurchasedPhoneNumber, engine
@@ -566,8 +567,11 @@ def trigger_outbound_call(
             "contact_id": int
         }
     """
+    # Track if we created the session (need to close it on error)
+    session_created = False
     if not session:
         session = Session(engine)
+        session_created = True
     
     # Use default assistant if not provided
     if not assistant_id:
@@ -667,9 +671,9 @@ def trigger_outbound_call(
                 "contact_id": contact.id
             }
         
-        # Create call record
+        # Create call record with explicit UUID generation
         call_record = CallRecord(
-            id=None,  # Will be auto-generated
+            id=uuid.uuid4(),  # Generate UUID for primary key
             call_id=call_id,
             realtor_number=from_number or "unknown",
             caller_number=contact.phone_number,
@@ -690,7 +694,15 @@ def trigger_outbound_call(
         # Ensure call record is linked to contact
         call_record.contact_id = contact.id
         
-        session.commit()
+        try:
+            session.commit()
+        except Exception as commit_error:
+            # Rollback on commit failure
+            session.rollback()
+            print(f"❌ Database commit error: {commit_error}")
+            import traceback
+            traceback.print_exc()
+            raise commit_error
         
         print(f"✅ Outbound call triggered: {contact.phone_number} (call_id: {call_id})")
         
@@ -701,11 +713,27 @@ def trigger_outbound_call(
         }
         
     except Exception as e:
+        # Ensure session is rolled back on any error
+        if session:
+            try:
+                session.rollback()
+            except Exception:
+                pass  # Ignore rollback errors
+        
+        # Close session if we created it
+        if session_created and session:
+            try:
+                session.close()
+            except Exception:
+                pass  # Ignore close errors
+        
         print(f"❌ Error triggering outbound call: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "success": False,
             "error": str(e),
-            "contact_id": contact.id
+            "contact_id": contact.id if 'contact' in locals() and contact else None
         }
 
 
