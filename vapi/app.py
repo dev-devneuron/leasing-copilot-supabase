@@ -12821,75 +12821,136 @@ async def trigger_single_outbound_call(
     
     Auth: Required (Admin/PM only)
     """
+    import traceback
     from DB.outbound_calling import get_or_create_contact, check_eligibility, trigger_outbound_call
     from DB.user_lookup import normalize_phone_number
     
-    user_type = current_user.get("user_type")
-    if user_type not in ["property_manager"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only property managers can trigger outbound calls"
-        )
-    
-    # Normalize phone number
     try:
-        normalized_phone = normalize_phone_number(phone_number)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid phone number format: {str(e)}"
-        )
-    
-    with Session(engine) as session:
-        # Get PM's property_manager_id from current_user
-        # current_user has: id (which is property_manager_id for PMs), user_type, etc.
-        property_manager_id = current_user.get("id") if current_user.get("user_type") == "property_manager" else None
-        
-        # Get or create contact
-        contact = get_or_create_contact(normalized_phone, session)
-        
-        # Check eligibility
-        eligibility = check_eligibility(contact, session)
-        
-        # Allow call if eligibility bypass is enabled (testing mode)
-        if not eligibility["eligible"]:
-            from DB.outbound_calling import DISABLE_ELIGIBILITY_CHECKS
-            if DISABLE_ELIGIBILITY_CHECKS:
-                print(f"⚠️  TESTING MODE: Allowing call despite eligibility failure: {eligibility['reason']}")
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
-                )
-        
-        # Trigger call (will use PM's assigned Twilio number if from_number not provided)
-        result = trigger_outbound_call(
-            contact,
-            assistant_id=assistant_id,
-            from_number=from_number,
-            property_manager_id=property_manager_id,
-            session=session
-        )
-        
-        if not result["success"]:
+        # Validate user type
+        user_type = current_user.get("user_type")
+        if user_type not in ["property_manager"]:
             raise HTTPException(
-                status_code=500,
-                detail=f"Failed to trigger call: {result.get('error')}"
+                status_code=403,
+                detail="Only property managers can trigger outbound calls"
             )
         
-        response_data = {
-            "message": "Outbound call triggered successfully",
-            "call_id": result["call_id"],
-            "contact_id": contact.id,
-            "phone_number": normalized_phone
-        }
+        # Normalize phone number
+        try:
+            normalized_phone = normalize_phone_number(phone_number)
+        except Exception as e:
+            print(f"❌ Phone number normalization error: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid phone number format: {str(e)}"
+            )
         
-        # Include bypass warning if eligibility was bypassed
-        if eligibility.get("bypassed_for_testing"):
-            response_data["warning"] = "⚠️ Testing mode: Eligibility checks were bypassed"
-            response_data["eligibility_reason"] = eligibility["reason"]
-        
-        return response_data
+        try:
+            with Session(engine) as session:
+                # Get PM's property_manager_id from current_user
+                # current_user has: id (which is property_manager_id for PMs), user_type, etc.
+                property_manager_id = current_user.get("id") if current_user.get("user_type") == "property_manager" else None
+                
+                if not property_manager_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Property manager ID not found in user data"
+                    )
+                
+                # Get or create contact
+                try:
+                    contact = get_or_create_contact(normalized_phone, session)
+                except Exception as e:
+                    print(f"❌ Error getting/creating contact: {e}")
+                    traceback.print_exc()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Database error while getting/creating contact: {str(e)}"
+                    )
+                
+                # Check eligibility
+                try:
+                    eligibility = check_eligibility(contact, session)
+                except Exception as e:
+                    print(f"❌ Error checking eligibility: {e}")
+                    traceback.print_exc()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error checking eligibility: {str(e)}"
+                    )
+                
+                # Allow call if eligibility bypass is enabled (testing mode)
+                if not eligibility["eligible"]:
+                    from DB.outbound_calling import DISABLE_ELIGIBILITY_CHECKS
+                    if DISABLE_ELIGIBILITY_CHECKS:
+                        print(f"⚠️  TESTING MODE: Allowing call despite eligibility failure: {eligibility['reason']}")
+                    else:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
+                        )
+                
+                # Trigger call (will use PM's assigned Twilio number if from_number not provided)
+                try:
+                    result = trigger_outbound_call(
+                        contact,
+                        assistant_id=assistant_id,
+                        from_number=from_number,
+                        property_manager_id=property_manager_id,
+                        session=session
+                    )
+                except Exception as e:
+                    print(f"❌ Error in trigger_outbound_call: {e}")
+                    traceback.print_exc()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error triggering call: {str(e)}"
+                    )
+                
+                if not result["success"]:
+                    error_msg = result.get('error', 'Unknown error')
+                    print(f"❌ Call trigger failed: {error_msg}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to trigger call: {error_msg}"
+                    )
+                
+                response_data = {
+                    "message": "Outbound call triggered successfully",
+                    "call_id": result["call_id"],
+                    "contact_id": contact.id,
+                    "phone_number": normalized_phone
+                }
+                
+                # Include bypass warning if eligibility was bypassed
+                if eligibility.get("bypassed_for_testing"):
+                    response_data["warning"] = "⚠️ Testing mode: Eligibility checks were bypassed"
+                    response_data["eligibility_reason"] = eligibility["reason"]
+                
+                return response_data
+                
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is (they already have proper status codes)
+            raise
+        except Exception as e:
+            # Catch any other database or unexpected errors
+            print(f"❌ Unexpected error in outbound call trigger endpoint: {e}")
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Internal server error: {str(e)}"
+            )
+            
+    except HTTPException:
+        # Re-raise HTTP exceptions (already handled)
+        raise
+    except Exception as e:
+        # Catch any other unexpected errors at the top level
+        print(f"❌ Top-level error in outbound call trigger endpoint: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 
 @app.get("/outbound-calls/contacts")
