@@ -299,14 +299,18 @@ The backend has a temporary testing mode that bypasses all eligibility checks. T
 
 **Example frontend code:**
 ```javascript
-// Allow call if eligible OR if bypassed for testing
-const canCall = candidate.eligible || candidate.eligibility_checks?.bypassed_for_testing;
+// ✅ CORRECT: Check bypassed_for_testing at TOP LEVEL (not inside eligibility_checks)
+// The backend returns: { eligible: true, bypassed_for_testing: true, eligibility_checks: {...} }
+const canCall = candidate.eligible || candidate.bypassed_for_testing;
 
 // Show warning if bypassed
-if (candidate.eligibility_checks?.bypassed_for_testing) {
+if (candidate.bypassed_for_testing) {
   // Show warning badge: "⚠️ Testing Mode"
   // Still enable the "Call" button
 }
+
+// ❌ WRONG: Don't check inside eligibility_checks
+// const canCall = candidate.eligible || candidate.eligibility_checks?.bypassed_for_testing; // WRONG!
 ```
 
 **⚠️ IMPORTANT**: This is for testing only. Before production:

@@ -12924,6 +12924,31 @@ async def record_contact_consent(
         }
 
 
+@app.get("/outbound-calls/test-bypass-status")
+async def check_bypass_status(
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Check if testing bypass is enabled (for debugging).
+    
+    Auth: Required (PM only)
+    """
+    from DB.outbound_calling import DISABLE_ELIGIBILITY_CHECKS
+    
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can check bypass status"
+        )
+    
+    return {
+        "bypass_enabled": DISABLE_ELIGIBILITY_CHECKS,
+        "message": "Testing bypass is ENABLED" if DISABLE_ELIGIBILITY_CHECKS else "Testing bypass is DISABLED (normal mode)",
+        "warning": "⚠️ This should be DISABLED before production!" if DISABLE_ELIGIBILITY_CHECKS else None
+    }
+
+
 @app.get("/outbound-calls/analytics")
 async def get_outbound_calling_analytics(
     days: int = 30,
