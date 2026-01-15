@@ -12689,7 +12689,9 @@ async def get_outbound_call_candidates(
                 "consent_status": contact.consent_status,
                 "opted_out": contact.opted_out,
                 "call_attempt_count": contact.call_attempt_count,
+                "last_call_outcome": getattr(contact, "last_call_outcome", None),
                 "last_called_at": contact.last_called_at.isoformat() if contact.last_called_at else None,
+                "last_booking_at": contact.last_booking_at.isoformat() if getattr(contact, "last_booking_at", None) else None,
                 "last_call_id": candidate.get("last_call_id"),
                 "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
                 "eligible": eligibility["eligible"],
@@ -12743,11 +12745,16 @@ async def trigger_single_outbound_call(
         # Check eligibility
         eligibility = check_eligibility(contact, session)
         
+        # Allow call if eligibility bypass is enabled (testing mode)
         if not eligibility["eligible"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
-            )
+            from DB.outbound_calling import DISABLE_ELIGIBILITY_CHECKS
+            if DISABLE_ELIGIBILITY_CHECKS:
+                print(f"⚠️  TESTING MODE: Allowing call despite eligibility failure: {eligibility['reason']}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
+                )
         
         # Trigger call
         result = trigger_outbound_call(
@@ -12820,7 +12827,9 @@ async def get_contacts(
                 "internal_dnc": c.internal_dnc,
                 "national_dnc": c.national_dnc,
                 "call_attempt_count": c.call_attempt_count,
+                "last_call_outcome": getattr(c, "last_call_outcome", None),
                 "last_called_at": c.last_called_at.isoformat() if c.last_called_at else None,
+                "last_booking_at": c.last_booking_at.isoformat() if getattr(c, "last_booking_at", None) else None,
                 "created_at": c.created_at.isoformat(),
                 "updated_at": c.updated_at.isoformat()
             } for c in contacts],

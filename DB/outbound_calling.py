@@ -39,6 +39,15 @@ MAX_CALL_ATTEMPTS = 2
 MIN_CALL_COOLDOWN_HOURS = 48
 
 # ============================================================================
+# TESTING BYPASS (TEMPORARY - DISABLE BEFORE PRODUCTION!)
+# ============================================================================
+# Set DISABLE_ELIGIBILITY_CHECKS=true in environment to bypass all eligibility
+# checks for testing purposes. This allows calls even when checks fail.
+# ⚠️ WARNING: MUST BE DISABLED BEFORE PRODUCTION DEPLOYMENT!
+# ============================================================================
+DISABLE_ELIGIBILITY_CHECKS = os.getenv("DISABLE_ELIGIBILITY_CHECKS", "false").lower() == "true"
+
+# ============================================================================
 # ELIGIBILITY ENGINE (CORE COMPLIANCE LOGIC)
 # ============================================================================
 
@@ -116,10 +125,19 @@ def check_eligibility(contact: Contact, session: Session) -> Dict[str, Any]:
     # All checks must pass
     eligible = all(checks.values())
     
+    # ⚠️ TESTING BYPASS: If enabled, allow calls even if checks fail
+    # This is for testing only - MUST be disabled in production!
+    if DISABLE_ELIGIBILITY_CHECKS:
+        if not eligible:
+            print("⚠️  WARNING: Eligibility checks bypassed for testing! This should NOT be enabled in production!")
+            print(f"   Would have been blocked by: {'; '.join(reasons)}")
+        eligible = True  # Force eligible to True for testing
+    
     return {
         "eligible": eligible,
         "reason": "; ".join(reasons) if reasons else "All checks passed",
-        "checks": checks
+        "checks": checks,
+        "bypassed_for_testing": DISABLE_ELIGIBILITY_CHECKS and not all(checks.values())  # Flag if bypassed
     }
 
 
@@ -658,15 +676,20 @@ def process_outbound_call_queue(session: Session, batch_size: int = 10) -> Dict[
         # Check eligibility
         eligibility = check_eligibility(contact, session)
         
+        # Skip if not eligible (unless bypass is enabled for testing)
         if not eligibility["eligible"]:
-            skipped += 1
-            results.append({
-                "contact_id": contact.id,
-                "phone_number": contact.phone_number,
-                "status": "skipped",
-                "reason": eligibility["reason"]
-            })
-            continue
+            if DISABLE_ELIGIBILITY_CHECKS:
+                # Testing mode: allow the call anyway but log the warning
+                print(f"⚠️  TESTING MODE: Processing call despite eligibility failure for {contact.phone_number}: {eligibility['reason']}")
+            else:
+                skipped += 1
+                results.append({
+                    "contact_id": contact.id,
+                    "phone_number": contact.phone_number,
+                    "status": "skipped",
+                    "reason": eligibility["reason"]
+                })
+                continue
         
         # Trigger call
         call_result = trigger_outbound_call(contact, session=session)
