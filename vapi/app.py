@@ -31,6 +31,7 @@ from fastapi.responses import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import re
 import uuid
@@ -137,6 +138,96 @@ app.add_middleware(
     allow_methods=["*"],          # GET, POST, OPTIONS, etc.
     allow_headers=["*"],
 )
+
+# Additional CORS enforcement middleware to ensure headers are always present (backup)
+# This runs AFTER CORS middleware to catch any cases where headers weren't added
+class CORSEnforcementMiddleware(BaseHTTPMiddleware):
+    """Middleware to ensure CORS headers are always present in responses."""
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("Origin", "")
+        
+        # Determine allowed origin
+        if origin in CORS_ALLOWED_ORIGINS:
+            allowed_origin = origin
+        elif CORS_ALLOWED_ORIGINS:
+            allowed_origin = CORS_ALLOWED_ORIGINS[0]
+        else:
+            allowed_origin = "*"
+        
+        # Process the request (let CORS middleware handle OPTIONS)
+        response = await call_next(request)
+        
+        # Ensure CORS headers are present (add if missing)
+        # This catches cases where CORS middleware didn't add headers (e.g., errors)
+        if origin:  # Only add headers if there's an Origin header
+            if "Access-Control-Allow-Origin" not in response.headers:
+                response.headers["Access-Control-Allow-Origin"] = allowed_origin
+            if "Access-Control-Allow-Credentials" not in response.headers:
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+        
+        return response
+
+# Add the enforcement middleware FIRST so it runs LAST (middleware stack is LIFO)
+# This ensures it can add headers if CORS middleware didn't
+app.add_middleware(CORSEnforcementMiddleware)
+
+# ============================================================================
+# CUSTOM EXCEPTION HANDLERS (Ensure CORS headers in error responses)
+# ============================================================================
+# FastAPI's CORS middleware may not add headers to HTTPException responses
+# in some cases (especially during dependency injection). These handlers ensure
+# CORS headers are always included in error responses.
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTPException and ensure CORS headers are included."""
+    origin = request.headers.get("Origin", "")
+    # Check if origin is in allowed list
+    if origin in CORS_ALLOWED_ORIGINS:
+        allowed_origin = origin
+    elif CORS_ALLOWED_ORIGINS:
+        allowed_origin = CORS_ALLOWED_ORIGINS[0]
+    else:
+        allowed_origin = "*"
+    
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+    # Manually add CORS headers (cannot use wildcard with credentials)
+    response.headers["Access-Control-Allow-Origin"] = allowed_origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, Origin, X-Requested-With"
+    return response
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle all other exceptions and ensure CORS headers are included."""
+    origin = request.headers.get("Origin", "")
+    # Check if origin is in allowed list
+    if origin in CORS_ALLOWED_ORIGINS:
+        allowed_origin = origin
+    elif CORS_ALLOWED_ORIGINS:
+        allowed_origin = CORS_ALLOWED_ORIGINS[0]
+    else:
+        allowed_origin = "*"
+    
+    # Log the error for debugging
+    import traceback
+    print(f"❌ Unhandled exception: {exc}")
+    traceback.print_exc()
+    
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
+    # Manually add CORS headers (cannot use wildcard with credentials)
+    response.headers["Access-Control-Allow-Origin"] = allowed_origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, Origin, X-Requested-With"
+    return response
 
 # ============================================================================
 # VAPI & TWILIO CONFIGURATION
