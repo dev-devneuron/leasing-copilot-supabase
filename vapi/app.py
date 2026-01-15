@@ -114,21 +114,6 @@ async def lifespan(app: FastAPI):
     
     print("Shutting down FastAPI app...")
 
-# CORS allowed origins
-origins = [
-    "https://react-app-form.onrender.com",
-    "https://leasap.com",  # Fixed typo: was "leaseap.com"
-    "https://www.leasap.com",
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://localhost:8080",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:5174",
-    "http://127.0.0.1:8080",
-]
-
 # Create FastAPI application with lifespan
 app = FastAPI(
     title="Leasap Backend API",
@@ -137,16 +122,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS allowed origins - centralized configuration
+CORS_ALLOWED_ORIGINS = [
+    "https://www.leasap.com",   # production frontend
+    "http://localhost:3000"     # local dev (optional)
+]
+
 # CORS middleware configuration
-# IMPORTANT: CORS middleware must be added early to ensure headers are always included
+# IMPORTANT: CORS middleware must be added early (above routes) to ensure headers are always included
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_methods=["*"],          # GET, POST, OPTIONS, etc.
     allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
 )
 
 # ============================================================================
@@ -2625,11 +2614,12 @@ def run_sync():
 @app.options("/login")
 async def options_login(request: Request):
     """Handle CORS preflight for login endpoint."""
-    origin = request.headers.get("Origin", "*")
+    origin = request.headers.get("Origin", "")
+    allowed_origin = origin if origin in CORS_ALLOWED_ORIGINS else CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
     return Response(
         status_code=200,
         headers={
-            "Access-Control-Allow-Origin": origin if origin in origins else origins[0] if origins else "*",
+            "Access-Control-Allow-Origin": allowed_origin,
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": "*",
             "Access-Control-Allow-Credentials": "true",
@@ -2672,11 +2662,12 @@ async def login_realtor(response: Response, payload: dict = Body(...), request: 
 @app.options("/property-manager-login")
 async def options_property_manager_login(request: Request):
     """Handle CORS preflight for property manager login endpoint."""
-    origin = request.headers.get("Origin", "*")
+    origin = request.headers.get("Origin", "")
+    allowed_origin = origin if origin in CORS_ALLOWED_ORIGINS else CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
     return Response(
         status_code=200,
         headers={
-            "Access-Control-Allow-Origin": origin if origin in origins else origins[0] if origins else "*",
+            "Access-Control-Allow-Origin": allowed_origin,
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": "*",
             "Access-Control-Allow-Credentials": "true",
@@ -12714,7 +12705,7 @@ async def get_outbound_call_candidates(
 async def options_outbound_calls_trigger(request: Request):
     """Handle CORS preflight for outbound calls trigger endpoint."""
     origin = request.headers.get("Origin", "")
-    allowed_origin = origin if origin in origins else origins[0] if origins else "*"
+    allowed_origin = origin if origin in CORS_ALLOWED_ORIGINS else CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
     return Response(
         status_code=200,
         headers={
