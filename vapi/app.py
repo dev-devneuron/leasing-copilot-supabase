@@ -12635,8 +12635,11 @@ async def process_outbound_call_queue(
             detail="Only property managers can process outbound call queue"
         )
     
+    # Get PM's property_manager_id from current_user
+    property_manager_id = current_user.get("id") if current_user.get("user_type") == "property_manager" else None
+    
     with Session(engine) as session:
-        result = process_outbound_call_queue(session, batch_size=batch_size)
+        result = process_outbound_call_queue(session, batch_size=batch_size, property_manager_id=property_manager_id)
         
         return {
             "message": f"Processed {result['processed']} candidates",
@@ -12740,6 +12743,10 @@ async def trigger_single_outbound_call(
         )
     
     with Session(engine) as session:
+        # Get PM's property_manager_id from current_user
+        # current_user has: id (which is property_manager_id for PMs), user_type, etc.
+        property_manager_id = current_user.get("id") if current_user.get("user_type") == "property_manager" else None
+        
         # Get or create contact
         contact = get_or_create_contact(normalized_phone, session)
         
@@ -12757,11 +12764,12 @@ async def trigger_single_outbound_call(
                     detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
                 )
         
-        # Trigger call
+        # Trigger call (will use PM's assigned Twilio number if from_number not provided)
         result = trigger_outbound_call(
             contact,
             assistant_id=assistant_id,
             from_number=from_number,
+            property_manager_id=property_manager_id,
             session=session
         )
         

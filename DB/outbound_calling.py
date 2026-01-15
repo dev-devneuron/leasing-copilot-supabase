@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 import pytz
 from sqlmodel import Session, select
 from sqlalchemy import or_
-from .db import Contact, CallRecord, PropertyTourBooking, engine
+from .db import Contact, CallRecord, PropertyTourBooking, PropertyManager, PurchasedPhoneNumber, engine
 from .user_lookup import normalize_phone_number
 import os
 import requests
@@ -23,6 +23,13 @@ import requests
 VAPI_BASE_URL = "https://api.vapi.ai"
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
 VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID")
+
+# Twilio credentials for Vapi outbound calls
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+# Default Twilio phone number to use for outbound calls (if from_number not provided)
+# Should be in E.164 format, e.g., "+14125551234"
+DEFAULT_TWILIO_FROM_NUMBER = os.getenv("DEFAULT_TWILIO_FROM_NUMBER")
 
 # ============================================================================
 # COMPLIANCE CONFIGURATION
@@ -498,10 +505,43 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
 # VAPI CALL TRIGGERING
 # ============================================================================
 
+def get_pm_twilio_number(property_manager_id: int, session: Session) -> Optional[str]:
+    """
+    Get the Property Manager's assigned Twilio phone number.
+    
+    Checks in order:
+    1. Purchased phone number (via purchased_phone_number_id)
+    2. Direct twilio_contact (if not "TBD")
+    
+    Args:
+        property_manager_id: Property Manager ID
+        session: Database session
+    
+    Returns:
+        Twilio phone number in E.164 format, or None if not found
+    """
+    pm = session.get(PropertyManager, property_manager_id)
+    if not pm:
+        return None
+    
+    # First, try purchased phone number
+    if pm.purchased_phone_number_id:
+        purchased = session.get(PurchasedPhoneNumber, pm.purchased_phone_number_id)
+        if purchased and purchased.phone_number:
+            return normalize_phone_number(purchased.phone_number)
+    
+    # Fall back to direct twilio_contact (if not "TBD")
+    if pm.twilio_contact and pm.twilio_contact.upper() != "TBD":
+        return normalize_phone_number(pm.twilio_contact)
+    
+    return None
+
+
 def trigger_outbound_call(
     contact: Contact,
     assistant_id: Optional[str] = None,
     from_number: Optional[str] = None,
+    property_manager_id: Optional[int] = None,
     session: Session = None,
     metadata: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
@@ -540,11 +580,48 @@ def trigger_outbound_call(
             "contact_id": contact.id
         }
     
-    # Prepare Vapi API request
+    # Validate Twilio credentials
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        return {
+            "success": False,
+            "error": "Twilio credentials not configured (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN required)",
+            "contact_id": contact.id
+        }
+    
+    # Use provided from_number, or get PM's assigned Twilio number, or fall back to environment default
+    # For outbound calls, we need a Twilio number to call FROM
+    if not from_number:
+        # Try to get PM's assigned number
+        if property_manager_id:
+            from_number = get_pm_twilio_number(property_manager_id, session)
+        
+        # Fall back to environment default if still not found
+        if not from_number:
+            from_number = DEFAULT_TWILIO_FROM_NUMBER
+    
+    if not from_number:
+        error_msg = "from_number is required for outbound calls."
+        if property_manager_id:
+            error_msg += f" Property Manager {property_manager_id} does not have an assigned Twilio number."
+        error_msg += " Provide it in the API call, assign a number to the PM, or set DEFAULT_TWILIO_FROM_NUMBER in environment (Twilio phone number in E.164 format, e.g., '+14125551234')"
+        return {
+            "success": False,
+            "error": error_msg,
+            "contact_id": contact.id
+        }
+    
+    # Prepare Vapi API request with correct structure
+    # Vapi expects: phoneNumber.twilioPhoneNumber, phoneNumber.twilioAccountSid, phoneNumber.twilioAuthToken
+    # and customer.number (not phoneNumber.to)
     payload = {
         "assistantId": assistant_id,
         "phoneNumber": {
-            "to": contact.phone_number
+            "twilioPhoneNumber": from_number,  # Twilio number to call FROM
+            "twilioAccountSid": TWILIO_ACCOUNT_SID,
+            "twilioAuthToken": TWILIO_AUTH_TOKEN
+        },
+        "customer": {
+            "number": contact.phone_number  # Recipient's phone number (TO)
         },
         "metadata": {
             "contactId": str(contact.id),
@@ -552,10 +629,6 @@ def trigger_outbound_call(
             "callDirection": "outbound"
         }
     }
-    
-    # Add from number if provided
-    if from_number:
-        payload["phoneNumber"]["from"] = from_number
     
     # Merge additional metadata
     if metadata:
@@ -640,7 +713,7 @@ def trigger_outbound_call(
 # CALL SCHEDULING
 # ============================================================================
 
-def process_outbound_call_queue(session: Session, batch_size: int = 10) -> Dict[str, Any]:
+def process_outbound_call_queue(session: Session, batch_size: int = 10, property_manager_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Process a batch of eligible contacts for outbound calling.
     
@@ -691,8 +764,12 @@ def process_outbound_call_queue(session: Session, batch_size: int = 10) -> Dict[
                 })
                 continue
         
-        # Trigger call
-        call_result = trigger_outbound_call(contact, session=session)
+        # Trigger call (will use PM's assigned Twilio number if property_manager_id provided)
+        call_result = trigger_outbound_call(
+            contact,
+            property_manager_id=property_manager_id,
+            session=session
+        )
         
         if call_result["success"]:
             called += 1
