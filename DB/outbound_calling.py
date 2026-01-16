@@ -14,10 +14,12 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 import pytz
 import uuid
+import json
 from sqlmodel import Session, select
 from sqlalchemy import or_
 from .db import Contact, CallRecord, PropertyTourBooking, PropertyManager, PurchasedPhoneNumber, engine
 from .user_lookup import normalize_phone_number
+from .vertex_ai_client import get_vertex_ai_client
 import os
 import requests
 
@@ -111,15 +113,23 @@ def check_eligibility(contact: Contact, session: Session) -> Dict[str, Any]:
         reasons.append("Outside allowed calling hours (8 AM - 9 PM)")
     
     # Check 6: Below attempt limit
-    checks["below_attempt_limit"] = contact.call_attempt_count < MAX_CALL_ATTEMPTS
-    if not checks["below_attempt_limit"]:
-        reasons.append(f"Exceeded maximum call attempts ({MAX_CALL_ATTEMPTS})")
+    # In testing mode, bypass this check
+    if DISABLE_ELIGIBILITY_CHECKS:
+        checks["below_attempt_limit"] = True  # Always pass in testing
+    else:
+        checks["below_attempt_limit"] = contact.call_attempt_count < MAX_CALL_ATTEMPTS
+        if not checks["below_attempt_limit"]:
+            reasons.append(f"Exceeded maximum call attempts ({MAX_CALL_ATTEMPTS})")
     
     # Check 7: Cooldown period passed
-    checks["cooldown_passed"] = _has_cooldown_passed(contact)
-    if not checks["cooldown_passed"]:
-        hours_since = _hours_since_last_call(contact)
-        reasons.append(f"Cooldown not passed (minimum {MIN_CALL_COOLDOWN_HOURS} hours, {hours_since:.1f} hours since last call)")
+    # In testing mode, bypass cooldown check
+    if DISABLE_ELIGIBILITY_CHECKS:
+        checks["cooldown_passed"] = True  # Always pass in testing
+    else:
+        checks["cooldown_passed"] = _has_cooldown_passed(contact)
+        if not checks["cooldown_passed"]:
+            hours_since = _hours_since_last_call(contact)
+            reasons.append(f"Cooldown not passed (minimum {MIN_CALL_COOLDOWN_HOURS} hours, {hours_since:.1f} hours since last call)")
     
     # Check 8: Last call outcome allows retry
     checks["retry_allowed"] = _is_retry_allowed(contact)
@@ -408,47 +418,140 @@ def record_opt_out(
 
 
 # ============================================================================
+# TRANSCRIPT EXTRACTION
+# ============================================================================
+
+def extract_name_and_region_from_transcript(transcript: Optional[str]) -> Dict[str, Optional[str]]:
+    """
+    Extract caller name and region/location from call transcript using AI.
+    
+    Args:
+        transcript: Call transcript text
+    
+    Returns:
+        {
+            "name": str or None,
+            "region": str or None  # City, state, or region mentioned
+        }
+    """
+    if not transcript or not transcript.strip():
+        return {"name": None, "region": None}
+    
+    try:
+        # Get Vertex AI client
+        ai_client = get_vertex_ai_client()
+        if not ai_client or not ai_client.is_available():
+            print("⚠️  AI client not available for transcript extraction")
+            return {"name": None, "region": None}
+        
+        # Create prompt for extraction
+        prompt = f"""Extract the caller's name and location/region from this phone call transcript.
+
+Transcript:
+{transcript[:2000]}  # Limit to first 2000 chars to avoid token limits
+
+Instructions:
+1. Extract the caller's name if mentioned (first name, full name, or nickname)
+2. Extract the location/region if mentioned (city, state, region, or area)
+3. Return ONLY a JSON object with "name" and "region" fields
+4. If information is not found, use null for that field
+5. Do not include any explanation, only the JSON object
+
+Example output:
+{{"name": "John Smith", "region": "New York"}}
+or
+{{"name": "Sarah", "region": "California"}}
+or
+{{"name": null, "region": "Texas"}}
+
+Return only the JSON object:"""
+        
+        # Generate extraction
+        response_text = ai_client.generate_content(prompt)
+        
+        # Parse JSON response
+        # Sometimes AI returns markdown code blocks, so we need to extract JSON
+        response_text = response_text.strip()
+        if response_text.startswith("```"):
+            # Remove markdown code blocks
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
+        if response_text.startswith("```json"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
+        
+        # Try to find JSON in the response
+        try:
+            # Look for JSON object in the response
+            start_idx = response_text.find("{")
+            end_idx = response_text.rfind("}") + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = response_text[start_idx:end_idx]
+                extracted = json.loads(json_str)
+                return {
+                    "name": extracted.get("name"),
+                    "region": extracted.get("region")
+                }
+        except json.JSONDecodeError:
+            pass
+        
+        # Fallback: try to parse the whole response
+        try:
+            extracted = json.loads(response_text)
+            return {
+                "name": extracted.get("name"),
+                "region": extracted.get("region")
+            }
+        except json.JSONDecodeError:
+            print(f"⚠️  Failed to parse AI response as JSON: {response_text[:200]}")
+            return {"name": None, "region": None}
+            
+    except Exception as e:
+        print(f"⚠️  Error extracting name/region from transcript: {e}")
+        return {"name": None, "region": None}
+
+
+# ============================================================================
 # CANDIDATE IDENTIFICATION
 # ============================================================================
 
 def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Dict[str, Any]]:
     """
-    Identify contacts who:
-    - Called Leasap before (inbound call exists)
-    - Asked for information (transcript indicates inquiry)
-    - Did NOT book a tour
-    - Did NOT opt out
+    Identify ALL unique contacts who have called Leasap (inbound or outbound).
     
-    This creates the candidate pool for outbound calling.
+    This creates a comprehensive candidate pool for outbound calling.
+    In testing mode, shows ALL contacts regardless of:
+    - Booking status
+    - Opt-out status
+    - Call attempt count
+    - Cooldown period
     
     Args:
         session: Database session
-        limit: Maximum number of candidates to return
+        limit: Maximum number of candidates to return (0 = no limit)
     
     Returns:
         List of candidate contacts with metadata
     """
-    # Find callers who haven't booked
-    # Strategy: Get all inbound calls, check if they have bookings
+    # Get ALL calls (inbound and outbound) to find unique phone numbers
+    # This ensures we capture everyone who has interacted with Leasap
+    from sqlalchemy import or_, func
     
-    # Get all inbound calls with caller numbers
-    # Include NULL call_direction (legacy calls default to inbound)
-    from sqlalchemy import or_
-    inbound_calls = session.exec(
+    # Get all calls with caller numbers (both inbound and outbound)
+    # For inbound: caller_number is the person who called
+    # For outbound: caller_number is the person we called
+    all_calls = session.exec(
         select(CallRecord)
-        .where(or_(
-            CallRecord.call_direction == "inbound",
-            CallRecord.call_direction.is_(None)  # Legacy calls without direction
-        ))
         .where(CallRecord.caller_number.isnot(None))
         .order_by(CallRecord.created_at.desc())
-        .limit(limit * 2)  # Get more to filter
     ).all()
     
     candidates = []
-    seen_phones = set()
+    seen_phones = set()  # Track unique phone numbers
+    phone_to_latest_call = {}  # Track the most recent call for each phone
     
-    for call in inbound_calls:
+    # First pass: collect all unique phone numbers and their latest call info
+    for call in all_calls:
         if not call.caller_number:
             continue
         
@@ -459,22 +562,31 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
             print(f"⚠️  Skipping call {call.call_id} with invalid phone number {call.caller_number}: {e}")
             continue
         
-        # Skip if already processed
-        if phone in seen_phones:
-            continue
-        seen_phones.add(phone)
-        
+        # Track unique phones and keep the most recent call info
+        if phone not in seen_phones:
+            seen_phones.add(phone)
+            phone_to_latest_call[phone] = {
+                "call": call,
+                "call_id": call.call_id,
+                "call_at": call.created_at,
+                "transcript": call.transcript,
+                "direction": call.call_direction or "inbound"  # Default to inbound for legacy
+            }
+        else:
+            # Update if this call is more recent
+            existing_call_time = phone_to_latest_call[phone]["call_at"]
+            if call.created_at > existing_call_time:
+                phone_to_latest_call[phone] = {
+                    "call": call,
+                    "call_id": call.call_id,
+                    "call_at": call.created_at,
+                    "transcript": call.transcript,
+                    "direction": call.call_direction or "inbound"
+                }
+    
+    # Second pass: get or create contacts for each unique phone number
+    for phone, call_info in phone_to_latest_call.items():
         try:
-            # Check if they have a booking
-            has_booking = session.exec(
-                select(PropertyTourBooking)
-                .where(PropertyTourBooking.visitor_phone == phone)
-                .where(PropertyTourBooking.status.in_(["approved", "pending"]))
-            ).first() is not None
-            
-            if has_booking:
-                continue  # Skip if they already booked
-            
             # Get or create contact
             contact = session.exec(
                 select(Contact).where(Contact.phone_number == phone)
@@ -488,31 +600,59 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                         session,
                         timezone="America/New_York"  # Default, can be updated
                     )
-                    # Record consent from previous inbound call
+                    # Record consent from previous call
                     record_consent(phone, session, source="call")
+                    session.commit()
                 except Exception as e:
                     print(f"⚠️  Error creating contact for {phone}: {e}")
                     continue  # Skip this candidate
             
-            # Check if already opted out
-            if contact.opted_out:
-                continue
+            # Extract name and region from transcript if available
+            # Only extract if transcript exists and is meaningful (at least 50 chars)
+            extracted_info = {"name": None, "region": None}
+            transcript = call_info.get("transcript")
+            if transcript and len(transcript.strip()) >= 50:
+                try:
+                    extracted_info = extract_name_and_region_from_transcript(transcript)
+                    # Update contact with extracted name if not already set
+                    if extracted_info.get("name") and not contact.name:
+                        contact.name = extracted_info["name"]
+                        session.add(contact)
+                        try:
+                            session.commit()
+                        except Exception:
+                            session.rollback()
+                except Exception as e:
+                    # Don't fail candidate processing if extraction fails
+                    print(f"⚠️  Error extracting info from transcript: {e}")
+                    extracted_info = {"name": None, "region": None}
             
-            # Add to candidates
+            # In testing mode, show ALL candidates regardless of status
+            # In production, we could filter here, but for now show all
+            
+            # Add to candidates (show all, regardless of booking/opt-out status)
             candidates.append({
                 "contact": contact,
-                "last_call_id": call.call_id,
-                "last_call_at": call.created_at,
-                "call_transcript": call.transcript,
+                "last_call_id": call_info["call_id"],
+                "last_call_at": call_info["call_at"],
+                "call_transcript": call_info["transcript"],
+                "call_direction": call_info["direction"],
+                "extracted_name": extracted_info["name"],  # Name extracted from transcript
+                "extracted_region": extracted_info["region"],  # Region extracted from transcript
             })
             
-            if len(candidates) >= limit:
+            # Apply limit if specified
+            if limit > 0 and len(candidates) >= limit:
                 break
+                
         except Exception as e:
             # Skip this candidate on any error and continue
             print(f"⚠️  Error processing candidate {phone}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
     
+    print(f"✅ Found {len(candidates)} unique candidate contacts from {len(seen_phones)} unique phone numbers")
     return candidates
 
 

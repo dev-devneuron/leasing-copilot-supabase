@@ -12739,12 +12739,16 @@ async def get_outbound_call_candidates(
     current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
-    Get list of candidates for outbound calling.
+    Get list of ALL candidates for outbound calling.
     
-    Returns contacts who:
-    - Called Leasap before
-    - Did NOT book a tour
-    - Did NOT opt out
+    Returns ALL unique contacts who have called Leasap (inbound or outbound).
+    Shows all contacts regardless of:
+    - Booking status
+    - Opt-out status  
+    - Call attempt count
+    - Cooldown period (bypassed in testing mode)
+    
+    Each candidate includes eligibility status for filtering on frontend.
     
     Auth: Required (Admin/PM only)
     """
@@ -12781,7 +12785,7 @@ async def get_outbound_call_candidates(
                         enriched_candidates.append({
                             "contact_id": contact.id,
                             "phone_number": contact.phone_number,
-                            "name": contact.name,
+                            "name": contact.name or candidate.get("extracted_name"),  # Use extracted name if contact name not set
                             "email": contact.email,
                             "timezone": contact.timezone,
                             "consent_status": contact.consent_status,
@@ -12792,6 +12796,9 @@ async def get_outbound_call_candidates(
                             "last_booking_at": contact.last_booking_at.isoformat() if getattr(contact, "last_booking_at", None) else None,
                             "last_call_id": candidate.get("last_call_id"),
                             "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
+                            "call_direction": candidate.get("call_direction", "inbound"),
+                            "extracted_name": candidate.get("extracted_name"),  # Name extracted from transcript
+                            "extracted_region": candidate.get("extracted_region"),  # Region extracted from transcript
                             "eligible": eligibility["eligible"],
                             "eligibility_reason": eligibility["reason"],
                             "eligibility_checks": eligibility["checks"],
