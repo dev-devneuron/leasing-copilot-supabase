@@ -444,46 +444,120 @@ def extract_name_and_region_from_transcript(transcript: Optional[str]) -> Dict[s
     
     # First, try regex-based extraction for common patterns (faster and more reliable)
     # Look for patterns like "my name is X", "I'm X", "this is X", etc.
-    name_patterns = [
-        r'(?:my name is|I\'m|I am|this is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
-        r'(?:name|I\'m|I am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
-        r'User:\s*(?:my name is|I\'m|I am|this is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+    # IMPORTANT: Focus on USER lines, not BOT lines
+    
+    # Expanded bot names to filter out
+    bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
+    bot_phrases = ['this is riley', 'riley speaking', 'i am riley', 'i\'m riley', 'assistant speaking', 'riley', 'speaking']
+    
+    extracted_name = None
+    
+    # Split transcript into lines to better identify User vs Bot
+    lines = transcript.split('\n')
+    user_lines = []
+    bot_lines = []
+    
+    for line in lines:
+        line_lower = line.lower().strip()
+        if line.startswith('User:') or line.startswith('user:'):
+            user_lines.append(line)
+        elif line.startswith('Bot:') or line.startswith('bot:'):
+            bot_lines.append(line)
+        # If no prefix, try to infer from content
+        elif any(phrase in line_lower for phrase in ['my name is', 'i\'m', 'i am', 'call me']):
+            user_lines.append(line)
+        elif any(phrase in line_lower for phrase in ['this is', 'speaking', 'how can i assist']):
+            bot_lines.append(line)
+    
+    # Pattern 1: Look for "my name is [name]" in User lines ONLY
+    user_name_patterns = [
+        r'(?:my name is|I\'m|I am|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+        r'name\s+is\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
     ]
     
-    # Try to extract name using regex first
-    extracted_name = None
-    for pattern in name_patterns:
-        matches = re.findall(pattern, transcript, re.IGNORECASE)
-        if matches:
-            # Get the first match that's not a common bot name
-            bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap']
-            for match in matches:
-                name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
-                if name and name.lower() not in bot_names and len(name) > 1:
-                    extracted_name = name
+    # Search in user lines first
+    for line in user_lines:
+        for pattern in user_name_patterns:
+            matches = re.findall(pattern, line, re.IGNORECASE)
+            if matches:
+                for match in matches:
+                    name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
+                    if name:
+                        # Clean up the name (remove "speaking" and other bot words)
+                        name = re.sub(r'\s+speaking\s*', '', name, flags=re.IGNORECASE).strip()
+                        name = re.sub(r'^(riley|assistant|bot)\s+', '', name, flags=re.IGNORECASE).strip()
+                        # Check if it's not a bot name
+                        name_lower = name.lower().strip()
+                        if (name_lower not in bot_names and 
+                            not any(bp in name_lower for bp in bot_phrases) and 
+                            len(name) > 1 and
+                            name_lower != 'speaking' and
+                            'riley' not in name_lower):
+                            extracted_name = name
+                            break
+                if extracted_name:
                     break
+        if extracted_name:
+            break
+    
+    # Pattern 2: Look for when bot addresses the caller (e.g., "Thank you, Rehan")
+    # This should be in Bot lines ONLY
+    if not extracted_name:
+        address_patterns = [
+            r'(?:thank you|thanks|hi|hello|hey),?\s+([A-Z][a-z]+)(?:\.|,|\s|$)',
+            r'(?:thank you|thanks),?\s+([A-Z][a-z]+)\.',
+        ]
+        # Only search in bot lines
+        for line in bot_lines:
+            for pattern in address_patterns:
+                matches = re.findall(pattern, line, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
+                        if name:
+                            name = re.sub(r'\s+speaking\s*', '', name, flags=re.IGNORECASE).strip()
+                            name = re.sub(r'^(riley|assistant|bot)\s+', '', name, flags=re.IGNORECASE).strip()
+                            name_lower = name.lower().strip()
+                            if (name_lower not in bot_names and 
+                                not any(bp in name_lower for bp in bot_phrases) and 
+                                len(name) > 1 and
+                                name_lower != 'speaking' and
+                                'riley' not in name_lower):
+                                extracted_name = name
+                                break
+                    if extracted_name:
+                        break
             if extracted_name:
                 break
     
-    # Also look for when bot addresses the caller (e.g., "Thank you, Rehan")
+    # Pattern 3: Look for email patterns that might contain name (e.g., "rehan at gmail")
+    # Only search in user lines
     if not extracted_name:
-        address_patterns = [
-            r'(?:thank you|thanks|hi|hello|hey),?\s+([A-Z][a-z]+)',
-            r'(?:thank you|thanks),?\s+([A-Z][a-z]+)\.',
+        email_patterns = [
+            r'my email is\s+([a-z]+)\s+at',
+            r'email is\s+([a-z]+)\s+at',
+            r'([a-z]+)\s+at\s+gmail',
+            r'([a-z]+)\s+at\s+[a-z]+\s+dot\s+com',  # "rehan at gmail dot com"
         ]
-        for pattern in address_patterns:
-            matches = re.findall(pattern, transcript, re.IGNORECASE)
-            if matches:
-                bot_names = ['riley', 'assistant', 'bot', 'ai']
-                for match in matches:
-                    name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
-                    if name and name.lower() not in bot_names and len(name) > 1:
-                        # Make sure this appears in a bot response, not user response
-                        # Check if it's followed by bot-like language
-                        extracted_name = name
+        for line in user_lines:
+            for pattern in email_patterns:
+                matches = re.findall(pattern, line, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
+                        if name:
+                            name = name.capitalize()  # Capitalize first letter
+                            name_lower = name.lower().strip()
+                            if (name_lower not in bot_names and 
+                                not any(bp in name_lower for bp in bot_phrases) and 
+                                len(name) > 1 and
+                                'riley' not in name_lower):
+                                extracted_name = name
+                                break
+                    if extracted_name:
                         break
-                if extracted_name:
-                    break
+            if extracted_name:
+                break
     
     # Extract region/location patterns
     region_patterns = [
@@ -609,10 +683,22 @@ Return only the JSON object:"""
                 
                 # Validate that AI didn't extract bot name
                 if ai_name:
-                    bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap']
-                    if ai_name.lower() in bot_names:
+                    bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
+                    bot_phrases = ['riley speaking', 'this is riley', 'i am riley']
+                    ai_name_lower = ai_name.lower().strip()
+                    # Check if it's a bot name or contains bot phrases
+                    if (ai_name_lower in bot_names or 
+                        any(bp in ai_name_lower for bp in bot_phrases) or
+                        'speaking' in ai_name_lower):
                         print(f"⚠️  AI extracted bot name '{ai_name}', using regex result or null")
                         final_name = extracted_name or None
+                    else:
+                        # Clean up AI result (remove "speaking" if present)
+                        cleaned_name = ai_name.replace(' speaking', '').replace('Speaking', '').strip()
+                        if cleaned_name.lower() not in bot_names:
+                            final_name = cleaned_name
+                        else:
+                            final_name = extracted_name or None
                 
                 return {
                     "name": final_name,
@@ -633,10 +719,22 @@ Return only the JSON object:"""
             
             # Validate that AI didn't extract bot name
             if ai_name:
-                bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap']
-                if ai_name.lower() in bot_names:
+                bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
+                bot_phrases = ['riley speaking', 'this is riley', 'i am riley']
+                ai_name_lower = ai_name.lower().strip()
+                # Check if it's a bot name or contains bot phrases
+                if (ai_name_lower in bot_names or 
+                    any(bp in ai_name_lower for bp in bot_phrases) or
+                    'speaking' in ai_name_lower):
                     print(f"⚠️  AI extracted bot name '{ai_name}', using regex result or null")
                     final_name = extracted_name or None
+                else:
+                    # Clean up AI result (remove "speaking" if present)
+                    cleaned_name = ai_name.replace(' speaking', '').replace('Speaking', '').strip()
+                    if cleaned_name.lower() not in bot_names:
+                        final_name = cleaned_name
+                    else:
+                        final_name = extracted_name or None
             
             return {
                 "name": final_name,
@@ -758,17 +856,44 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
             if transcript and len(transcript.strip()) >= 50:
                 try:
                     extracted_info = extract_name_and_region_from_transcript(transcript)
-                    # Update contact with extracted name if not already set
+                    
+                    # Final validation: reject bot names even if extraction returned them
+                    extracted_name = extracted_info.get("name")
+                    if extracted_name:
+                        bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
+                        bot_phrases = ['riley speaking', 'this is riley', 'i am riley']
+                        name_lower = extracted_name.lower().strip()
+                        
+                        # If it's a bot name, reject it
+                        if (name_lower in bot_names or 
+                            any(bp in name_lower for bp in bot_phrases) or
+                            'riley' in name_lower or
+                            name_lower == 'speaking'):
+                            print(f"⚠️  Rejected bot name '{extracted_name}' from extraction")
+                            extracted_info["name"] = None
+                    
+                    # Update contact with extracted name if valid and not already set
                     if extracted_info.get("name") and not contact.name:
-                        contact.name = extracted_info["name"]
-                        session.add(contact)
-                        try:
-                            session.commit()
-                        except Exception:
-                            session.rollback()
+                        # Double-check it's not a bot name before storing
+                        final_name = extracted_info["name"]
+                        final_name_lower = final_name.lower().strip()
+                        if (final_name_lower not in bot_names and 
+                            not any(bp in final_name_lower for bp in bot_phrases) and
+                            'riley' not in final_name_lower):
+                            contact.name = final_name
+                            session.add(contact)
+                            try:
+                                session.commit()
+                            except Exception:
+                                session.rollback()
+                        else:
+                            print(f"⚠️  Rejected bot name '{final_name}' before storing to contact")
+                            extracted_info["name"] = None
                 except Exception as e:
                     # Don't fail candidate processing if extraction fails
                     print(f"⚠️  Error extracting info from transcript: {e}")
+                    import traceback
+                    traceback.print_exc()
                     extracted_info = {"name": None, "region": None}
             
             # In testing mode, show ALL candidates regardless of status
