@@ -425,6 +425,9 @@ def extract_name_and_region_from_transcript(transcript: Optional[str]) -> Dict[s
     """
     Extract caller name and region/location from call transcript using AI.
     
+    Uses regex patterns first to catch common phrases, then AI for more complex cases.
+    Specifically ignores bot/assistant names (like "Riley") and extracts the caller's name.
+    
     Args:
         transcript: Call transcript text
     
@@ -437,6 +440,80 @@ def extract_name_and_region_from_transcript(transcript: Optional[str]) -> Dict[s
     if not transcript or not transcript.strip():
         return {"name": None, "region": None}
     
+    import re
+    
+    # First, try regex-based extraction for common patterns (faster and more reliable)
+    # Look for patterns like "my name is X", "I'm X", "this is X", etc.
+    name_patterns = [
+        r'(?:my name is|I\'m|I am|this is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+        r'(?:name|I\'m|I am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+        r'User:\s*(?:my name is|I\'m|I am|this is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+    ]
+    
+    # Try to extract name using regex first
+    extracted_name = None
+    for pattern in name_patterns:
+        matches = re.findall(pattern, transcript, re.IGNORECASE)
+        if matches:
+            # Get the first match that's not a common bot name
+            bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap']
+            for match in matches:
+                name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
+                if name and name.lower() not in bot_names and len(name) > 1:
+                    extracted_name = name
+                    break
+            if extracted_name:
+                break
+    
+    # Also look for when bot addresses the caller (e.g., "Thank you, Rehan")
+    if not extracted_name:
+        address_patterns = [
+            r'(?:thank you|thanks|hi|hello|hey),?\s+([A-Z][a-z]+)',
+            r'(?:thank you|thanks),?\s+([A-Z][a-z]+)\.',
+        ]
+        for pattern in address_patterns:
+            matches = re.findall(pattern, transcript, re.IGNORECASE)
+            if matches:
+                bot_names = ['riley', 'assistant', 'bot', 'ai']
+                for match in matches:
+                    name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
+                    if name and name.lower() not in bot_names and len(name) > 1:
+                        # Make sure this appears in a bot response, not user response
+                        # Check if it's followed by bot-like language
+                        extracted_name = name
+                        break
+                if extracted_name:
+                    break
+    
+    # Extract region/location patterns
+    region_patterns = [
+        r'(?:from|in|at|located in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+)?)',
+        r'([A-Z][a-z]+,\s+[A-Z][a-z]+)',  # "City, State" format
+    ]
+    
+    extracted_region = None
+    for pattern in region_patterns:
+        matches = re.findall(pattern, transcript)
+        if matches:
+            # Filter out common non-location words
+            non_locations = ['apartment', 'property', 'address', 'road', 'street', 'avenue']
+            for match in matches:
+                region = match.strip() if isinstance(match, str) else match[0].strip() if match else None
+                if region and not any(nl in region.lower() for nl in non_locations):
+                    extracted_region = region
+                    break
+            if extracted_region:
+                break
+    
+    # If we found both name and region via regex, return early
+    if extracted_name and extracted_region:
+        return {"name": extracted_name, "region": extracted_region}
+    
+    # If we found name via regex, use AI only for region
+    if extracted_name:
+        # Still use AI to refine region extraction
+        pass  # Continue to AI extraction for region
+    
     try:
         # Get Vertex AI client
         ai_client = get_vertex_ai_client()
@@ -445,24 +522,59 @@ def extract_name_and_region_from_transcript(transcript: Optional[str]) -> Dict[s
             return {"name": None, "region": None}
         
         # Create prompt for extraction
-        prompt = f"""Extract the caller's name and location/region from this phone call transcript.
+        # If we already have name from regex, focus on region
+        if extracted_name:
+            prompt = f"""Extract the location/region from this phone call transcript. The caller's name is already known: {extracted_name}
 
 Transcript:
-{transcript[:2000]}  # Limit to first 2000 chars to avoid token limits
+{transcript[:2000]}
 
 Instructions:
-1. Extract the caller's name if mentioned (first name, full name, or nickname)
-2. Extract the location/region if mentioned (city, state, region, or area)
+1. Extract the location/region mentioned by the CALLER:
+   - City, state, region, or area
+   - Look for addresses or locations the caller mentions
+   - Common formats: "Santa Clara, California", "New York", "from California"
+   
+2. Return ONLY a JSON object with "name" and "region" fields
+3. Use the provided name: {extracted_name}
+4. If region is not found, use null
+
+Example output:
+{{"name": "{extracted_name}", "region": "California"}}
+or
+{{"name": "{extracted_name}", "region": null}}
+
+Return only the JSON object:"""
+        else:
+            prompt = f"""Extract the CALLER's name and location/region from this phone call transcript.
+
+CRITICAL: This is a conversation between a bot/assistant and a caller. The bot may introduce itself with a name (like "Riley", "Assistant", etc.). You MUST extract the CALLER's name, NOT the bot's name.
+
+Transcript:
+{transcript[:2000]}
+
+Instructions:
+1. Extract the CALLER's name (the person calling, NOT the bot/assistant):
+   - Look for phrases like: "my name is [name]", "I'm [name]", "this is [name]", "I am [name]"
+   - Look for when the bot addresses the caller by name (e.g., "Thank you, [name]")
+   - IGNORE the bot's name when it introduces itself (e.g., "This is Riley speaking" - Riley is the bot, not the caller)
+   - IGNORE any name that appears in "Bot:" lines or bot introductions
+   - Common bot names to IGNORE: Riley, Assistant, Bot, AI, Lease, Leasap
+   
+2. Extract the location/region if mentioned by the CALLER:
+   - City, state, region, or area mentioned
+   - Look for addresses or locations the caller mentions
+   - Common formats: "Santa Clara, California", "New York", "from California"
+   
 3. Return ONLY a JSON object with "name" and "region" fields
 4. If information is not found, use null for that field
 5. Do not include any explanation, only the JSON object
 
-Example output:
-{{"name": "John Smith", "region": "New York"}}
-or
-{{"name": "Sarah", "region": "California"}}
-or
-{{"name": null, "region": "Texas"}}
+Examples:
+- Bot: "This is Riley speaking" + User: "my name is Rehan" → {{"name": "Rehan", "region": null}}
+- Bot: "Thank you, John" → {{"name": "John", "region": null}}
+- User: "I'm Sarah from New York" → {{"name": "Sarah", "region": "New York"}}
+- User: "my name is Rehan" + mentions "Santa Clara, California" → {{"name": "Rehan", "region": "California"}}
 
 Return only the JSON object:"""
         
@@ -488,9 +600,23 @@ Return only the JSON object:"""
             if start_idx >= 0 and end_idx > start_idx:
                 json_str = response_text[start_idx:end_idx]
                 extracted = json.loads(json_str)
+                ai_name = extracted.get("name")
+                ai_region = extracted.get("region")
+                
+                # Use regex-extracted name if available, otherwise use AI-extracted
+                final_name = extracted_name or ai_name
+                final_region = extracted_region or ai_region
+                
+                # Validate that AI didn't extract bot name
+                if ai_name:
+                    bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap']
+                    if ai_name.lower() in bot_names:
+                        print(f"⚠️  AI extracted bot name '{ai_name}', using regex result or null")
+                        final_name = extracted_name or None
+                
                 return {
-                    "name": extracted.get("name"),
-                    "region": extracted.get("region")
+                    "name": final_name,
+                    "region": final_region
                 }
         except json.JSONDecodeError:
             pass
@@ -498,13 +624,31 @@ Return only the JSON object:"""
         # Fallback: try to parse the whole response
         try:
             extracted = json.loads(response_text)
+            ai_name = extracted.get("name")
+            ai_region = extracted.get("region")
+            
+            # Use regex-extracted name if available, otherwise use AI-extracted
+            final_name = extracted_name or ai_name
+            final_region = extracted_region or ai_region
+            
+            # Validate that AI didn't extract bot name
+            if ai_name:
+                bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap']
+                if ai_name.lower() in bot_names:
+                    print(f"⚠️  AI extracted bot name '{ai_name}', using regex result or null")
+                    final_name = extracted_name or None
+            
             return {
-                "name": extracted.get("name"),
-                "region": extracted.get("region")
+                "name": final_name,
+                "region": final_region
             }
         except json.JSONDecodeError:
             print(f"⚠️  Failed to parse AI response as JSON: {response_text[:200]}")
-            return {"name": None, "region": None}
+            # Return regex results if available
+            return {
+                "name": extracted_name,
+                "region": extracted_region
+            }
             
     except Exception as e:
         print(f"⚠️  Error extracting name/region from transcript: {e}")

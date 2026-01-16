@@ -2,6 +2,8 @@
 
 This guide is **for the frontend cursor AI** implementing the UI/UX for the new outbound-calling feature of LEASAP Product.
 
+> 📋 **Quick Reference:** For detailed information on extracting Name, Email, and Last Called Time from candidate data, see **[FRONTEND_CANDIDATE_DATA_GUIDE.md](./FRONTEND_CANDIDATE_DATA_GUIDE.md)**
+
 Everything here is **a strong suggestion**, not a constraint. You’re good—use your creativity and make the UX **clean, modern, safe, and delightful**. But also treat this feature like a **regulated workflow**: compliance and “do not break existing behavior” are non‑negotiable.
 
 ---
