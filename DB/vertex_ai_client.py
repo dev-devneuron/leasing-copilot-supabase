@@ -97,36 +97,61 @@ class VertexAIClient:
                 # This is perfect for transcript extraction and costs less
                 # NOTE: For Gemini API Python SDK, use model name WITHOUT "models/" prefix
                 model_name = VERTEX_AI_MODEL
-                print(f"   VERTEX_AI_MODEL from config: {model_name}")
+                print(f"   VERTEX_AI_MODEL from config (raw): {model_name}")
                 
-                # Remove "models/" prefix if present (Python SDK doesn't need it)
+                # FORCE remove "models/" prefix if present (Python SDK doesn't need it)
                 if model_name.startswith("models/"):
                     model_name = model_name.replace("models/", "")
-                    print(f"   Removed 'models/' prefix: {model_name}")
+                    print(f"   ✅ Removed 'models/' prefix: {model_name}")
                 
                 # Ensure we use the cheapest model for Gemini API
-                # Override to gemini-1.5-flash if using expensive models
-                if model_name in ["gemini-2.0-flash-exp", "gemini-1.5-pro", "models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]:
-                    # Use cheapest model for simple extraction tasks
-                    model_name = "gemini-1.5-flash"
-                    print(f"💡 Using cheapest Gemini model for cost efficiency: {model_name}")
+                # Try gemini-1.5-flash-002 (specific version) or gemini-2.0-flash (newer, still cheap)
+                expensive_models = ["gemini-2.0-flash-exp", "gemini-1.5-pro", "models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]
+                if model_name in expensive_models or any(model_name.startswith(m.replace("models/", "")) for m in expensive_models if "models/" in m):
+                    # Use cheapest available model - try gemini-1.5-flash-002 first (specific version)
+                    # If that fails, fallback will try gemini-2.0-flash
+                    model_name = "gemini-1.5-flash-002"
+                    print(f"💡 Overriding to cheapest Gemini model (specific version): {model_name}")
+                elif model_name == "gemini-1.5-flash":
+                    # Use specific version for better compatibility
+                    model_name = "gemini-1.5-flash-002"
+                    print(f"💡 Using specific version for compatibility: {model_name}")
                 
+                # FINAL CHECK: Ensure no "models/" prefix (critical for Python SDK)
+                if model_name.startswith("models/"):
+                    print(f"   ⚠️  WARNING: Model name still has 'models/' prefix! Removing...")
+                    model_name = model_name.replace("models/", "")
+                
+                print(f"   🎯 FINAL model name (for Python SDK): '{model_name}'")
                 print(f"   Creating GenerativeModel with: {model_name}")
                 self.model = genai.GenerativeModel(model_name)
                 print(f"✅ Gemini API initialized successfully: {model_name}")
-                print(f"   Model object: {self.model}")
+                print(f"   Model object created: {type(self.model)}")
+                # Verify the model name in the object
+                if hasattr(self.model, '_model_name'):
+                    print(f"   Verified model name in object: {self.model._model_name}")
             except Exception as e:
                 print(f"⚠️  Gemini API initialization failed: {e}")
                 print(f"   Error type: {type(e).__name__}")
                 import traceback
                 traceback.print_exc()
-                # Try cheapest model as fallback (without models/ prefix for Python SDK)
-                try:
-                    print(f"   Trying fallback model: gemini-1.5-flash")
-                    self.model = genai.GenerativeModel("gemini-1.5-flash")
-                    print("✅ Using cheapest Gemini model (fallback): gemini-1.5-flash")
-                except Exception as fallback_error:
-                    print(f"❌ Fallback model also failed: {fallback_error}")
+                # Try fallback models (without models/ prefix for Python SDK)
+                # Try specific version first, then newer model
+                fallback_models = ["gemini-1.5-flash-002", "gemini-2.0-flash", "gemini-1.5-flash"]
+                fallback_success = False
+                for fallback_model in fallback_models:
+                    try:
+                        print(f"   Trying fallback model: {fallback_model}")
+                        self.model = genai.GenerativeModel(fallback_model)
+                        print(f"✅ Using Gemini model (fallback): {fallback_model}")
+                        fallback_success = True
+                        break
+                    except Exception as fallback_error:
+                        print(f"   ❌ Fallback model {fallback_model} failed: {fallback_error}")
+                        continue
+                
+                if not fallback_success:
+                    print(f"❌ All fallback models failed")
                     self.model = None
         else:
             if not GEMINI_API_AVAILABLE:
@@ -279,6 +304,22 @@ def get_vertex_ai_client() -> VertexAIClient:
     """Get or create the global Vertex AI client instance."""
     global _vertex_ai_client
     if _vertex_ai_client is None:
+        print(f"\n[get_vertex_ai_client] Creating new VertexAIClient instance...")
         _vertex_ai_client = VertexAIClient()
+    else:
+        print(f"\n[get_vertex_ai_client] Reusing existing VertexAIClient instance")
+        # Verify the model is still valid
+        if _vertex_ai_client.model:
+            model_info = str(_vertex_ai_client.model)
+            if "models/" in model_info and not _vertex_ai_client.use_vertex_ai:
+                print(f"   ⚠️  WARNING: Model object has 'models/' prefix but using Gemini API!")
+                print(f"   Model info: {model_info}")
     return _vertex_ai_client
+
+def reset_vertex_ai_client():
+    """Reset the global Vertex AI client instance (useful for testing/debugging)."""
+    global _vertex_ai_client
+    print(f"\n[reset_vertex_ai_client] Resetting global client instance...")
+    _vertex_ai_client = None
+    return get_vertex_ai_client()
 
