@@ -725,8 +725,14 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
         }
     """
     import re
+    
+    print(f"\n🚀 extract_contact_intel_from_transcript() CALLED")
+    print(f"   Transcript provided: {transcript is not None}")
+    if transcript:
+        print(f"   Transcript length: {len(transcript)} chars")
 
     if not transcript or not transcript.strip():
+        print(f"   ⚠️  Empty transcript - returning empty result")
         return {
             "email": None,
             "inferred_name": None,
@@ -734,6 +740,7 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
             "inquiry_property": None,
             "inquiry_purpose": None,
             "inquiry_summary": None,
+            "call_summary": None,
         }
 
     parts = _split_transcript(transcript)
@@ -751,17 +758,18 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
     # ============================================================================
     # STEP 1: GEMINI AI EXTRACTION (PRIMARY - MUST TRY FIRST)
     # ============================================================================
+    print(f"\n{'='*80}")
+    print(f"🔍 GEMINI AI EXTRACTION - STARTING")
+    print(f"{'='*80}")
+    print(f"Transcript length: {len(transcript)} chars")
+    print(f"Transcript preview (first 500 chars):\n{transcript[:500]}\n...")
+    
     try:
-        print(f"\n{'='*80}")
-        print(f"🔍 GEMINI AI EXTRACTION - STARTING")
-        print(f"{'='*80}")
-        print(f"Transcript length: {len(transcript)} chars")
-        print(f"Transcript preview (first 500 chars):\n{transcript[:500]}\n...")
-        
         ai_client = get_vertex_ai_client()
         print(f"AI Client available: {ai_client is not None}")
         if ai_client:
             print(f"AI Client is_available(): {ai_client.is_available()}")
+            print(f"AI Client use_vertex_ai: {getattr(ai_client, 'use_vertex_ai', 'N/A')}")
         
         if ai_client and ai_client.is_available():
             print(f"✅ Gemini AI client is available - proceeding with extraction")
@@ -1184,8 +1192,9 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                 
                 try:
                     # ALWAYS re-extract (don't trust cached data)
-                    print(f"\n   Calling extract_contact_intel_from_transcript...")
+                    print(f"\n   ⚡ CALLING extract_contact_intel_from_transcript()...")
                     extracted_info = extract_contact_intel_from_transcript(transcript)
+                    print(f"   ✅ extract_contact_intel_from_transcript() completed")
                     
                     print(f"   ✅ Extraction result:")
                     print(f"      - Email: {extracted_info.get('email') or 'None'}")
@@ -1205,26 +1214,23 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                             except Exception:
                                 session.rollback()
 
-                    # ALWAYS update name if we found a good one (replace bad names like "Riley")
+                    # ALWAYS update name - replace bad names like "Riley" even if we don't have a better one
                     inferred_name = extracted_info.get("inferred_name")
+                    bad = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello", "riley speaking"}
+                    
+                    # Check if current stored name is bad
+                    current_name_is_bad = False
+                    if contact.name:
+                        contact_name_lower = contact.name.lower().strip()
+                        current_name_is_bad = (contact_name_lower in bad or "riley" in contact_name_lower)
+                    
+                    # If we have a good inferred name, use it
                     if inferred_name:
-                        bad = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello"}
                         inferred_clean = inferred_name.lower().strip()
+                        inferred_is_good = (inferred_clean not in bad and "riley" not in inferred_clean and len(inferred_name) > 1)
                         
-                        # If contact has a bad name OR no name, update it
-                        should_update_name = False
-                        if contact.name:
-                            contact_name_lower = contact.name.lower().strip()
-                            # Update if current name is bad OR if new name is better
-                            if contact_name_lower in bad or "riley" in contact_name_lower:
-                                should_update_name = True
-                                print(f"   🔄 Replacing bad name '{contact.name}' with '{inferred_name}'")
-                        else:
-                            # No name yet, add the inferred one
-                            should_update_name = True
-                            print(f"   ➕ Adding new name: '{inferred_name}'")
-                        
-                        if should_update_name and inferred_clean not in bad and "riley" not in inferred_clean and len(inferred_name) > 1:
+                        if inferred_is_good:
+                            # Always update if we have a good inferred name (even if stored name is also good)
                             old_name = contact.name
                             contact.name = inferred_name
                             session.add(contact)
@@ -1234,15 +1240,32 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                             except Exception:
                                 session.rollback()
                                 print(f"   ⚠️  Failed to commit name update")
-                        elif inferred_clean in bad or "riley" in inferred_clean:
-                            print(f"   ❌ Rejected bad name: '{inferred_name}' (matches bot name patterns)")
                         else:
-                            print(f"   ℹ️  Keeping existing name: '{contact.name}' (inferred name '{inferred_name}' not better)")
+                            print(f"   ❌ Rejected bad inferred name: '{inferred_name}'")
+                    
+                    # If stored name is bad and we don't have a good inferred name, clear it
+                    elif current_name_is_bad:
+                        print(f"   🗑️  Clearing bad stored name: '{contact.name}' (no good replacement found)")
+                        old_bad_name = contact.name
+                        contact.name = None
+                        session.add(contact)
+                        try:
+                            session.commit()
+                            print(f"   ✅ Cleared bad name '{old_bad_name}' from database (set to None)")
+                        except Exception as e:
+                            session.rollback()
+                            print(f"   ⚠️  Failed to clear bad name: {e}")
+                    
+                    # Log final state
+                    print(f"   📝 Final contact state after extraction:")
+                    print(f"      - contact.name: '{contact.name}'")
+                    print(f"      - contact.email: '{contact.email}'")
                 except Exception as e:
                     # Don't fail candidate processing if extraction fails
                     print(f"   ❌ Error extracting info from transcript: {e}")
                     import traceback
                     traceback.print_exc()
+                    # Initialize with defaults
                     extracted_info = {
                         "email": None,
                         "inferred_name": None,
@@ -1252,6 +1275,9 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                         "inquiry_summary": None,
                         "call_summary": None,
                     }
+                    
+                    # FORCE extraction to run - don't skip even if contact already has data
+                    print(f"   ⚡ FORCING EXTRACTION (will update contact if better data found)")
             else:
                 print(f"   ⚠️  No transcript or transcript too short for {phone}")
             

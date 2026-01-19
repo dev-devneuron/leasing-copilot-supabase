@@ -12913,11 +12913,25 @@ async def get_outbound_call_candidates(
                             
                         eligibility = check_eligibility(contact, session)
                         
+                        # Smart name selection: reject bad stored names, prefer extracted
+                        stored_name = contact.name
+                        inferred_name = candidate.get("inferred_name")
+                        bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "riley speaking"}
+                        
+                        # If stored name is bad, ignore it and use inferred
+                        if stored_name:
+                            stored_name_lower = stored_name.lower().strip()
+                            if stored_name_lower in bad_names or "riley" in stored_name_lower:
+                                stored_name = None  # Ignore bad stored name
+                        
+                        # Prefer inferred name if stored name is bad or missing
+                        display_name = inferred_name if inferred_name else stored_name
+                        
                         enriched_candidates.append({
                             "contact_id": contact.id,
                             "phone_number": contact.phone_number,
-                            # Prefer stored contact fields, then extracted/inferred
-                            "name": contact.name or candidate.get("inferred_name"),
+                            # Smart name: reject bad stored names, prefer extracted
+                            "name": display_name,
                             "email": contact.email or candidate.get("extracted_email"),
                             "timezone": contact.timezone,
                             "consent_status": contact.consent_status,
@@ -13430,6 +13444,48 @@ async def options_outbound_calls_analytics(request: Request):
     cors_headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     cors_headers["Access-Control-Max-Age"] = "3600"
     return Response(status_code=200, headers=cors_headers)
+
+@app.get("/outbound-calls/test-extraction")
+async def test_extraction(
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Test endpoint to verify Gemini extraction is working.
+    Returns the latest call transcript and extraction result.
+    """
+    from DB.outbound_calling import extract_contact_intel_from_transcript
+    from DB.db import CallRecord
+    
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(status_code=403, detail="Only property managers can test extraction")
+    
+    with Session(engine) as session:
+        # Get the most recent call with a transcript
+        latest_call = session.exec(
+            select(CallRecord)
+            .where(CallRecord.transcript.isnot(None))
+            .order_by(CallRecord.created_at.desc())
+        ).first()
+        
+        if not latest_call:
+            return create_cors_json_response(content={
+                "error": "No calls with transcripts found"
+            }, request=request, status_code=404)
+        
+        # Extract from transcript
+        extracted = extract_contact_intel_from_transcript(latest_call.transcript)
+        
+        return create_cors_json_response(content={
+            "call_id": latest_call.call_id,
+            "caller_number": latest_call.caller_number,
+            "transcript_length": len(latest_call.transcript) if latest_call.transcript else 0,
+            "transcript_preview": latest_call.transcript[:500] if latest_call.transcript else None,
+            "extracted_data": extracted,
+            "full_transcript": latest_call.transcript
+        }, request=request)
+
 
 @app.get("/outbound-calls/analytics")
 async def get_outbound_calling_analytics(
