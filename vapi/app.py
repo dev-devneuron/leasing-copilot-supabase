@@ -172,6 +172,41 @@ class CORSEnforcementMiddleware(BaseHTTPMiddleware):
 app.add_middleware(CORSEnforcementMiddleware)
 
 # ============================================================================
+# CORS HELPER FUNCTIONS
+# ============================================================================
+def get_cors_headers(request: Optional[Request] = None) -> Dict[str, str]:
+    """Get CORS headers for a response based on the request origin."""
+    if request is not None:
+        origin = request.headers.get("Origin", "")
+        if origin in CORS_ALLOWED_ORIGINS:
+            allowed_origin = origin
+        elif CORS_ALLOWED_ORIGINS:
+            allowed_origin = CORS_ALLOWED_ORIGINS[0]
+        else:
+            allowed_origin = "*"
+    else:
+        allowed_origin = CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
+    
+    return {
+        "Access-Control-Allow-Origin": allowed_origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept, Origin, X-Requested-With",
+    }
+
+def add_cors_headers_to_response(response: JSONResponse, request: Optional[Request] = None) -> JSONResponse:
+    """Add CORS headers to a JSONResponse."""
+    cors_headers = get_cors_headers(request)
+    for key, value in cors_headers.items():
+        response.headers[key] = value
+    return response
+
+def create_cors_json_response(content: Any, status_code: int = 200, request: Optional[Request] = None) -> JSONResponse:
+    """Create a JSONResponse with CORS headers already added."""
+    response = JSONResponse(content=content, status_code=status_code)
+    return add_cors_headers_to_response(response, request)
+
+# ============================================================================
 # CUSTOM EXCEPTION HANDLERS (Ensure CORS headers in error responses)
 # ============================================================================
 # FastAPI's CORS middleware may not add headers to HTTPException responses
@@ -2591,6 +2626,14 @@ async def upload_realtor_files(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.options("/CreatePropertyManager")
+async def options_create_property_manager(request: Request):
+    """Handle CORS preflight for CreatePropertyManager endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
+
 @app.post("/CreatePropertyManager")
 async def create_property_manager_endpoint(
     name: str = Form(...),
@@ -2598,6 +2641,7 @@ async def create_property_manager_endpoint(
     password: str = Form(...),
     contact: str = Form(...),
     company_name: str = Form(None),
+    request: Request = None,
 ):
     """Create a new Property Manager."""
     try:
@@ -2620,11 +2664,19 @@ async def create_property_manager_endpoint(
             company_name=company_name,
         )
 
-        return JSONResponse(content=result, status_code=200)
+        return create_cors_json_response(content=result, status_code=200, request=request)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.options("/CreateRealtor")
+async def options_create_realtor(request: Request):
+    """Handle CORS preflight for CreateRealtor endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
 
 @app.post("/CreateRealtor")
 async def create_realtor_endpoint(
@@ -2633,6 +2685,7 @@ async def create_realtor_endpoint(
     password: str = Form(...),
     contact: str = Form(...),
     property_manager_id: int = Form(...),
+    request: Request = None,
 ):
     """Create a new Realtor under a Property Manager."""
     try:
@@ -2655,7 +2708,7 @@ async def create_realtor_endpoint(
             property_manager_id=property_manager_id,
         )
 
-        return JSONResponse(content=result, status_code=200)
+        return create_cors_json_response(content=result, status_code=200, request=request)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2705,20 +2758,16 @@ def run_sync():
 @app.options("/login")
 async def options_login(request: Request):
     """Handle CORS preflight for login endpoint."""
-    origin = request.headers.get("Origin", "")
-    allowed_origin = origin if origin in CORS_ALLOWED_ORIGINS else CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
     return Response(
         status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": allowed_origin,
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Credentials": "true",
-        }
+        headers=cors_headers
     )
 
 @app.post("/login")
-async def login_realtor(response: Response, payload: dict = Body(...), request: Request = None):
+async def login_realtor(payload: dict = Body(...), request: Request = None):
     """Login endpoint for Realtors (must belong to a Property Manager)."""
     email = payload.get("email")
     password = payload.get("password")
@@ -2727,18 +2776,24 @@ async def login_realtor(response: Response, payload: dict = Body(...), request: 
     try:
         result = authenticate_realtor(email, password)
         
+        # Create JSONResponse with CORS headers and cookie
+        response = JSONResponse(content=result)
+        
         # Store refresh token in secure cookie
         response.set_cookie(
             key="refresh_token",
             value=result["refresh_token"],
             httponly=True,
-            secure=False,  # Set to False for HTTP, True for HTTPS in production
+            secure=True,  # Set to True for HTTPS in production
             samesite="lax",  # Changed from "strict" to "lax" for better compatibility
             max_age=60 * 60 * 24 * 30,  # 30 days
         )
         
+        # Explicitly add CORS headers to ensure they're present
+        add_cors_headers_to_response(response, request)
+        
         print("Realtor login successful")
-        return result
+        return response
 
     except HTTPException:
         raise  # re-raise known HTTP errors as is
@@ -2753,20 +2808,16 @@ async def login_realtor(response: Response, payload: dict = Body(...), request: 
 @app.options("/property-manager-login")
 async def options_property_manager_login(request: Request):
     """Handle CORS preflight for property manager login endpoint."""
-    origin = request.headers.get("Origin", "")
-    allowed_origin = origin if origin in CORS_ALLOWED_ORIGINS else CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
     return Response(
         status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": allowed_origin,
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Credentials": "true",
-        }
+        headers=cors_headers
     )
 
 @app.post("/property-manager-login")
-async def login_property_manager(response: Response, payload: dict = Body(...), request: Request = None):
+async def login_property_manager(payload: dict = Body(...), request: Request = None):
     """Login endpoint for Property Managers."""
     email = payload.get("email")
     password = payload.get("password")
@@ -2775,18 +2826,24 @@ async def login_property_manager(response: Response, payload: dict = Body(...), 
     try:
         result = authenticate_property_manager(email, password)
         
+        # Create JSONResponse with CORS headers and cookie
+        response = JSONResponse(content=result)
+        
         # Store refresh token in secure cookie
         response.set_cookie(
             key="refresh_token",
             value=result["refresh_token"],
             httponly=True,
-            secure=False,  # Set to False for HTTP, True for HTTPS in production
+            secure=True,  # Set to True for HTTPS in production
             samesite="lax",  # Changed from "strict" to "lax" for better compatibility
             max_age=60 * 60 * 24 * 30,  # 30 days
         )
         
+        # Explicitly add CORS headers to ensure they're present
+        add_cors_headers_to_response(response, request)
+        
         print("Property Manager login successful")
-        return result
+        return response
 
     except HTTPException:
         raise  # re-raise known HTTP errors as is
@@ -5563,6 +5620,14 @@ def get_db():
 # ============================================================================
 # Replaces sign-up with "Book a Demo" functionality
 
+@app.options("/book-demo")
+async def options_book_demo(request: Request):
+    """Handle CORS preflight for book-demo endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
+
 @app.post("/book-demo")
 def book_demo(
     name: str = Body(...),
@@ -5573,6 +5638,7 @@ def book_demo(
     preferred_time: Optional[str] = Body(None),  # e.g., "10:00 AM"
     timezone: Optional[str] = Body(None),  # e.g., "America/New_York"
     notes: Optional[str] = Body(None),
+    request: Request = None,
 ):
     """
     Public endpoint to book a demo. No authentication required.
@@ -5610,12 +5676,12 @@ def book_demo(
             session.commit()
             session.refresh(demo_request)
             
-            return JSONResponse(content={
+            return create_cors_json_response(content={
                 "message": "Thank you for your interest! We've received your demo request and will contact you soon to schedule a time.",
                 "demo_request_id": demo_request.demo_request_id,
                 "status": demo_request.status,
                 "requested_at": demo_request.requested_at.isoformat() if demo_request.requested_at else None,
-            })
+            }, request=request)
             
     except HTTPException:
         raise
@@ -5630,6 +5696,14 @@ def book_demo(
         )
 
 
+@app.options("/contact")
+async def options_contact(request: Request):
+    """Handle CORS preflight for contact endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
+
 @app.post("/contact")
 def submit_contact_form(
     name: str = Body(...),
@@ -5637,6 +5711,7 @@ def submit_contact_form(
     message: str = Body(...),
     phone: Optional[str] = Body(None),
     subject: Optional[str] = Body(None),
+    request: Request = None,
 ):
     """
     Public endpoint to submit a contact form. No authentication required.
@@ -5657,7 +5732,7 @@ def submit_contact_form(
             session.commit()
             session.refresh(contact_form)
             
-            return JSONResponse(content={
+            return create_cors_json_response(content={
                 "message": "Thank you for contacting us! We've received your message and will get back to you soon.",
                 "contact_id": contact_form.contact_id,
                 "submitted_at": contact_form.submitted_at.isoformat() if contact_form.submitted_at else None,
@@ -12847,16 +12922,12 @@ async def get_outbound_call_candidates(
 @app.options("/outbound-calls/trigger")
 async def options_outbound_calls_trigger(request: Request):
     """Handle CORS preflight for outbound calls trigger endpoint."""
-    origin = request.headers.get("Origin", "")
-    allowed_origin = origin if origin in CORS_ALLOWED_ORIGINS else CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
     return Response(
         status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": allowed_origin,
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Credentials": "true",
-        }
+        headers=cors_headers
     )
 
 @app.post("/outbound-calls/trigger")
