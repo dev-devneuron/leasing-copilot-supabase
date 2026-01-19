@@ -633,30 +633,44 @@ def trigger_background_extraction(property_manager_id: Optional[int] = None):
         # Process in parallel (max 5 workers to avoid overwhelming Gemini API)
         completed = 0
         failed = 0
+        lock = Lock()  # Thread-safe counter
         
-        def extract_one(call_record):
-            nonlocal completed, failed
+        def extract_one(call_record_id):
+            """Extract intel for a single call record (thread-safe)."""
             try:
                 with Session(engine) as call_session:
-                    # Refresh the call record in this session
-                    call_record = call_session.get(CallRecord, call_record.id)
+                    # Get the call record in this session
+                    call_record = call_session.get(CallRecord, call_record_id)
                     if call_record:
                         extract_and_store_intel_for_call_record(
                             call_record, call_session, force_re_extract=False
                         )
-                        completed += 1
+                        with lock:
+                            completed += 1
+                        return True
+                    else:
+                        with lock:
+                            failed += 1
+                        return False
             except Exception as e:
-                failed += 1
-                print(f"   ⚠️  Extraction failed for call {call_record.call_id if call_record else 'unknown'}: {e}")
+                with lock:
+                    failed += 1
+                print(f"   ⚠️  Extraction failed for call record {call_record_id}: {e}")
+                return False
         
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(extract_one, call_record) for call_record in pending_calls]
+            futures = [executor.submit(extract_one, call_record.id) for call_record in pending_calls]
             
+            processed = 0
             for future in as_completed(futures):
                 try:
                     future.result()
-                    if (completed + failed) % 10 == 0:
-                        print(f"   📊 Progress: {completed + failed}/{len(pending_calls)} calls processed...")
+                    processed += 1
+                    if processed % 10 == 0:
+                        with lock:
+                            current_completed = completed
+                            current_failed = failed
+                        print(f"   📊 Progress: {processed}/{len(pending_calls)} calls processed ({current_completed} succeeded, {current_failed} failed)...")
                 except Exception as e:
                     print(f"   ⚠️  Future error: {e}")
         
