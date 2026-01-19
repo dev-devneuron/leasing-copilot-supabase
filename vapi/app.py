@@ -159,11 +159,16 @@ class CORSEnforcementMiddleware(BaseHTTPMiddleware):
         
         # Ensure CORS headers are present (add if missing)
         # This catches cases where CORS middleware didn't add headers (e.g., errors)
-        if origin:  # Only add headers if there's an Origin header
+        # Always add headers if Origin is present (CORS request)
+        if origin:
             if "Access-Control-Allow-Origin" not in response.headers:
                 response.headers["Access-Control-Allow-Origin"] = allowed_origin
             if "Access-Control-Allow-Credentials" not in response.headers:
                 response.headers["Access-Control-Allow-Credentials"] = "true"
+            if "Access-Control-Allow-Methods" not in response.headers:
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+            if "Access-Control-Allow-Headers" not in response.headers:
+                response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, Origin, X-Requested-With"
         
         return response
 
@@ -12823,8 +12828,7 @@ async def options_outbound_calls_candidates(request: Request):
 @app.get("/outbound-calls/candidates")
 async def get_outbound_call_candidates(
     limit: int = 50,
-    current_user: Dict[str, Any] = Depends(get_current_user_data),
-    request: Request = None
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
     Get list of ALL candidates for outbound calling.
@@ -12904,17 +12908,11 @@ async def get_outbound_call_candidates(
                         continue
                 
                 # Return empty list if no candidates found (not an error)
-                # Use JSONResponse - middleware will add CORS headers, but we add them explicitly too
-                response = JSONResponse(content={
+                # Middleware will automatically add CORS headers
+                return {
                     "candidates": enriched_candidates,
                     "total": len(enriched_candidates)
-                })
-                # Add CORS headers explicitly (middleware should also add them)
-                try:
-                    return add_cors_headers_to_response(response, request)
-                except Exception:
-                    # If adding headers fails, return response anyway (middleware will handle it)
-                    return response
+                }
                 
         except HTTPException:
             # Re-raise HTTP exceptions as-is
