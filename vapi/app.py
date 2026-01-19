@@ -13004,10 +13004,15 @@ async def get_outbound_call_candidates(
                 enriched_candidates = []
                 for candidate in candidates:
                     try:
-                        if not candidate or "contact" not in candidate:
+                        if not candidate or "contact_id" not in candidate:
                             continue
-                            
-                        contact = candidate["contact"]
+                        
+                        # Reload contact in main session to avoid DetachedInstanceError
+                        contact_id = candidate.get("contact_id")
+                        if not contact_id:
+                            continue
+                        
+                        contact = session.get(Contact, contact_id)
                         if not contact:
                             continue
                             

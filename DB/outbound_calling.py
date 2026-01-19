@@ -1262,8 +1262,25 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                     except:
                         candidate_session.rollback()
                 
+                # Eagerly access all needed attributes to load them into object state
+                # This prevents DetachedInstanceError when object is used in different session
+                contact_id = contact.id
+                phone_number = contact.phone_number
+                name = contact.name
+                email = contact.email
+                timezone = contact.timezone
+                consent_status = contact.consent_status
+                opted_out = contact.opted_out
+                call_attempt_count = contact.call_attempt_count
+                last_called_at = contact.last_called_at
+                last_call_outcome = getattr(contact, "last_call_outcome", None)
+                last_booking_at = getattr(contact, "last_booking_at", None)
+                
+                # Refresh to ensure all attributes are loaded
+                candidate_session.refresh(contact)
+                
                 return {
-                    "contact": contact,
+                    "contact_id": contact_id,  # Return ID for reloading in main session
                     "last_call_id": call_info["call_id"],
                     "last_call_at": call_info["call_at"],
                     "call_transcript": call_info.get("transcript"),
