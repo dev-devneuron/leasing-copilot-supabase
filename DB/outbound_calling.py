@@ -816,17 +816,20 @@ OUTPUT FORMAT (JSON ONLY):
 {{
   "email": "customer@email.com" or null,
   "customer_name": "ActualCustomerName" or null,
+  "inferred_name": "ActualCustomerName" or null,
   "inquiry_property": "123 Street Address, City, State" or null,
   "inquiry_purpose": "booking a tour" or null,
   "region": "California" or null
 }}
 
+NOTE: Both "customer_name" and "inferred_name" should contain the same value (the customer's name).
+
 EXAMPLES:
 - If customer says "Hi, I'm Rehan, my email is rehan@gmail.com, I want to book a tour for 188 Alexandra Road"
-  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inquiry_property": "188 Alexandra Road", "inquiry_purpose": "booking a tour", "region": null}}
+  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inferred_name": "Rehan", "inquiry_property": "188 Alexandra Road", "inquiry_purpose": "booking a tour", "region": null}}
 
 - If only bot says "Riley speaking, how can I help?"
-  → {{"email": null, "customer_name": null, "inquiry_property": null, "inquiry_purpose": null, "region": null}}
+  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": null, "inquiry_purpose": null, "region": null}}
 
 TRANSCRIPT:
 {transcript_snippet}
