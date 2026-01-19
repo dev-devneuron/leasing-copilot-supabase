@@ -114,7 +114,8 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-large-en-v1.5")
 
 # LLM model name (Gemini model for fallback)
-LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "models/gemini-2.0-flash")
+# Using cheapest model: gemini-1.5-flash (perfect for transcript extraction)
+LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "models/gemini-1.5-flash")
 
 # ============================================================================
 # VERTEX AI CONFIGURATION (Primary AI Platform)
@@ -130,8 +131,9 @@ GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 
 # Vertex AI model name for text generation
-# Options: gemini-2.0-flash-exp, gemini-1.5-pro, gemini-1.5-flash
-VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-2.0-flash-exp")
+# Options: gemini-1.5-flash (cheapest, recommended), gemini-1.5-pro, gemini-2.0-flash-exp
+# For Gemini API: gemini-1.5-flash is the cheapest and perfect for transcript extraction
+VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-1.5-flash")
 
 # Vertex AI embedding model name
 VERTEX_AI_EMBEDDING_MODEL = os.getenv("VERTEX_AI_EMBEDDING_MODEL", "textembedding-gecko@003")

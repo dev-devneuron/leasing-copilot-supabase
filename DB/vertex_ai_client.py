@@ -70,25 +70,34 @@ class VertexAIClient:
             self._init_gemini_api()
     
     def _init_gemini_api(self):
-        """Initialize Gemini API as fallback."""
+        """Initialize Gemini API as fallback. Uses cheapest model (gemini-1.5-flash) by default."""
         if GEMINI_API_AVAILABLE and GEMINI_API_KEY:
             try:
                 genai.configure(api_key=GEMINI_API_KEY)
-                # Convert Vertex AI model name to Gemini API format
+                # Use cheapest model for Gemini API: gemini-1.5-flash
+                # This is perfect for transcript extraction and costs less
                 model_name = VERTEX_AI_MODEL
                 if not model_name.startswith("models/"):
                     if model_name.startswith("gemini-"):
                         model_name = f"models/{model_name}"
                     else:
                         model_name = f"models/{model_name}"
+                
+                # Ensure we use the cheapest model for Gemini API
+                # Override to gemini-1.5-flash if using expensive models
+                if model_name in ["models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]:
+                    # Use cheapest model for simple extraction tasks
+                    model_name = "models/gemini-1.5-flash"
+                    print(f"💡 Using cheapest Gemini model for cost efficiency: {model_name}")
+                
                 self.model = genai.GenerativeModel(model_name)
-                print(f"✅ Using Gemini API (fallback): {model_name}")
+                print(f"✅ Using Gemini API: {model_name}")
             except Exception as e:
                 print(f"⚠️  Gemini API initialization failed: {e}")
-                # Try default model
+                # Try cheapest model as fallback
                 try:
-                    self.model = genai.GenerativeModel("models/gemini-2.0-flash-exp")
-                    print("✅ Using default Gemini model: models/gemini-2.0-flash-exp")
+                    self.model = genai.GenerativeModel("models/gemini-1.5-flash")
+                    print("✅ Using cheapest Gemini model (fallback): models/gemini-1.5-flash")
                 except:
                     self.model = None
         else:
