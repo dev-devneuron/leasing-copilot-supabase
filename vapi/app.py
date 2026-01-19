@@ -176,15 +176,19 @@ app.add_middleware(CORSEnforcementMiddleware)
 # ============================================================================
 def get_cors_headers(request: Optional[Request] = None) -> Dict[str, str]:
     """Get CORS headers for a response based on the request origin."""
-    if request is not None:
-        origin = request.headers.get("Origin", "")
-        if origin in CORS_ALLOWED_ORIGINS:
-            allowed_origin = origin
-        elif CORS_ALLOWED_ORIGINS:
-            allowed_origin = CORS_ALLOWED_ORIGINS[0]
+    try:
+        if request is not None:
+            origin = request.headers.get("Origin", "")
+            if origin in CORS_ALLOWED_ORIGINS:
+                allowed_origin = origin
+            elif CORS_ALLOWED_ORIGINS:
+                allowed_origin = CORS_ALLOWED_ORIGINS[0]
+            else:
+                allowed_origin = "*"
         else:
-            allowed_origin = "*"
-    else:
+            allowed_origin = CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
+    except Exception:
+        # Fallback if there's any error getting origin
         allowed_origin = CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "*"
     
     return {
@@ -12818,9 +12822,9 @@ async def options_outbound_calls_candidates(request: Request):
 
 @app.get("/outbound-calls/candidates")
 async def get_outbound_call_candidates(
-    request: Request,
     limit: int = 50,
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    current_user: Dict[str, Any] = Depends(get_current_user_data),
+    request: Request = None
 ):
     """
     Get list of ALL candidates for outbound calling.
@@ -12900,10 +12904,17 @@ async def get_outbound_call_candidates(
                         continue
                 
                 # Return empty list if no candidates found (not an error)
-                return create_cors_json_response(content={
+                # Use JSONResponse - middleware will add CORS headers, but we add them explicitly too
+                response = JSONResponse(content={
                     "candidates": enriched_candidates,
                     "total": len(enriched_candidates)
-                }, request=request)
+                })
+                # Add CORS headers explicitly (middleware should also add them)
+                try:
+                    return add_cors_headers_to_response(response, request)
+                except Exception:
+                    # If adding headers fails, return response anyway (middleware will handle it)
+                    return response
                 
         except HTTPException:
             # Re-raise HTTP exceptions as-is
