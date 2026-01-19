@@ -12855,15 +12855,38 @@ async def get_outbound_call_candidates(
     Auth: Required (Admin/PM only)
     """
     import traceback
-    from DB.outbound_calling import identify_follow_up_candidates, check_eligibility
     
     try:
+        # Validate user type
+        if not current_user:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required"
+            )
+        
         user_type = current_user.get("user_type")
         if user_type not in ["property_manager"]:
             raise HTTPException(
                 status_code=403,
                 detail="Only property managers can view outbound call candidates"
             )
+        
+        # Import here to avoid import errors at module level
+        try:
+            from DB.outbound_calling import identify_follow_up_candidates, check_eligibility
+        except ImportError as e:
+            print(f"❌ Import error: {e}")
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail="Service temporarily unavailable"
+            )
+        
+        # Validate limit
+        if limit < 0:
+            limit = 50
+        if limit > 1000:
+            limit = 1000  # Cap at 1000 for performance
         
         try:
             with Session(engine) as session:
@@ -12881,7 +12904,13 @@ async def get_outbound_call_candidates(
                 enriched_candidates = []
                 for candidate in candidates:
                     try:
+                        if not candidate or "contact" not in candidate:
+                            continue
+                            
                         contact = candidate["contact"]
+                        if not contact:
+                            continue
+                            
                         eligibility = check_eligibility(contact, session)
                         
                         enriched_candidates.append({
@@ -12906,10 +12935,10 @@ async def get_outbound_call_candidates(
                             "inquiry_property": candidate.get("inquiry_property"),
                             "inquiry_purpose": candidate.get("inquiry_purpose"),
                             "inquiry_summary": candidate.get("inquiry_summary"),
-                            "eligible": eligibility["eligible"],
-                            "eligibility_reason": eligibility["reason"],
-                            "eligibility_checks": eligibility["checks"],
-                            "bypassed_for_testing": eligibility.get("bypassed_for_testing", False)  # Include bypass flag
+                            "eligible": eligibility.get("eligible", False) if eligibility else False,
+                            "eligibility_reason": eligibility.get("reason", "Unknown") if eligibility else "Unknown",
+                            "eligibility_checks": eligibility.get("checks", {}) if eligibility else {},
+                            "bypassed_for_testing": eligibility.get("bypassed_for_testing", False) if eligibility else False
                         })
                     except Exception as e:
                         print(f"❌ Error processing candidate: {e}")
@@ -12917,8 +12946,7 @@ async def get_outbound_call_candidates(
                         # Skip this candidate and continue with others
                         continue
                 
-                # Return empty list if no candidates found (not an error)
-                # Middleware will automatically add CORS headers
+                # Return response - middleware will add CORS headers
                 return {
                     "candidates": enriched_candidates,
                     "total": len(enriched_candidates)
