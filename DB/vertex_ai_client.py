@@ -95,20 +95,20 @@ class VertexAIClient:
                 
                 # Use cheapest model for Gemini API: gemini-1.5-flash
                 # This is perfect for transcript extraction and costs less
+                # NOTE: For Gemini API Python SDK, use model name WITHOUT "models/" prefix
                 model_name = VERTEX_AI_MODEL
                 print(f"   VERTEX_AI_MODEL from config: {model_name}")
                 
-                if not model_name.startswith("models/"):
-                    if model_name.startswith("gemini-"):
-                        model_name = f"models/{model_name}"
-                    else:
-                        model_name = f"models/{model_name}"
+                # Remove "models/" prefix if present (Python SDK doesn't need it)
+                if model_name.startswith("models/"):
+                    model_name = model_name.replace("models/", "")
+                    print(f"   Removed 'models/' prefix: {model_name}")
                 
                 # Ensure we use the cheapest model for Gemini API
                 # Override to gemini-1.5-flash if using expensive models
-                if model_name in ["models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]:
+                if model_name in ["gemini-2.0-flash-exp", "gemini-1.5-pro", "models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]:
                     # Use cheapest model for simple extraction tasks
-                    model_name = "models/gemini-1.5-flash"
+                    model_name = "gemini-1.5-flash"
                     print(f"💡 Using cheapest Gemini model for cost efficiency: {model_name}")
                 
                 print(f"   Creating GenerativeModel with: {model_name}")
@@ -120,11 +120,11 @@ class VertexAIClient:
                 print(f"   Error type: {type(e).__name__}")
                 import traceback
                 traceback.print_exc()
-                # Try cheapest model as fallback
+                # Try cheapest model as fallback (without models/ prefix for Python SDK)
                 try:
-                    print(f"   Trying fallback model: models/gemini-1.5-flash")
-                    self.model = genai.GenerativeModel("models/gemini-1.5-flash")
-                    print("✅ Using cheapest Gemini model (fallback): models/gemini-1.5-flash")
+                    print(f"   Trying fallback model: gemini-1.5-flash")
+                    self.model = genai.GenerativeModel("gemini-1.5-flash")
+                    print("✅ Using cheapest Gemini model (fallback): gemini-1.5-flash")
                 except Exception as fallback_error:
                     print(f"❌ Fallback model also failed: {fallback_error}")
                     self.model = None
