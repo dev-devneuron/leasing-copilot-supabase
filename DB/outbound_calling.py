@@ -786,14 +786,72 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
             transcript_snippet = transcript[:8000] if len(transcript) > 8000 else transcript
             print(f"Using transcript snippet: {len(transcript_snippet)} chars")
             
+            # Log transcript analysis
+            print(f"\n📄 TRANSCRIPT ANALYSIS:")
+            print(f"   Full transcript length: {len(transcript)} chars")
+            print(f"   Snippet length (sent to Gemini): {len(transcript_snippet)} chars")
+            print(f"   Transcript truncated: {len(transcript) > 8000}")
+            
+            # Analyze transcript content
+            user_lines = [line for line in transcript_snippet.split('\n') if line.strip().startswith(('User:', 'Customer:'))]
+            bot_lines = [line for line in transcript_snippet.split('\n') if line.strip().startswith(('Bot:', 'Assistant:', 'AI:')) or 'Riley' in line]
+            
+            print(f"   User/Customer lines found: {len(user_lines)}")
+            print(f"   Bot/Assistant lines found: {len(bot_lines)}")
+            
+            if user_lines:
+                print(f"   Sample user lines (first 3):")
+                for i, line in enumerate(user_lines[:3], 1):
+                    print(f"      {i}. {line[:100]}..." if len(line) > 100 else f"      {i}. {line}")
+            
+            # Check for email patterns in transcript
+            email_patterns = [
+                r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',  # Standard email
+                r'\b\w+\s+at\s+\w+\s+dot\s+\w+\b',  # Spoken email
+                r'\b\w+\s+@\s+\w+\s+\.\s+\w+\b',  # Spoken with @
+            ]
+            found_email_patterns = []
+            for pattern in email_patterns:
+                matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
+                if matches:
+                    found_email_patterns.extend(matches)
+            
+            if found_email_patterns:
+                print(f"   ⚠️  Potential email patterns found in transcript: {found_email_patterns[:5]}")
+            else:
+                print(f"   ℹ️  No obvious email patterns detected in transcript")
+            
+            # Check for name patterns
+            name_patterns = [
+                r'\b(?:my name is|I\'m|I am|this is|call me|name\'s)\s+([A-Z][a-z]+)\b',
+                r'\b(?:Hi|Hello),?\s+([A-Z][a-z]+)\b',
+            ]
+            found_name_patterns = []
+            for pattern in name_patterns:
+                matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
+                if matches:
+                    found_name_patterns.extend([m for m in matches if m.lower() not in ['riley', 'assistant', 'bot', 'ai']])
+            
+            if found_name_patterns:
+                print(f"   ⚠️  Potential name patterns found: {found_name_patterns[:5]}")
+            else:
+                print(f"   ℹ️  No obvious name patterns detected")
+            
+            print(f"\n   📋 FULL ORIGINAL TRANSCRIPT BEING SENT TO GEMINI:")
+            print(f"   {'='*80}")
+            print(f"   {transcript_snippet}")
+            print(f"   {'='*80}")
+            
             # Build PERFECTED prompt with enhanced extraction rules
             prompt = f"""You are an expert data extraction specialist. Extract ONLY customer information from a phone call transcript.
 
 ⚠️ CRITICAL RULES:
-1. The AI assistant is named "Riley" - IGNORE EVERYTHING Riley/Bot/Assistant says
+1. The AI assistant is named "Riley" - IGNORE EVERYTHING Riley/Bot/Assistant says EXCEPT when Riley confirms customer info
 2. ONLY extract from CUSTOMER/USER statements (lines starting with "User:", "Customer:", or direct customer speech)
-3. Be thorough - extract ALL available information, even if partially mentioned
-4. Normalize spoken formats (e.g., "at" = @, "dot" = .)
+3. EXCEPTION: If AI confirms customer email/name and customer says "yes" or "correct", extract from AI's confirmation
+   Example: AI: "Your email is john@gmail.com, correct?" User: "Yes" → Extract "john@gmail.com"
+4. Be thorough - extract ALL available information, even if partially mentioned
+5. Normalize spoken formats (e.g., "at" = @, "dot" = .)
 
 TRANSCRIPT FORMAT IDENTIFICATION:
 - "User:" or "Customer:" lines = CUSTOMER SPEECH (EXTRACT FROM THESE)
@@ -802,18 +860,23 @@ TRANSCRIPT FORMAT IDENTIFICATION:
 
 DETAILED EXTRACTION RULES:
 
-1. EMAIL (HIGH PRIORITY):
-   - Extract ANY email mentioned: "my email is X", "email X", "X at Y dot com", "X@Y.com"
+1. EMAIL (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
+   - Extract ANY email mentioned: "my email is X", "email X", "X at Y dot com", "X@Y.com", "email address X"
    - Normalize spoken: "at" → @, "dot" → ., remove spaces
    - Accept partial emails if reconstructable (e.g., "rehan at gmail" → "rehan@gmail.com")
-   - Return null ONLY if absolutely no email mentioned
+   - Look for email patterns even in indirect speech: "send to X", "contact at X", "reach me at X"
+   - Check if AI assistant asks for email and customer provides it (even if not explicitly labeled)
+   - If customer says "yes" or "correct" after AI confirms email, extract from AI's confirmation
+   - Return null ONLY if absolutely no email mentioned anywhere in entire transcript
 
-2. CUSTOMER_NAME (HIGH PRIORITY):
-   - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X"
+2. CUSTOMER_NAME (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
+   - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X", "I go by X"
    - Extract FIRST NAME if full name given (e.g., "John Smith" → "John")
    - MUST be a real person name (2+ characters, not generic words)
    - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
-   - If name unclear but email found, infer from email username if reasonable
+   - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech
+   - If customer confirms their name when AI asks, extract from context
+   - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John")
    - Return null ONLY if no name mentioned and cannot infer from email
 
 3. INQUIRY_PROPERTY (MEDIUM PRIORITY):
@@ -857,6 +920,12 @@ EXAMPLES:
 - Customer: "Yeah, my name is John and email is john at gmail dot com"
   → {{"email": "john@gmail.com", "customer_name": "John", "inferred_name": "John", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
 
+- AI: "Could you provide your email?" Customer: "Yes, it's john@gmail.com"
+  → {{"email": "john@gmail.com", "customer_name": null, "inferred_name": "John", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
+
+- AI: "Thank you, Rehan. Your email is rehan@gmail.com, correct?" Customer: "Yes"
+  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inferred_name": "Rehan", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
+
 - Only bot speaks: "Riley speaking, how can I help?"
   → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": null, "inquiry_purpose": null, "region": null}}
 
@@ -867,11 +936,7 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
             
             print(f"\n📤 SENDING PROMPT TO GEMINI:")
             print(f"   Prompt length: {len(prompt)} chars")
-            print(f"\n   FULL TRANSCRIPT BEING ANALYZED:")
-            print(f"   {'-'*80}")
-            print(f"   {transcript_snippet}")
-            print(f"   {'-'*80}")
-            print(f"\n   Prompt preview (first 1000 chars):\n{prompt[:1000]}\n...")
+            print(f"   Prompt preview (first 1000 chars):\n{prompt[:1000]}\n...")
             
             try:
                 resp = ai_client.generate_content(prompt).strip()
@@ -1007,6 +1072,20 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                 print(f"   - Property: {inquiry_property or 'None'}")
                 print(f"   - Purpose: {inquiry_purpose or 'None'}")
                 print(f"   - Region: {region or 'None'}")
+                
+                # Check if we got null for critical fields
+                has_email_or_name = bool(email or inferred_name)
+                has_any_data = bool(email or inferred_name or inquiry_property or inquiry_purpose)
+                
+                if not has_email_or_name:
+                    print(f"   ⚠️  WARNING: No email or name extracted from this transcript")
+                    if has_any_data:
+                        print(f"   ℹ️  But we did find inquiry context (property/purpose) - will continue searching for email/name")
+                    else:
+                        print(f"   ❌ No useful data extracted - this call transcript may not contain customer info")
+                else:
+                    print(f"   ✅ Successfully extracted email or name!")
+                
                 print(f"{'='*80}\n")
             else:
                 print(f"\n❌ FAILED TO EXTRACT JSON FROM GEMINI RESPONSE")
@@ -1230,14 +1309,14 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                     "call_summary": None,
                 }
                 
-                # Get recent calls for this phone number (up to 5 most recent)
+                # Get recent calls for this phone number (up to 10 most recent to find email/name)
                 print(f"   🔍 Searching for recent calls with transcripts for {phone}...")
                 recent_calls = candidate_session.exec(
                     select(CallRecord)
                     .where(CallRecord.caller_number == phone)
                     .where(CallRecord.transcript.isnot(None))
                     .order_by(CallRecord.created_at.desc())
-                    .limit(5)
+                    .limit(10)  # Increased from 5 to 10 to find email/name in older calls
                 ).all()
                 
                 print(f"   📊 Found {len(recent_calls)} recent call(s) with transcripts")
@@ -1368,10 +1447,16 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                                     print(f"      ✅ Stored inquiry context, continuing to next call...")
                                 else:
                                     print(f"      ⏭️  Already have inquiry context, skipping...")
-                                print(f"      ➡️  Continuing to next call...")
+                                print(f"      ➡️  MOVING TO NEXT CALL TRANSCRIPT - searching for email/name...")
                                 continue  # Keep searching for email/name
                             else:
-                                print(f"      ⚠️  No extractable data in this call, trying next...")
+                                print(f"      ⚠️  No extractable data in this call transcript")
+                                print(f"      📋 Extraction returned all null values:")
+                                print(f"         - email: {temp_extracted.get('email')}")
+                                print(f"         - inferred_name: {temp_extracted.get('inferred_name')}")
+                                print(f"         - inquiry_property: {temp_extracted.get('inquiry_property')}")
+                                print(f"         - inquiry_purpose: {temp_extracted.get('inquiry_purpose')}")
+                                print(f"      ➡️  MOVING TO NEXT CALL TRANSCRIPT for {phone}...")
                         except Exception as e:
                             print(f"      ❌ Error extracting from call {recent_call.call_id}: {e}")
                             import traceback
