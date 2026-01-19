@@ -2680,12 +2680,12 @@ async def options_create_realtor(request: Request):
 
 @app.post("/CreateRealtor")
 async def create_realtor_endpoint(
+    request: Request,
     name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
     contact: str = Form(...),
     property_manager_id: int = Form(...),
-    request: Request = None,
 ):
     """Create a new Realtor under a Property Manager."""
     try:
@@ -2767,7 +2767,7 @@ async def options_login(request: Request):
     )
 
 @app.post("/login")
-async def login_realtor(payload: dict = Body(...), request: Request = None):
+async def login_realtor(request: Request, payload: dict = Body(...)):
     """Login endpoint for Realtors (must belong to a Property Manager)."""
     email = payload.get("email")
     password = payload.get("password")
@@ -2817,7 +2817,7 @@ async def options_property_manager_login(request: Request):
     )
 
 @app.post("/property-manager-login")
-async def login_property_manager(payload: dict = Body(...), request: Request = None):
+async def login_property_manager(request: Request, payload: dict = Body(...)):
     """Login endpoint for Property Managers."""
     email = payload.get("email")
     password = payload.get("password")
@@ -5630,6 +5630,7 @@ async def options_book_demo(request: Request):
 
 @app.post("/book-demo")
 def book_demo(
+    request: Request,
     name: str = Body(...),
     email: str = Body(...),
     phone: str = Body(...),
@@ -5638,7 +5639,6 @@ def book_demo(
     preferred_time: Optional[str] = Body(None),  # e.g., "10:00 AM"
     timezone: Optional[str] = Body(None),  # e.g., "America/New_York"
     notes: Optional[str] = Body(None),
-    request: Request = None,
 ):
     """
     Public endpoint to book a demo. No authentication required.
@@ -5706,12 +5706,12 @@ async def options_contact(request: Request):
 
 @app.post("/contact")
 def submit_contact_form(
+    request: Request,
     name: str = Body(...),
     email: str = Body(...),
     message: str = Body(...),
     phone: Optional[str] = Body(None),
     subject: Optional[str] = Body(None),
-    request: Request = None,
 ):
     """
     Public endpoint to submit a contact form. No authentication required.
@@ -12818,9 +12818,9 @@ async def options_outbound_calls_candidates(request: Request):
 
 @app.get("/outbound-calls/candidates")
 async def get_outbound_call_candidates(
+    request: Request,
     limit: int = 50,
-    current_user: Dict[str, Any] = Depends(get_current_user_data),
-    request: Request = None
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
     Get list of ALL candidates for outbound calling.
@@ -13142,11 +13142,11 @@ async def options_outbound_calls_contacts(request: Request):
 
 @app.get("/outbound-calls/contacts")
 async def get_contacts(
+    request: Request,
     limit: int = 50,
     offset: int = 0,
     opted_out: Optional[bool] = None,
-    current_user: Dict[str, Any] = Depends(get_current_user_data),
-    request: Request = None
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
     Get list of contacts with their consent and opt-out status.
@@ -13212,10 +13212,10 @@ async def options_outbound_calls_opt_out(request: Request):
 
 @app.post("/outbound-calls/contacts/{contact_id}/opt-out")
 async def manually_opt_out_contact(
+    request: Request,
     contact_id: int,
     method: str = Body("manual", embed=True),
-    current_user: Dict[str, Any] = Depends(get_current_user_data),
-    request: Request = None
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
     Manually opt out a contact (for admin/PM use).
@@ -13260,10 +13260,10 @@ async def options_outbound_calls_consent(request: Request):
 
 @app.post("/outbound-calls/contacts/{contact_id}/consent")
 async def record_contact_consent(
+    request: Request,
     contact_id: int,
     source: str = Body("manual", embed=True),
-    current_user: Dict[str, Any] = Depends(get_current_user_data),
-    request: Request = None
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
     Record consent for a contact (for admin/PM use).
@@ -13307,8 +13307,8 @@ async def options_outbound_calls_test_bypass(request: Request):
 
 @app.get("/outbound-calls/test-bypass-status")
 async def check_bypass_status(
-    current_user: Dict[str, Any] = Depends(get_current_user_data),
-    request: Request = None
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
     Check if testing bypass is enabled (for debugging).
@@ -13341,9 +13341,9 @@ async def options_outbound_calls_analytics(request: Request):
 
 @app.get("/outbound-calls/analytics")
 async def get_outbound_calling_analytics(
+    request: Request,
     days: int = 30,
-    current_user: Dict[str, Any] = Depends(get_current_user_data),
-    request: Request = None
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
     Get analytics for outbound calling system.
