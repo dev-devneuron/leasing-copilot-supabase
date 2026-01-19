@@ -421,336 +421,229 @@ def record_opt_out(
 # TRANSCRIPT EXTRACTION
 # ============================================================================
 
-def extract_name_and_region_from_transcript(transcript: Optional[str]) -> Dict[str, Optional[str]]:
+def _split_transcript(transcript: str) -> Dict[str, str]:
+    """Split transcript into user/bot/all text blobs."""
+    lines = transcript.splitlines()
+    user_lines: List[str] = []
+    bot_lines: List[str] = []
+    other_lines: List[str] = []
+
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if s.lower().startswith("user:"):
+            user_lines.append(s)
+        elif s.lower().startswith("bot:"):
+            bot_lines.append(s)
+        else:
+            other_lines.append(s)
+
+    return {
+        "user": "\n".join(user_lines),
+        "bot": "\n".join(bot_lines),
+        "all": "\n".join(lines),
+    }
+
+
+def _normalize_spoken_email(raw: str) -> Optional[str]:
     """
-    Extract caller name and region/location from call transcript using AI.
-    
-    Uses regex patterns first to catch common phrases, then AI for more complex cases.
-    Specifically ignores bot/assistant names (like "Riley") and extracts the caller's name.
-    
-    Args:
-        transcript: Call transcript text
-    
+    Best-effort normalization for transcripts like:
+    - "rehan at g mail dot com"
+    - "rehan at gmail dot com"
+    - "rehan@gmail.com"
+    """
+    import re
+
+    if not raw:
+        return None
+
+    s = raw.strip().lower()
+    s = s.replace(" at ", "@").replace(" dot ", ".")
+    s = s.replace(" (at) ", "@").replace(" (dot) ", ".")
+    s = s.replace(" g mail ", " gmail ").replace(" g-mail ", " gmail ")
+    s = s.replace(" gmail ", "gmail")
+    s = s.replace(" yahoo ", "yahoo").replace(" outlook ", "outlook").replace(" hotmail ", "hotmail")
+    s = s.replace(" underscore ", "_").replace(" dash ", "-").replace(" hyphen ", "-")
+    s = re.sub(r"\s+", "", s)
+
+    # Basic sanity
+    if "@" not in s or "." not in s.split("@")[-1]:
+        return None
+
+    # Validate with a simple email regex
+    if re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", s):
+        return s
+    return None
+
+
+def _infer_name_from_email(email: str) -> Optional[str]:
+    import re
+
+    if not email or "@" not in email:
+        return None
+    local = email.split("@", 1)[0]
+    local = re.sub(r"[^a-zA-Z._\-]", "", local).strip("._-")
+    if not local:
+        return None
+    # prefer first segment
+    first = re.split(r"[._\-]+", local)[0]
+    if not first:
+        return None
+    return first[:1].upper() + first[1:].lower()
+
+
+def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str, Optional[str]]:
+    """
+    Extract **caller email first**, then infer name, plus last-call purpose and property/address.
+
+    Regex-first. Uses AI (Vertex/Gemini) only as a fallback when regex can't find anything useful.
+
     Returns:
         {
-            "name": str or None,
-            "region": str or None  # City, state, or region mentioned
+          "email": str|None,
+          "inferred_name": str|None,
+          "region": str|None,
+          "inquiry_property": str|None,
+          "inquiry_purpose": str|None,
+          "inquiry_summary": str|None,
         }
     """
-    if not transcript or not transcript.strip():
-        return {"name": None, "region": None}
-    
     import re
-    
-    # First, try regex-based extraction for common patterns (faster and more reliable)
-    # Look for patterns like "my name is X", "I'm X", "this is X", etc.
-    # IMPORTANT: Focus on USER lines, not BOT lines
-    
-    # Expanded bot names to filter out
-    bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
-    bot_phrases = ['this is riley', 'riley speaking', 'i am riley', 'i\'m riley', 'assistant speaking', 'riley', 'speaking']
-    
-    extracted_name = None
-    
-    # Split transcript into lines to better identify User vs Bot
-    lines = transcript.split('\n')
-    user_lines = []
-    bot_lines = []
-    
-    for line in lines:
-        line_lower = line.lower().strip()
-        if line.startswith('User:') or line.startswith('user:'):
-            user_lines.append(line)
-        elif line.startswith('Bot:') or line.startswith('bot:'):
-            bot_lines.append(line)
-        # If no prefix, try to infer from content
-        elif any(phrase in line_lower for phrase in ['my name is', 'i\'m', 'i am', 'call me']):
-            user_lines.append(line)
-        elif any(phrase in line_lower for phrase in ['this is', 'speaking', 'how can i assist']):
-            bot_lines.append(line)
-    
-    # Pattern 1: Look for "my name is [name]" in User lines ONLY
-    user_name_patterns = [
-        r'(?:my name is|I\'m|I am|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
-        r'name\s+is\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
-    ]
-    
-    # Search in user lines first
-    for line in user_lines:
-        for pattern in user_name_patterns:
-            matches = re.findall(pattern, line, re.IGNORECASE)
-            if matches:
-                for match in matches:
-                    name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
-                    if name:
-                        # Clean up the name (remove "speaking" and other bot words)
-                        name = re.sub(r'\s+speaking\s*', '', name, flags=re.IGNORECASE).strip()
-                        name = re.sub(r'^(riley|assistant|bot)\s+', '', name, flags=re.IGNORECASE).strip()
-                        # Check if it's not a bot name
-                        name_lower = name.lower().strip()
-                        if (name_lower not in bot_names and 
-                            not any(bp in name_lower for bp in bot_phrases) and 
-                            len(name) > 1 and
-                            name_lower != 'speaking' and
-                            'riley' not in name_lower):
-                            extracted_name = name
-                            break
-                if extracted_name:
-                    break
-        if extracted_name:
-            break
-    
-    # Pattern 2: Look for when bot addresses the caller (e.g., "Thank you, Rehan")
-    # This should be in Bot lines ONLY
-    if not extracted_name:
-        address_patterns = [
-            r'(?:thank you|thanks|hi|hello|hey),?\s+([A-Z][a-z]+)(?:\.|,|\s|$)',
-            r'(?:thank you|thanks),?\s+([A-Z][a-z]+)\.',
-        ]
-        # Only search in bot lines
-        for line in bot_lines:
-            for pattern in address_patterns:
-                matches = re.findall(pattern, line, re.IGNORECASE)
-                if matches:
-                    for match in matches:
-                        name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
-                        if name:
-                            name = re.sub(r'\s+speaking\s*', '', name, flags=re.IGNORECASE).strip()
-                            name = re.sub(r'^(riley|assistant|bot)\s+', '', name, flags=re.IGNORECASE).strip()
-                            name_lower = name.lower().strip()
-                            if (name_lower not in bot_names and 
-                                not any(bp in name_lower for bp in bot_phrases) and 
-                                len(name) > 1 and
-                                name_lower != 'speaking' and
-                                'riley' not in name_lower):
-                                extracted_name = name
-                                break
-                    if extracted_name:
-                        break
-            if extracted_name:
+
+    if not transcript or not transcript.strip():
+        return {
+            "email": None,
+            "inferred_name": None,
+            "region": None,
+            "inquiry_property": None,
+            "inquiry_purpose": None,
+            "inquiry_summary": None,
+        }
+
+    parts = _split_transcript(transcript)
+    user_text = parts["user"] or parts["all"]
+    all_text = parts["all"]
+
+    # 1) EMAIL (priority #1)
+    email: Optional[str] = None
+
+    # direct email
+    m = re.search(r"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", user_text)
+    if m:
+        email = m.group(1).strip().lower()
+
+    # spoken email patterns
+    if not email:
+        # capture a window around "email" or "at ... dot ..."
+        candidates = []
+        for mm in re.finditer(r"(my email is|email is)\s+(.{0,80})", user_text, re.IGNORECASE):
+            candidates.append(mm.group(2))
+        # generic "xxx at yyy dot com"
+        for mm in re.finditer(r"([a-zA-Z0-9._\-\s]+)\s+at\s+([a-zA-Z0-9\-\s]+)\s+(dot\s+[a-zA-Z0-9\-\s]+)", user_text, re.IGNORECASE):
+            candidates.append(mm.group(0))
+        for c in candidates:
+            normalized = _normalize_spoken_email(c)
+            if normalized:
+                email = normalized
                 break
-    
-    # Pattern 3: Look for email patterns that might contain name (e.g., "rehan at gmail")
-    # Only search in user lines
-    if not extracted_name:
-        email_patterns = [
-            r'my email is\s+([a-z]+)\s+at',
-            r'email is\s+([a-z]+)\s+at',
-            r'([a-z]+)\s+at\s+gmail',
-            r'([a-z]+)\s+at\s+[a-z]+\s+dot\s+com',  # "rehan at gmail dot com"
-        ]
-        for line in user_lines:
-            for pattern in email_patterns:
-                matches = re.findall(pattern, line, re.IGNORECASE)
-                if matches:
-                    for match in matches:
-                        name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
-                        if name:
-                            name = name.capitalize()  # Capitalize first letter
-                            name_lower = name.lower().strip()
-                            if (name_lower not in bot_names and 
-                                not any(bp in name_lower for bp in bot_phrases) and 
-                                len(name) > 1 and
-                                'riley' not in name_lower):
-                                extracted_name = name
-                                break
-                    if extracted_name:
-                        break
-            if extracted_name:
-                break
-    
-    # Extract region/location patterns
-    region_patterns = [
-        r'(?:from|in|at|located in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+)?)',
-        r'([A-Z][a-z]+,\s+[A-Z][a-z]+)',  # "City, State" format
-    ]
-    
-    extracted_region = None
-    for pattern in region_patterns:
-        matches = re.findall(pattern, transcript)
-        if matches:
-            # Filter out common non-location words
-            non_locations = ['apartment', 'property', 'address', 'road', 'street', 'avenue']
-            for match in matches:
-                region = match.strip() if isinstance(match, str) else match[0].strip() if match else None
-                if region and not any(nl in region.lower() for nl in non_locations):
-                    extracted_region = region
-                    break
-            if extracted_region:
-                break
-    
-    # If we found both name and region via regex, return early
-    if extracted_name and extracted_region:
-        return {"name": extracted_name, "region": extracted_region}
-    
-    # If we found name via regex, use AI only for region
-    if extracted_name:
-        # Still use AI to refine region extraction
-        pass  # Continue to AI extraction for region
-    
-    try:
-        # Get Vertex AI client
-        ai_client = get_vertex_ai_client()
-        if not ai_client or not ai_client.is_available():
-            print("⚠️  AI client not available for transcript extraction")
-            return {"name": None, "region": None}
-        
-        # Create prompt for extraction
-        # If we already have name from regex, focus on region
-        if extracted_name:
-            prompt = f"""Extract the location/region from this phone call transcript. The caller's name is already known: {extracted_name}
+
+    inferred_name = _infer_name_from_email(email) if email else None
+
+    # 2) PROPERTY / ADDRESS
+    inquiry_property: Optional[str] = None
+    # common US-ish address
+    addr_match = re.search(
+        r"\b(\d{1,6}\s+[A-Za-z0-9.\s]{2,60}\s+(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Wy|Parkway|Pkwy)\b(?:[^\n]{0,80})?)",
+        all_text,
+        re.IGNORECASE,
+    )
+    if addr_match:
+        inquiry_property = addr_match.group(1).strip()
+    else:
+        # "address or location ..." phrases
+        m2 = re.search(r"(?:address|property|apartment)\s+(?:at|is)?\s*[:,]?\s*([^\n]{10,120})", all_text, re.IGNORECASE)
+        if m2:
+            inquiry_property = m2.group(1).strip()
+
+    # 3) PURPOSE (simple rules)
+    inquiry_purpose: Optional[str] = None
+    t = all_text.lower()
+    if any(k in t for k in ["book", "booking", "tour", "visit", "schedule"]):
+        inquiry_purpose = "booking a tour"
+    elif any(k in t for k in ["availability", "available", "vacancy", "vacant"]):
+        inquiry_purpose = "availability inquiry"
+    elif any(k in t for k in ["price", "rent", "cost", "how much"]):
+        inquiry_purpose = "pricing inquiry"
+    elif any(k in t for k in ["maintenance", "repair", "broken", "leak"]):
+        inquiry_purpose = "maintenance request"
+    elif any(k in t for k in ["info", "information", "details", "tell me about"]):
+        inquiry_purpose = "general information"
+
+    # 4) REGION (lightweight)
+    region: Optional[str] = None
+    city_state = re.search(r"\b([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)\b", all_text)
+    if city_state:
+        region = city_state.group(1).strip()
+    else:
+        state = re.search(r"\b(California|Texas|Florida|New York|New Jersey|Virginia|Washington)\b", all_text, re.IGNORECASE)
+        if state:
+            region = state.group(1).strip()
+
+    # 5) SUMMARY
+    summary_parts = []
+    if inquiry_purpose:
+        summary_parts.append(f"Purpose: {inquiry_purpose}")
+    if inquiry_property:
+        summary_parts.append(f"Property: {inquiry_property}")
+    if email:
+        summary_parts.append(f"Email: {email}")
+    inquiry_summary = " | ".join(summary_parts) if summary_parts else None
+
+    # 6) AI fallback (second priority)
+    if not email and not inquiry_property and not inquiry_purpose:
+        try:
+            ai_client = get_vertex_ai_client()
+            if ai_client and ai_client.is_available():
+                prompt = f"""Extract customer intent from this transcript.
+Return ONLY JSON with keys: email, inquiry_property, inquiry_purpose, region.
+If unknown, use null.
 
 Transcript:
-{transcript[:2000]}
+{transcript[:2500]}
+"""
+                resp = ai_client.generate_content(prompt).strip()
+                # find JSON
+                start = resp.find("{")
+                end = resp.rfind("}") + 1
+                if start >= 0 and end > start:
+                    data = json.loads(resp[start:end])
+                    email = email or (data.get("email") or None)
+                    inquiry_property = inquiry_property or (data.get("inquiry_property") or None)
+                    inquiry_purpose = inquiry_purpose or (data.get("inquiry_purpose") or None)
+                    region = region or (data.get("region") or None)
+                    if email and not inferred_name:
+                        inferred_name = _infer_name_from_email(email)
+                    if not inquiry_summary:
+                        parts2 = []
+                        if inquiry_purpose:
+                            parts2.append(f"Purpose: {inquiry_purpose}")
+                        if inquiry_property:
+                            parts2.append(f"Property: {inquiry_property}")
+                        if email:
+                            parts2.append(f"Email: {email}")
+                        inquiry_summary = " | ".join(parts2) if parts2 else None
+        except Exception as e:
+            print(f"⚠️  AI fallback extraction failed: {e}")
 
-Instructions:
-1. Extract the location/region mentioned by the CALLER:
-   - City, state, region, or area
-   - Look for addresses or locations the caller mentions
-   - Common formats: "Santa Clara, California", "New York", "from California"
-   
-2. Return ONLY a JSON object with "name" and "region" fields
-3. Use the provided name: {extracted_name}
-4. If region is not found, use null
-
-Example output:
-{{"name": "{extracted_name}", "region": "California"}}
-or
-{{"name": "{extracted_name}", "region": null}}
-
-Return only the JSON object:"""
-        else:
-            prompt = f"""Extract the CALLER's name and location/region from this phone call transcript.
-
-CRITICAL: This is a conversation between a bot/assistant and a caller. The bot may introduce itself with a name (like "Riley", "Assistant", etc.). You MUST extract the CALLER's name, NOT the bot's name.
-
-Transcript:
-{transcript[:2000]}
-
-Instructions:
-1. Extract the CALLER's name (the person calling, NOT the bot/assistant):
-   - Look for phrases like: "my name is [name]", "I'm [name]", "this is [name]", "I am [name]"
-   - Look for when the bot addresses the caller by name (e.g., "Thank you, [name]")
-   - IGNORE the bot's name when it introduces itself (e.g., "This is Riley speaking" - Riley is the bot, not the caller)
-   - IGNORE any name that appears in "Bot:" lines or bot introductions
-   - Common bot names to IGNORE: Riley, Assistant, Bot, AI, Lease, Leasap
-   
-2. Extract the location/region if mentioned by the CALLER:
-   - City, state, region, or area mentioned
-   - Look for addresses or locations the caller mentions
-   - Common formats: "Santa Clara, California", "New York", "from California"
-   
-3. Return ONLY a JSON object with "name" and "region" fields
-4. If information is not found, use null for that field
-5. Do not include any explanation, only the JSON object
-
-Examples:
-- Bot: "This is Riley speaking" + User: "my name is Rehan" → {{"name": "Rehan", "region": null}}
-- Bot: "Thank you, John" → {{"name": "John", "region": null}}
-- User: "I'm Sarah from New York" → {{"name": "Sarah", "region": "New York"}}
-- User: "my name is Rehan" + mentions "Santa Clara, California" → {{"name": "Rehan", "region": "California"}}
-
-Return only the JSON object:"""
-        
-        # Generate extraction
-        response_text = ai_client.generate_content(prompt)
-        
-        # Parse JSON response
-        # Sometimes AI returns markdown code blocks, so we need to extract JSON
-        response_text = response_text.strip()
-        if response_text.startswith("```"):
-            # Remove markdown code blocks
-            lines = response_text.split("\n")
-            response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
-        if response_text.startswith("```json"):
-            lines = response_text.split("\n")
-            response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
-        
-        # Try to find JSON in the response
-        try:
-            # Look for JSON object in the response
-            start_idx = response_text.find("{")
-            end_idx = response_text.rfind("}") + 1
-            if start_idx >= 0 and end_idx > start_idx:
-                json_str = response_text[start_idx:end_idx]
-                extracted = json.loads(json_str)
-                ai_name = extracted.get("name")
-                ai_region = extracted.get("region")
-                
-                # Use regex-extracted name if available, otherwise use AI-extracted
-                final_name = extracted_name or ai_name
-                final_region = extracted_region or ai_region
-                
-                # Validate that AI didn't extract bot name
-                if ai_name:
-                    bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
-                    bot_phrases = ['riley speaking', 'this is riley', 'i am riley']
-                    ai_name_lower = ai_name.lower().strip()
-                    # Check if it's a bot name or contains bot phrases
-                    if (ai_name_lower in bot_names or 
-                        any(bp in ai_name_lower for bp in bot_phrases) or
-                        'speaking' in ai_name_lower):
-                        print(f"⚠️  AI extracted bot name '{ai_name}', using regex result or null")
-                        final_name = extracted_name or None
-                    else:
-                        # Clean up AI result (remove "speaking" if present)
-                        cleaned_name = ai_name.replace(' speaking', '').replace('Speaking', '').strip()
-                        if cleaned_name.lower() not in bot_names:
-                            final_name = cleaned_name
-                        else:
-                            final_name = extracted_name or None
-                
-                return {
-                    "name": final_name,
-                    "region": final_region
-                }
-        except json.JSONDecodeError:
-            pass
-        
-        # Fallback: try to parse the whole response
-        try:
-            extracted = json.loads(response_text)
-            ai_name = extracted.get("name")
-            ai_region = extracted.get("region")
-            
-            # Use regex-extracted name if available, otherwise use AI-extracted
-            final_name = extracted_name or ai_name
-            final_region = extracted_region or ai_region
-            
-            # Validate that AI didn't extract bot name
-            if ai_name:
-                bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
-                bot_phrases = ['riley speaking', 'this is riley', 'i am riley']
-                ai_name_lower = ai_name.lower().strip()
-                # Check if it's a bot name or contains bot phrases
-                if (ai_name_lower in bot_names or 
-                    any(bp in ai_name_lower for bp in bot_phrases) or
-                    'speaking' in ai_name_lower):
-                    print(f"⚠️  AI extracted bot name '{ai_name}', using regex result or null")
-                    final_name = extracted_name or None
-                else:
-                    # Clean up AI result (remove "speaking" if present)
-                    cleaned_name = ai_name.replace(' speaking', '').replace('Speaking', '').strip()
-                    if cleaned_name.lower() not in bot_names:
-                        final_name = cleaned_name
-                    else:
-                        final_name = extracted_name or None
-            
-            return {
-                "name": final_name,
-                "region": final_region
-            }
-        except json.JSONDecodeError:
-            print(f"⚠️  Failed to parse AI response as JSON: {response_text[:200]}")
-            # Return regex results if available
-            return {
-                "name": extracted_name,
-                "region": extracted_region
-            }
-            
-    except Exception as e:
-        print(f"⚠️  Error extracting name/region from transcript: {e}")
-        return {"name": None, "region": None}
+    return {
+        "email": email,
+        "inferred_name": inferred_name,
+        "region": region,
+        "inquiry_property": inquiry_property,
+        "inquiry_purpose": inquiry_purpose,
+        "inquiry_summary": inquiry_summary,
+    }
 
 
 # ============================================================================
@@ -849,52 +742,54 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                     print(f"⚠️  Error creating contact for {phone}: {e}")
                     continue  # Skip this candidate
             
-            # Extract name and region from transcript if available
+            # Extract customer intel from transcript (email-first + intent/property)
             # Only extract if transcript exists and is meaningful (at least 50 chars)
-            extracted_info = {"name": None, "region": None}
+            extracted_info = {
+                "email": None,
+                "inferred_name": None,
+                "region": None,
+                "inquiry_property": None,
+                "inquiry_purpose": None,
+                "inquiry_summary": None,
+            }
             transcript = call_info.get("transcript")
             if transcript and len(transcript.strip()) >= 50:
                 try:
-                    extracted_info = extract_name_and_region_from_transcript(transcript)
-                    
-                    # Final validation: reject bot names even if extraction returned them
-                    extracted_name = extracted_info.get("name")
-                    if extracted_name:
-                        bot_names = ['riley', 'assistant', 'bot', 'ai', 'lease', 'leasap', 'speaking']
-                        bot_phrases = ['riley speaking', 'this is riley', 'i am riley']
-                        name_lower = extracted_name.lower().strip()
-                        
-                        # If it's a bot name, reject it
-                        if (name_lower in bot_names or 
-                            any(bp in name_lower for bp in bot_phrases) or
-                            'riley' in name_lower or
-                            name_lower == 'speaking'):
-                            print(f"⚠️  Rejected bot name '{extracted_name}' from extraction")
-                            extracted_info["name"] = None
-                    
-                    # Update contact with extracted name if valid and not already set
-                    if extracted_info.get("name") and not contact.name:
-                        # Double-check it's not a bot name before storing
-                        final_name = extracted_info["name"]
-                        final_name_lower = final_name.lower().strip()
-                        if (final_name_lower not in bot_names and 
-                            not any(bp in final_name_lower for bp in bot_phrases) and
-                            'riley' not in final_name_lower):
-                            contact.name = final_name
+                    extracted_info = extract_contact_intel_from_transcript(transcript)
+
+                    # Store email if we extracted one and contact doesn't already have it
+                    if extracted_info.get("email") and not contact.email:
+                        contact.email = extracted_info["email"]
+                        session.add(contact)
+                        try:
+                            session.commit()
+                        except Exception:
+                            session.rollback()
+
+                    # Store inferred name ONLY if contact has no name (and it's not a known bot name)
+                    inferred_name = extracted_info.get("inferred_name")
+                    if inferred_name and not contact.name:
+                        bad = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
+                        if inferred_name.lower().strip() not in bad and "riley" not in inferred_name.lower():
+                            contact.name = inferred_name
                             session.add(contact)
                             try:
                                 session.commit()
                             except Exception:
                                 session.rollback()
-                        else:
-                            print(f"⚠️  Rejected bot name '{final_name}' before storing to contact")
-                            extracted_info["name"] = None
                 except Exception as e:
                     # Don't fail candidate processing if extraction fails
                     print(f"⚠️  Error extracting info from transcript: {e}")
                     import traceback
                     traceback.print_exc()
-                    extracted_info = {"name": None, "region": None}
+                    extracted_info = {
+                        "email": None,
+                        "inferred_name": None,
+                        "region": None,
+                        "inquiry_property": None,
+                        "inquiry_purpose": None,
+                        "inquiry_summary": None,
+                    }
             
             # In testing mode, show ALL candidates regardless of status
             # In production, we could filter here, but for now show all
@@ -906,8 +801,13 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                 "last_call_at": call_info["call_at"],
                 "call_transcript": call_info["transcript"],
                 "call_direction": call_info["direction"],
-                "extracted_name": extracted_info["name"],  # Name extracted from transcript
-                "extracted_region": extracted_info["region"],  # Region extracted from transcript
+                # extracted fields for frontend + outbound-call context
+                "extracted_email": extracted_info.get("email"),
+                "inferred_name": extracted_info.get("inferred_name"),
+                "extracted_region": extracted_info.get("region"),
+                "inquiry_property": extracted_info.get("inquiry_property"),
+                "inquiry_purpose": extracted_info.get("inquiry_purpose"),
+                "inquiry_summary": extracted_info.get("inquiry_summary"),
             })
             
             # Apply limit if specified

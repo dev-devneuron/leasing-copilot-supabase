@@ -12785,8 +12785,9 @@ async def get_outbound_call_candidates(
                         enriched_candidates.append({
                             "contact_id": contact.id,
                             "phone_number": contact.phone_number,
-                            "name": contact.name or candidate.get("extracted_name"),  # Use extracted name if contact name not set
-                            "email": contact.email,
+                            # Prefer stored contact fields, then extracted/inferred
+                            "name": contact.name or candidate.get("inferred_name"),
+                            "email": contact.email or candidate.get("extracted_email"),
                             "timezone": contact.timezone,
                             "consent_status": contact.consent_status,
                             "opted_out": contact.opted_out,
@@ -12797,8 +12798,12 @@ async def get_outbound_call_candidates(
                             "last_call_id": candidate.get("last_call_id"),
                             "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
                             "call_direction": candidate.get("call_direction", "inbound"),
-                            "extracted_name": candidate.get("extracted_name"),  # Name extracted from transcript
-                            "extracted_region": candidate.get("extracted_region"),  # Region extracted from transcript
+                            "extracted_email": candidate.get("extracted_email"),
+                            "inferred_name": candidate.get("inferred_name"),
+                            "extracted_region": candidate.get("extracted_region"),
+                            "inquiry_property": candidate.get("inquiry_property"),
+                            "inquiry_purpose": candidate.get("inquiry_purpose"),
+                            "inquiry_summary": candidate.get("inquiry_summary"),
                             "eligible": eligibility["eligible"],
                             "eligibility_reason": eligibility["reason"],
                             "eligibility_checks": eligibility["checks"],
@@ -12869,7 +12874,12 @@ async def trigger_single_outbound_call(
     Auth: Required (Admin/PM only)
     """
     import traceback
-    from DB.outbound_calling import get_or_create_contact, check_eligibility, trigger_outbound_call
+    from DB.outbound_calling import (
+        get_or_create_contact,
+        check_eligibility,
+        trigger_outbound_call,
+        extract_contact_intel_from_transcript,
+    )
     from DB.user_lookup import normalize_phone_number
     
     try:
@@ -12936,6 +12946,47 @@ async def trigger_single_outbound_call(
                             detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
                         )
                 
+                # Build re-engagement context from latest transcript and send to Vapi as metadata
+                last_transcript = None
+                last_call_id = None
+                last_call_at = None
+                try:
+                    last_call = session.exec(
+                        select(CallRecord)
+                        .where(CallRecord.caller_number == contact.phone_number)
+                        .order_by(CallRecord.created_at.desc())
+                    ).first()
+                    if last_call:
+                        last_transcript = last_call.transcript
+                        last_call_id = last_call.call_id
+                        last_call_at = last_call.created_at.isoformat() if last_call.created_at else None
+                except Exception as e:
+                    print(f"⚠️  Could not load last call transcript: {e}")
+
+                extracted_intel = {}
+                try:
+                    if last_transcript and len(last_transcript.strip()) >= 50:
+                        extracted_intel = extract_contact_intel_from_transcript(last_transcript)
+                        # persist email if found
+                        if extracted_intel.get("email") and not contact.email:
+                            contact.email = extracted_intel["email"]
+                            session.add(contact)
+                            session.commit()
+                except Exception as e:
+                    print(f"⚠️  Failed to extract intel from transcript: {e}")
+
+                reengagement_metadata = {
+                    "reengagementGoal": "Re-engage previously interested customers with AI-powered outreach.",
+                    "lastCallId": last_call_id,
+                    "lastCallAt": last_call_at,
+                    "lastInquirySummary": extracted_intel.get("inquiry_summary"),
+                    "lastInquiryPurpose": extracted_intel.get("inquiry_purpose"),
+                    "lastInquiryProperty": extracted_intel.get("inquiry_property"),
+                    "customerEmail": extracted_intel.get("email") or contact.email,
+                    "customerName": (contact.name or extracted_intel.get("inferred_name")),
+                    "customerRegion": extracted_intel.get("region"),
+                }
+
                 # Trigger call (will use PM's assigned Twilio number if from_number not provided)
                 try:
                     result = trigger_outbound_call(
@@ -12943,7 +12994,8 @@ async def trigger_single_outbound_call(
                         assistant_id=assistant_id,
                         from_number=from_number,
                         property_manager_id=property_manager_id,
-                        session=session
+                        session=session,
+                        metadata=reengagement_metadata,
                     )
                 except Exception as e:
                     print(f"❌ Error in trigger_outbound_call: {e}")
