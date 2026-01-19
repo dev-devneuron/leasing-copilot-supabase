@@ -752,13 +752,23 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
     # STEP 1: GEMINI AI EXTRACTION (PRIMARY - MUST TRY FIRST)
     # ============================================================================
     try:
+        print(f"\n{'='*80}")
+        print(f"🔍 GEMINI AI EXTRACTION - STARTING")
+        print(f"{'='*80}")
+        print(f"Transcript length: {len(transcript)} chars")
+        print(f"Transcript preview (first 500 chars):\n{transcript[:500]}\n...")
+        
         ai_client = get_vertex_ai_client()
+        print(f"AI Client available: {ai_client is not None}")
+        if ai_client:
+            print(f"AI Client is_available(): {ai_client.is_available()}")
+        
         if ai_client and ai_client.is_available():
-            print(f"🔍 Using Gemini AI for transcript extraction (primary method)...")
-            print(f"   Transcript length: {len(transcript)} chars")
+            print(f"✅ Gemini AI client is available - proceeding with extraction")
             
             # Use full transcript (up to 8000 chars for Gemini 1.5-flash)
             transcript_snippet = transcript[:8000] if len(transcript) > 8000 else transcript
+            print(f"Using transcript snippet: {len(transcript_snippet)} chars")
             
             # Build ULTRA-EXPLICIT prompt that aggressively filters bot responses
             prompt = f"""You are a professional data extraction specialist. Extract ONLY customer information from a phone call transcript.
@@ -815,10 +825,27 @@ TRANSCRIPT:
 
 Return ONLY the JSON object, no other text:"""
             
-            print(f"   Sending prompt to Gemini (length: {len(prompt)} chars)...")
-            resp = ai_client.generate_content(prompt).strip()
-            print(f"   Gemini response length: {len(resp)} chars")
-            print(f"   Gemini response preview: {resp[:300]}...")
+            print(f"\n📤 SENDING PROMPT TO GEMINI:")
+            print(f"   Prompt length: {len(prompt)} chars")
+            print(f"\n   FULL TRANSCRIPT BEING ANALYZED:")
+            print(f"   {'-'*80}")
+            print(f"   {transcript_snippet}")
+            print(f"   {'-'*80}")
+            print(f"\n   Prompt preview (first 1000 chars):\n{prompt[:1000]}\n...")
+            
+            try:
+                resp = ai_client.generate_content(prompt).strip()
+                print(f"\n📥 GEMINI RESPONSE RECEIVED:")
+                print(f"   Response length: {len(resp)} chars")
+                print(f"   FULL RESPONSE:\n{resp}")
+                print(f"\n{'='*80}")
+            except Exception as e:
+                print(f"\n❌ ERROR CALLING GEMINI:")
+                print(f"   Error type: {type(e).__name__}")
+                print(f"   Error message: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                raise
             
             # Extract JSON from response (try multiple methods)
             json_data = None
@@ -934,18 +961,36 @@ Return ONLY the JSON object, no other text:"""
                     print(f"   ✅ Extracted region: {region}")
                 
                 ai_success = True
-                print(f"   ✅ Gemini AI extraction COMPLETE: email={bool(email)}, name={bool(inferred_name)}, property={bool(inquiry_property)}, purpose={bool(inquiry_purpose)}, region={bool(region)}")
+                print(f"\n✅ GEMINI AI EXTRACTION COMPLETE:")
+                print(f"   - Email: {email or 'None'}")
+                print(f"   - Name: {inferred_name or 'None'}")
+                print(f"   - Property: {inquiry_property or 'None'}")
+                print(f"   - Purpose: {inquiry_purpose or 'None'}")
+                print(f"   - Region: {region or 'None'}")
+                print(f"{'='*80}\n")
             else:
-                print(f"   ❌ Failed to extract JSON from Gemini response")
-                print(f"   Full response: {resp}")
+                print(f"\n❌ FAILED TO EXTRACT JSON FROM GEMINI RESPONSE")
+                print(f"   Full response received:\n{resp}")
+                print(f"   Response type: {type(resp)}")
+                print(f"   Response length: {len(resp)}")
+                print(f"{'='*80}\n")
                 ai_success = False
         else:
-            print("⚠️  AI client not available, will use hybrid fallback")
+            print(f"\n⚠️  AI CLIENT NOT AVAILABLE")
+            if not ai_client:
+                print(f"   Reason: ai_client is None")
+            elif not ai_client.is_available():
+                print(f"   Reason: ai_client.is_available() returned False")
+            print(f"   Will use hybrid CRF/NER + Regex fallback")
+            print(f"{'='*80}\n")
             ai_success = False
     except Exception as e:
-        print(f"❌ AI extraction failed with exception: {e}")
+        print(f"\n❌ GEMINI AI EXTRACTION FAILED WITH EXCEPTION:")
+        print(f"   Error type: {type(e).__name__}")
+        print(f"   Error message: {str(e)}")
         import traceback
         traceback.print_exc()
+        print(f"{'='*80}\n")
         ai_success = False
 
     # ============================================================================
@@ -1128,12 +1173,18 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
             transcript = call_info.get("transcript")
             
             if transcript and len(transcript.strip()) >= 50:
-                print(f"\n📞 Extracting from transcript for {phone} (length: {len(transcript)} chars)")
+                print(f"\n{'='*80}")
+                print(f"📞 EXTRACTING FROM TRANSCRIPT FOR {phone}")
+                print(f"{'='*80}")
                 print(f"   Call ID: {call_info.get('call_id')}")
-                print(f"   Transcript preview: {transcript[:200]}...")
+                print(f"   Current contact.name: '{contact.name}'")
+                print(f"   Current contact.email: '{contact.email}'")
+                print(f"   Transcript length: {len(transcript)} chars")
+                print(f"   Transcript preview (first 500 chars):\n{transcript[:500]}\n...")
                 
                 try:
                     # ALWAYS re-extract (don't trust cached data)
+                    print(f"\n   Calling extract_contact_intel_from_transcript...")
                     extracted_info = extract_contact_intel_from_transcript(transcript)
                     
                     print(f"   ✅ Extraction result:")
@@ -1174,15 +1225,19 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                             print(f"   ➕ Adding new name: '{inferred_name}'")
                         
                         if should_update_name and inferred_clean not in bad and "riley" not in inferred_clean and len(inferred_name) > 1:
+                            old_name = contact.name
                             contact.name = inferred_name
                             session.add(contact)
                             try:
                                 session.commit()
-                                print(f"   ✅ Updated name: {inferred_name}")
+                                print(f"   ✅ Updated name: '{old_name}' → '{inferred_name}'")
                             except Exception:
                                 session.rollback()
+                                print(f"   ⚠️  Failed to commit name update")
                         elif inferred_clean in bad or "riley" in inferred_clean:
-                            print(f"   ❌ Rejected bad name: '{inferred_name}'")
+                            print(f"   ❌ Rejected bad name: '{inferred_name}' (matches bot name patterns)")
+                        else:
+                            print(f"   ℹ️  Keeping existing name: '{contact.name}' (inferred name '{inferred_name}' not better)")
                 except Exception as e:
                     # Don't fail candidate processing if extraction fails
                     print(f"   ❌ Error extracting info from transcript: {e}")

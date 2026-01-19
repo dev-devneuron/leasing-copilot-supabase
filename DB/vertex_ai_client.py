@@ -49,12 +49,21 @@ class VertexAIClient:
     """
     
     def __init__(self):
+        print(f"\n[VertexAIClient] __init__ called")
+        print(f"   USE_VERTEX_AI: {USE_VERTEX_AI}")
+        print(f"   VERTEX_AI_AVAILABLE: {VERTEX_AI_AVAILABLE}")
+        print(f"   GCP_PROJECT_ID: {GCP_PROJECT_ID}")
+        print(f"   GEMINI_API_KEY present: {bool(GEMINI_API_KEY)}")
+        
         self.use_vertex_ai = USE_VERTEX_AI and VERTEX_AI_AVAILABLE and GCP_PROJECT_ID
+        print(f"   Will use Vertex AI: {self.use_vertex_ai}")
+        
         self.model = None
         self.embedding_model = None
         
         if self.use_vertex_ai:
             try:
+                print(f"   Attempting to initialize Vertex AI...")
                 # Initialize Vertex AI
                 vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
                 self.model = GenerativeModel(VERTEX_AI_MODEL)
@@ -67,16 +76,28 @@ class VertexAIClient:
                 self.use_vertex_ai = False
                 self._init_gemini_api()
         else:
+            print(f"   Using Gemini API (USE_VERTEX_AI={USE_VERTEX_AI} or Vertex AI not configured)")
             self._init_gemini_api()
     
     def _init_gemini_api(self):
         """Initialize Gemini API as fallback. Uses cheapest model (gemini-1.5-flash) by default."""
+        print(f"\n[VertexAIClient] Initializing Gemini API...")
+        print(f"   GEMINI_API_AVAILABLE: {GEMINI_API_AVAILABLE}")
+        print(f"   GEMINI_API_KEY present: {bool(GEMINI_API_KEY)}")
+        if GEMINI_API_KEY:
+            print(f"   GEMINI_API_KEY preview: {GEMINI_API_KEY[:10]}...{GEMINI_API_KEY[-5:]}")
+        
         if GEMINI_API_AVAILABLE and GEMINI_API_KEY:
             try:
+                print(f"   Configuring genai with API key...")
                 genai.configure(api_key=GEMINI_API_KEY)
+                print(f"   ✅ genai.configure() successful")
+                
                 # Use cheapest model for Gemini API: gemini-1.5-flash
                 # This is perfect for transcript extraction and costs less
                 model_name = VERTEX_AI_MODEL
+                print(f"   VERTEX_AI_MODEL from config: {model_name}")
+                
                 if not model_name.startswith("models/"):
                     if model_name.startswith("gemini-"):
                         model_name = f"models/{model_name}"
@@ -90,17 +111,28 @@ class VertexAIClient:
                     model_name = "models/gemini-1.5-flash"
                     print(f"💡 Using cheapest Gemini model for cost efficiency: {model_name}")
                 
+                print(f"   Creating GenerativeModel with: {model_name}")
                 self.model = genai.GenerativeModel(model_name)
-                print(f"✅ Using Gemini API: {model_name}")
+                print(f"✅ Gemini API initialized successfully: {model_name}")
+                print(f"   Model object: {self.model}")
             except Exception as e:
                 print(f"⚠️  Gemini API initialization failed: {e}")
+                print(f"   Error type: {type(e).__name__}")
+                import traceback
+                traceback.print_exc()
                 # Try cheapest model as fallback
                 try:
+                    print(f"   Trying fallback model: models/gemini-1.5-flash")
                     self.model = genai.GenerativeModel("models/gemini-1.5-flash")
                     print("✅ Using cheapest Gemini model (fallback): models/gemini-1.5-flash")
-                except:
+                except Exception as fallback_error:
+                    print(f"❌ Fallback model also failed: {fallback_error}")
                     self.model = None
         else:
+            if not GEMINI_API_AVAILABLE:
+                print("⚠️  GEMINI_API_AVAILABLE is False - google.generativeai not imported")
+            if not GEMINI_API_KEY:
+                print("⚠️  GEMINI_API_KEY is not set")
             print("⚠️  No AI model available. Set GEMINI_API_KEY or configure Vertex AI.")
     
     def generate_content(
@@ -140,10 +172,38 @@ class VertexAIClient:
                 return response.text
             else:
                 # Gemini API generation
+                print(f"   [VertexAIClient] Calling Gemini API generate_content...")
+                print(f"   [VertexAIClient] Model: {self.model}")
                 response = self.model.generate_content(prompt)
-                return response.text
+                print(f"   [VertexAIClient] Response type: {type(response)}")
+                print(f"   [VertexAIClient] Response object: {response}")
+                
+                # Handle different response formats
+                if hasattr(response, 'text'):
+                    result = response.text
+                    print(f"   [VertexAIClient] Response.text length: {len(result)} chars")
+                    print(f"   [VertexAIClient] Response.text preview: {result[:200]}...")
+                elif hasattr(response, 'candidates') and len(response.candidates) > 0:
+                    # Alternative response format
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'content'):
+                        if hasattr(candidate.content, 'parts'):
+                            result = candidate.content.parts[0].text
+                        else:
+                            result = str(candidate.content)
+                    else:
+                        result = str(candidate)
+                    print(f"   [VertexAIClient] Extracted from candidates, length: {len(result)} chars")
+                else:
+                    result = str(response)
+                    print(f"   [VertexAIClient] Converted response to string, length: {len(result)} chars")
+                
+                return result
         except Exception as e:
-            print(f"Error generating content: {e}")
+            print(f"❌ [VertexAIClient] Error generating content: {e}")
+            print(f"   Error type: {type(e).__name__}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def embed_text(self, text: str, task_type: str = "retrieval_document") -> List[float]:
