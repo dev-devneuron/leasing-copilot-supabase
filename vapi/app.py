@@ -12808,10 +12808,19 @@ async def process_outbound_call_queue(
         }
 
 
+@app.options("/outbound-calls/candidates")
+async def options_outbound_calls_candidates(request: Request):
+    """Handle CORS preflight for outbound calls candidates endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
+
 @app.get("/outbound-calls/candidates")
 async def get_outbound_call_candidates(
     limit: int = 50,
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    current_user: Dict[str, Any] = Depends(get_current_user_data),
+    request: Request = None
 ):
     """
     Get list of ALL candidates for outbound calling.
@@ -12891,10 +12900,10 @@ async def get_outbound_call_candidates(
                         continue
                 
                 # Return empty list if no candidates found (not an error)
-                return {
+                return create_cors_json_response(content={
                     "candidates": enriched_candidates,
                     "total": len(enriched_candidates)
-                }
+                }, request=request)
                 
         except HTTPException:
             # Re-raise HTTP exceptions as-is
@@ -13123,12 +13132,21 @@ async def trigger_single_outbound_call(
         )
 
 
+@app.options("/outbound-calls/contacts")
+async def options_outbound_calls_contacts(request: Request):
+    """Handle CORS preflight for outbound calls contacts endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
+
 @app.get("/outbound-calls/contacts")
 async def get_contacts(
     limit: int = 50,
     offset: int = 0,
     opted_out: Optional[bool] = None,
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    current_user: Dict[str, Any] = Depends(get_current_user_data),
+    request: Request = None
 ):
     """
     Get list of contacts with their consent and opt-out status.
@@ -13156,7 +13174,7 @@ async def get_contacts(
         contacts = session.exec(query.offset(offset).limit(limit)).all()
         total = session.exec(select(func.count(Contact.id))).first()
         
-        return {
+        return create_cors_json_response(content={
             "contacts": [{
                 "id": c.id,
                 "phone_number": c.phone_number,
@@ -13181,14 +13199,23 @@ async def get_contacts(
             "total": total,
             "limit": limit,
             "offset": offset
-        }
+        }, request=request)
 
+
+@app.options("/outbound-calls/contacts/{contact_id}/opt-out")
+async def options_outbound_calls_opt_out(request: Request):
+    """Handle CORS preflight for opt-out endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
 
 @app.post("/outbound-calls/contacts/{contact_id}/opt-out")
 async def manually_opt_out_contact(
     contact_id: int,
     method: str = Body("manual", embed=True),
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    current_user: Dict[str, Any] = Depends(get_current_user_data),
+    request: Request = None
 ):
     """
     Manually opt out a contact (for admin/PM use).
@@ -13216,18 +13243,27 @@ async def manually_opt_out_contact(
             call_id=None
         )
         
-        return {
+        return create_cors_json_response(content={
             "message": "Contact opted out successfully",
             "contact_id": contact_id,
             "phone_number": contact.phone_number
-        }
+        }, request=request)
 
+
+@app.options("/outbound-calls/contacts/{contact_id}/consent")
+async def options_outbound_calls_consent(request: Request):
+    """Handle CORS preflight for consent endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
 
 @app.post("/outbound-calls/contacts/{contact_id}/consent")
 async def record_contact_consent(
     contact_id: int,
     source: str = Body("manual", embed=True),
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    current_user: Dict[str, Any] = Depends(get_current_user_data),
+    request: Request = None
 ):
     """
     Record consent for a contact (for admin/PM use).
@@ -13254,16 +13290,25 @@ async def record_contact_consent(
             source=source
         )
         
-        return {
+        return create_cors_json_response(content={
             "message": "Consent recorded successfully",
             "contact_id": contact_id,
             "phone_number": contact.phone_number
-        }
+        }, request=request)
 
+
+@app.options("/outbound-calls/test-bypass-status")
+async def options_outbound_calls_test_bypass(request: Request):
+    """Handle CORS preflight for test-bypass-status endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
 
 @app.get("/outbound-calls/test-bypass-status")
 async def check_bypass_status(
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    current_user: Dict[str, Any] = Depends(get_current_user_data),
+    request: Request = None
 ):
     """
     Check if testing bypass is enabled (for debugging).
@@ -13279,17 +13324,26 @@ async def check_bypass_status(
             detail="Only property managers can check bypass status"
         )
     
-    return {
+    return create_cors_json_response(content={
         "bypass_enabled": DISABLE_ELIGIBILITY_CHECKS,
         "message": "Testing bypass is ENABLED" if DISABLE_ELIGIBILITY_CHECKS else "Testing bypass is DISABLED (normal mode)",
         "warning": "⚠️ This should be DISABLED before production!" if DISABLE_ELIGIBILITY_CHECKS else None
-    }
+    }, request=request)
 
+
+@app.options("/outbound-calls/analytics")
+async def options_outbound_calls_analytics(request: Request):
+    """Handle CORS preflight for analytics endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
 
 @app.get("/outbound-calls/analytics")
 async def get_outbound_calling_analytics(
     days: int = 30,
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    current_user: Dict[str, Any] = Depends(get_current_user_data),
+    request: Request = None
 ):
     """
     Get analytics for outbound calling system.
@@ -13363,14 +13417,14 @@ async def get_outbound_calling_analytics(
             success_rate = 0.0
             opt_out_rate = 0.0
         
-        return {
+        return create_cors_json_response(content={
             "period_days": days,
             "total_outbound_calls": total_calls,
             "opt_outs_triggered": len(opt_out_calls),
             "bookings_resulting": bookings_from_calls,
             "success_rate": success_rate,
             "opt_out_rate": opt_out_rate
-        }
+        }, request=request)
 
 
 if __name__ == "__main__":
