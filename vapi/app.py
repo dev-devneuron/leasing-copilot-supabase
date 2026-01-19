@@ -13033,29 +13033,42 @@ async def get_outbound_call_candidates(
                         display_name = inferred_name if inferred_name else stored_name
                         
                         enriched_candidates.append({
+                            # Basic contact information
                             "contact_id": contact.id,
                             "phone_number": contact.phone_number,
-                            # Smart name: reject bad stored names, prefer extracted
-                            "name": display_name,
-                            "email": contact.email or candidate.get("extracted_email"),
+                            
+                            # Name fields (with smart fallback logic)
+                            "name": display_name,  # Best available name (stored or inferred)
+                            "inferred_name": candidate.get("inferred_name"),  # Name inferred from email/extraction
+                            "stored_name": contact.name,  # Name stored in contact table
+                            
+                            # Email fields (with fallback logic)
+                            "email": contact.email or candidate.get("extracted_email"),  # Best available email
+                            "extracted_email": candidate.get("extracted_email"),  # Email extracted from transcript
+                            "stored_email": contact.email,  # Email stored in contact table
+                            
+                            # Contact metadata
                             "timezone": contact.timezone,
                             "consent_status": contact.consent_status,
                             "opted_out": contact.opted_out,
                             "call_attempt_count": contact.call_attempt_count,
+                            
+                            # Call history
                             "last_call_outcome": getattr(contact, "last_call_outcome", None),
                             "last_called_at": contact.last_called_at.isoformat() if contact.last_called_at else None,
                             "last_booking_at": contact.last_booking_at.isoformat() if getattr(contact, "last_booking_at", None) else None,
                             "last_call_id": candidate.get("last_call_id"),
                             "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
                             "call_direction": candidate.get("call_direction", "inbound"),
-                            # Extracted information from last call transcript
-                            "extracted_email": candidate.get("extracted_email"),
-                            "inferred_name": candidate.get("inferred_name"),
-                            "extracted_region": candidate.get("extracted_region"),
-                            "inquiry_property": candidate.get("inquiry_property"),  # Property from last interaction
-                            "inquiry_purpose": candidate.get("inquiry_purpose"),  # Purpose of last call
-                            "inquiry_summary": candidate.get("inquiry_summary"),  # Structured summary
+                            "call_transcript": candidate.get("call_transcript"),  # Full transcript if available
+                            
+                            # Extracted intelligence from call transcripts (NEW - CRITICAL)
+                            "extracted_region": candidate.get("extracted_region"),  # Region/state extracted
+                            "inquiry_property": candidate.get("inquiry_property"),  # Property address from last call
+                            "inquiry_purpose": candidate.get("inquiry_purpose"),  # Purpose: "booking a tour", "availability inquiry", etc.
+                            "inquiry_summary": candidate.get("inquiry_summary"),  # Structured summary: "Purpose: X | Property: Y | Email: Z"
                             "call_summary": candidate.get("call_summary"),  # Full call summary from transcript
+                            
                             # Eligibility information
                             "eligible": eligibility.get("eligible", False) if eligibility else False,
                             "eligibility_reason": eligibility.get("reason", "Unknown") if eligibility else "Unknown",

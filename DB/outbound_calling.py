@@ -482,18 +482,37 @@ def _normalize_spoken_email(raw: str) -> Optional[str]:
 
 
 def _infer_name_from_email(email: str) -> Optional[str]:
+    """
+    Infer a name from an email address.
+    Examples:
+    - "john@gmail.com" -> "John"
+    - "rehan.smith@gmail.com" -> "Rehan"
+    - "yashan_jamal@yahoo.com" -> "Yashan"
+    - "kj373@gmail.com" -> "Kj373" (if no letters, return None)
+    """
     import re
 
     if not email or "@" not in email:
         return None
     local = email.split("@", 1)[0]
+    # Remove non-letter characters but keep separators
     local = re.sub(r"[^a-zA-Z._\-]", "", local).strip("._-")
     if not local:
         return None
-    # prefer first segment
+    
+    # Prefer first segment (before first separator)
     first = re.split(r"[._\-]+", local)[0]
     if not first:
         return None
+    
+    # Check if it contains at least one letter (not just numbers)
+    if not re.search(r"[a-zA-Z]", first):
+        # If it's all numbers (like "kj373"), try to extract meaningful part
+        # For "kj373", we could return None or try to find letters
+        # For now, return None if no letters
+        return None
+    
+    # Capitalize properly
     return first[:1].upper() + first[1:].lower()
 
 
@@ -867,7 +886,8 @@ DETAILED EXTRACTION RULES:
    - Look for email patterns even in indirect speech: "send to X", "contact at X", "reach me at X"
    - Check if AI assistant asks for email and customer provides it (even if not explicitly labeled)
    - If customer says "yes" or "correct" after AI confirms email, extract from AI's confirmation
-   - Return null ONLY if absolutely no email mentioned anywhere in entire transcript
+   - IMPORTANT: Be aggressive - if you see ANY email-like pattern, extract it. Better to extract than return null.
+   - Return null ONLY if absolutely no email mentioned anywhere in entire transcript AND no email-like patterns found
 
 2. CUSTOMER_NAME (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
    - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X", "I go by X"
@@ -876,8 +896,9 @@ DETAILED EXTRACTION RULES:
    - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
    - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech
    - If customer confirms their name when AI asks, extract from context
-   - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John")
-   - Return null ONLY if no name mentioned and cannot infer from email
+   - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John", "rehan@gmail.com" → "Rehan")
+   - IMPORTANT: If email exists, ALWAYS try to infer name from email username (capitalize first letter)
+   - Return null ONLY if no name mentioned AND cannot infer from email (even if email username seems unclear, try it)
 
 3. INQUIRY_PROPERTY (MEDIUM PRIORITY):
    - Extract ANY property address mentioned, even if partial
@@ -897,9 +918,11 @@ DETAILED EXTRACTION RULES:
 
 5. REGION (LOW PRIORITY):
    - Extract state, city, or city+state if mentioned
-   - Examples: "California", "Santa Clara", "Santa Clara, California", "CA"
-   - Look in property address or separate mentions
-   - Return null if not mentioned
+   - Examples: "California", "Santa Clara", "Santa Clara, California", "CA", "San Francisco"
+   - Look in property address or separate mentions (e.g., "I want apartments in Sunnyvale" → "Sunnyvale")
+   - Extract from context: "in [City]", "at [City]", "[City] area", "[State] apartments"
+   - IMPORTANT: Extract region even if mentioned separately from property address
+   - Return null ONLY if no city, state, or region mentioned anywhere
 
 OUTPUT FORMAT (STRICT JSON):
 {{
@@ -989,8 +1012,9 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                     else:
                         print(f"   ⚠️  Invalid email format: {ai_email}")
                 
-                # Extract customer name from AI (AGGRESSIVE filtering)
-                ai_customer_name = json_data.get("customer_name")
+                # Extract customer name from AI (check BOTH customer_name AND inferred_name fields)
+                # Try customer_name first, then inferred_name, then infer from email
+                ai_customer_name = json_data.get("customer_name") or json_data.get("inferred_name")
                 if ai_customer_name:
                     ai_customer_name = str(ai_customer_name).strip()
                     # AGGRESSIVE bot name filtering
@@ -1059,11 +1083,17 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                     else:
                         print(f"   ❌ Rejected bot purpose: '{ai_purpose}'")
                 
-                # Extract region
+                # Extract region (with validation)
                 ai_region = json_data.get("region")
                 if ai_region:
-                    region = str(ai_region).strip()
-                    print(f"   ✅ Extracted region: {region}")
+                    ai_region = str(ai_region).strip()
+                    # Validate region - should be a location name
+                    # Reject if it's too short or looks like bot text
+                    if len(ai_region) >= 2 and not any(bad in ai_region.lower() for bad in ["riley", "assistant", "bot", "ai"]):
+                        region = ai_region
+                        print(f"   ✅ Extracted region: {region}")
+                    else:
+                        print(f"   ❌ Rejected invalid region: '{ai_region}'")
                 
                 ai_success = True
                 print(f"\n✅ GEMINI AI EXTRACTION COMPLETE:")
@@ -1169,14 +1199,24 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                             break
     
     # Build inquiry summary (structured summary of extracted fields)
+    # Include ALL available fields for comprehensive overview
     summary_parts = []
     if inquiry_purpose:
         summary_parts.append(f"Purpose: {inquiry_purpose}")
     if inquiry_property:
         summary_parts.append(f"Property: {inquiry_property}")
+    if inferred_name:
+        summary_parts.append(f"Name: {inferred_name}")
     if email:
         summary_parts.append(f"Email: {email}")
+    if region:
+        summary_parts.append(f"Region: {region}")
     inquiry_summary = " | ".join(summary_parts) if summary_parts else None
+    
+    if inquiry_summary:
+        print(f"   ✅ Built inquiry_summary: {inquiry_summary}")
+    else:
+        print(f"   ⚠️  No inquiry_summary - no fields to summarize")
 
     return {
         "email": email,
@@ -1356,15 +1396,18 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                             # Found inquiry_purpose but no email/name yet - store it but keep searching
                             # Also try re-extracting this call if it has a transcript (might have been cached with old prompt)
                             print(f"   📝 Found inquiry context in call {recent_call.call_id} for {phone}, but no email/name - continuing search...")
-                            if not extracted_info.get("inquiry_purpose"):
-                                # Only update if we don't have inquiry_purpose yet
-                                extracted_info.update({
-                                    "inquiry_property": cached_intel.get("inquiry_property"),
-                                    "inquiry_purpose": cached_intel.get("inquiry_purpose"),
-                                    "inquiry_summary": cached_intel.get("inquiry_summary"),
-                                    "call_summary": cached_intel.get("call_summary"),
-                                    "region": cached_intel.get("region"),
-                                })
+                            # ALWAYS merge data - keep existing if better, otherwise use new
+                            print(f"   💾 Merging inquiry context from cached call...")
+                            if cached_intel.get("inquiry_property") and not extracted_info.get("inquiry_property"):
+                                extracted_info["inquiry_property"] = cached_intel.get("inquiry_property")
+                            if cached_intel.get("inquiry_purpose") and not extracted_info.get("inquiry_purpose"):
+                                extracted_info["inquiry_purpose"] = cached_intel.get("inquiry_purpose")
+                            if cached_intel.get("region") and not extracted_info.get("region"):
+                                extracted_info["region"] = cached_intel.get("region")
+                            if cached_intel.get("call_summary") and not extracted_info.get("call_summary"):
+                                extracted_info["call_summary"] = cached_intel.get("call_summary")
+                            # Update call info if this is the first call with data
+                            if not call_info.get("call_id"):
                                 call_info["call_id"] = recent_call.call_id
                                 call_info["call_at"] = recent_call.created_at
                             
@@ -1432,21 +1475,21 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                             elif has_any_data and not extracted_info.get("email") and not extracted_info.get("inferred_name"):
                                 # Found inquiry_purpose but no email/name yet - store it but keep searching
                                 print(f"      📝 Found inquiry context but NO email/name - storing and continuing search...")
-                                if not extracted_info.get("inquiry_purpose"):
-                                    # Only update if we don't have inquiry_purpose yet
-                                    print(f"      💾 Storing inquiry context from this call...")
-                                    extracted_info.update({
-                                        "inquiry_property": temp_extracted.get("inquiry_property"),
-                                        "inquiry_purpose": temp_extracted.get("inquiry_purpose"),
-                                        "inquiry_summary": temp_extracted.get("inquiry_summary"),
-                                        "call_summary": temp_extracted.get("call_summary"),
-                                        "region": temp_extracted.get("region"),
-                                    })
+                                # ALWAYS merge data - keep existing if better, otherwise use new
+                                print(f"      💾 Merging inquiry context from this call...")
+                                if temp_extracted.get("inquiry_property") and not extracted_info.get("inquiry_property"):
+                                    extracted_info["inquiry_property"] = temp_extracted.get("inquiry_property")
+                                if temp_extracted.get("inquiry_purpose") and not extracted_info.get("inquiry_purpose"):
+                                    extracted_info["inquiry_purpose"] = temp_extracted.get("inquiry_purpose")
+                                if temp_extracted.get("region") and not extracted_info.get("region"):
+                                    extracted_info["region"] = temp_extracted.get("region")
+                                if temp_extracted.get("call_summary") and not extracted_info.get("call_summary"):
+                                    extracted_info["call_summary"] = temp_extracted.get("call_summary")
+                                # Update call info if this is the first call with data
+                                if not call_info.get("call_id"):
                                     call_info["call_id"] = recent_call.call_id
                                     call_info["call_at"] = recent_call.created_at
-                                    print(f"      ✅ Stored inquiry context, continuing to next call...")
-                                else:
-                                    print(f"      ⏭️  Already have inquiry context, skipping...")
+                                print(f"      ✅ Merged inquiry context, continuing to next call...")
                                 print(f"      ➡️  MOVING TO NEXT CALL TRANSCRIPT - searching for email/name...")
                                 continue  # Keep searching for email/name
                             else:
@@ -1467,6 +1510,23 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                         print(f"      ⏭️  Skipping - transcript too short ({transcript_len} chars, need 50+)")
                 
                 # Print final extracted_info summary
+                # Rebuild inquiry_summary with final combined data
+                if not extracted_info.get("inquiry_summary"):
+                    summary_parts = []
+                    if extracted_info.get("inquiry_purpose"):
+                        summary_parts.append(f"Purpose: {extracted_info['inquiry_purpose']}")
+                    if extracted_info.get("inquiry_property"):
+                        summary_parts.append(f"Property: {extracted_info['inquiry_property']}")
+                    if extracted_info.get("inferred_name"):
+                        summary_parts.append(f"Name: {extracted_info['inferred_name']}")
+                    if extracted_info.get("email"):
+                        summary_parts.append(f"Email: {extracted_info['email']}")
+                    if extracted_info.get("region"):
+                        summary_parts.append(f"Region: {extracted_info['region']}")
+                    if summary_parts:
+                        extracted_info["inquiry_summary"] = " | ".join(summary_parts)
+                        print(f"   ✅ Rebuilt inquiry_summary from combined data: {extracted_info['inquiry_summary']}")
+                
                 print(f"\n   📋 FINAL EXTRACTED INFO SUMMARY:")
                 print(f"      - email: {extracted_info.get('email')}")
                 print(f"      - inferred_name: {extracted_info.get('inferred_name')}")
