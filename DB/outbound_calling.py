@@ -22,6 +22,10 @@ from .user_lookup import normalize_phone_number
 from .vertex_ai_client import get_vertex_ai_client
 import os
 import requests
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+import threading
 
 VAPI_BASE_URL = "https://api.vapi.ai"
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
@@ -494,225 +498,182 @@ def _infer_name_from_email(email: str) -> Optional[str]:
 
 
 # ============================================================================
-# HYBRID CRF/NER EXTRACTION (Fallback when AI fails)
+# REAL-TIME EXTRACTION: Extract and cache intel when transcripts arrive
 # ============================================================================
 
-# Global spaCy model instance (lazy loaded)
-_nlp_model = None
-
-def _get_spacy_model():
-    """Lazy load spaCy model for NER (CRF-like capabilities)."""
-    global _nlp_model
-    if _nlp_model is None:
-        try:
-            import spacy
-            # Try to load English model (small for speed, but has NER)
+def extract_and_store_intel_for_call_record(
+    call_record: CallRecord,
+    session: Session,
+    force_re_extract: bool = False
+) -> Dict[str, Optional[str]]:
+    """
+    Extract intel from call record transcript and store in database.
+    This is called automatically when transcripts arrive from VAPI.
+    
+    Args:
+        call_record: The CallRecord to extract from
+        session: Database session
+        force_re_extract: If True, re-extract even if already extracted
+        
+    Returns:
+        Extracted intel dictionary
+    """
+    # Skip if no transcript
+    if not call_record.transcript or len(call_record.transcript.strip()) < 50:
+        if call_record.extraction_status != "skipped":
+            call_record.extraction_status = "skipped"
+            session.add(call_record)
             try:
-                _nlp_model = spacy.load("en_core_web_sm")
-            except OSError:
-                # Model not installed, try to download it
-                print("⚠️  spaCy model 'en_core_web_sm' not found. Installing...")
-                import subprocess
-                import sys
-                subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
-                _nlp_model = spacy.load("en_core_web_sm")
-            print("✅ spaCy NER model loaded for hybrid extraction")
-        except ImportError:
-            print("⚠️  spaCy not installed. Install with: pip install spacy && python -m spacy download en_core_web_sm")
-            _nlp_model = False  # Mark as unavailable
-        except Exception as e:
-            print(f"⚠️  Failed to load spaCy model: {e}")
-            _nlp_model = False
-    return _nlp_model if _nlp_model is not False else None
-
-
-def _extract_name_with_ner(text: str) -> Optional[str]:
-    """
-    Extract person name using spaCy NER (CRF-based).
-    Better than regex for handling natural speech and noise.
-    """
-    nlp = _get_spacy_model()
-    if not nlp:
-        return None
+                session.commit()
+            except:
+                session.rollback()
+        return {
+            "email": None,
+            "inferred_name": None,
+            "region": None,
+            "inquiry_property": None,
+            "inquiry_purpose": None,
+            "inquiry_summary": None,
+            "call_summary": None,
+        }
+    
+    # Skip if already extracted (unless force_re_extract)
+    if not force_re_extract and call_record.extraction_status == "completed" and call_record.extracted_intel:
+        print(f"   ✅ Using cached extraction for call {call_record.call_id}")
+        return call_record.extracted_intel
+    
+    # Mark as pending
+    call_record.extraction_status = "pending"
+    session.add(call_record)
+    try:
+        session.commit()
+    except:
+        session.rollback()
     
     try:
-        doc = nlp(text)
-        # Find PERSON entities
-        for ent in doc.ents:
-            if ent.label_ == "PERSON":
-                name = ent.text.strip()
-                # Filter out bot names
-                bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello"}
-                if name.lower() not in bad_names and "riley" not in name.lower() and len(name) > 1:
-                    # Take first name if multiple words
-                    first_name = name.split()[0] if name.split() else name
-                    if len(first_name) > 1:
-                        return first_name
-        return None
+        # Extract intel
+        print(f"   🔍 Extracting intel for call {call_record.call_id}...")
+        extracted_intel = extract_contact_intel_from_transcript(call_record.transcript)
+        
+        # Store in database
+        call_record.extracted_intel = extracted_intel
+        call_record.extracted_intel_updated_at = datetime.utcnow()
+        call_record.extraction_status = "completed"
+        session.add(call_record)
+        session.commit()
+        
+        print(f"   ✅ Stored extracted intel for call {call_record.call_id}")
+        return extracted_intel
+        
     except Exception as e:
-        print(f"⚠️  NER name extraction failed: {e}")
-        return None
-
-
-def _extract_property_with_ner(text: str) -> Optional[str]:
-    """
-    Extract property address using spaCy NER + regex hybrid.
-    Better than regex alone for handling natural speech patterns.
-    """
-    import re
-    
-    nlp = _get_spacy_model()
-    
-    # First, try regex for structured addresses (most reliable)
-    addr_match = re.search(
-        r"\b(\d{1,6}\s+[A-Za-z0-9.\s]{2,60}\s+(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Wy|Parkway|Pkwy)\b(?:[^\n]{0,80})?)",
-        text,
-        re.IGNORECASE,
-    )
-    if addr_match:
-        addr = addr_match.group(1).strip()
-        # Validate it's not bot text
-        bot_patterns = ["searches", "visits", "booking", "general apartment inquiries"]
-        if not any(pattern in addr.lower() for pattern in bot_patterns):
-            return addr
-    
-    # If regex fails, use NER to find LOCATION entities
-    if nlp:
+        print(f"   ❌ Extraction failed for call {call_record.call_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        call_record.extraction_status = "failed"
+        session.add(call_record)
         try:
-            doc = nlp(text)
-            locations = []
-            for ent in doc.ents:
-                if ent.label_ in ["LOC", "GPE", "FAC"]:  # Location, Geopolitical, Facility
-                    loc = ent.text.strip()
-                    # Must contain a number (real addresses have numbers)
-                    if re.search(r"\d", loc) and len(loc) > 10:
-                        # Filter bot text
-                        bot_patterns = ["searches", "visits", "booking", "general apartment"]
-                        if not any(pattern in loc.lower() for pattern in bot_patterns):
-                            locations.append(loc)
+            session.commit()
+        except:
+            session.rollback()
+        
+        # Return empty dict on failure
+        return {
+            "email": None,
+            "inferred_name": None,
+            "region": None,
+            "inquiry_property": None,
+            "inquiry_purpose": None,
+            "inquiry_summary": None,
+            "call_summary": None,
+        }
+
+
+def trigger_background_extraction(property_manager_id: Optional[int] = None):
+    """
+    Background task to extract intel from all pending call records.
+    This is called automatically on login to pre-extract data.
+    
+    Args:
+        property_manager_id: Optional PM ID to filter calls
+    """
+    print(f"\n{'='*80}")
+    print(f"🚀 BACKGROUND EXTRACTION TASK STARTED")
+    print(f"{'='*80}")
+    
+    with Session(engine) as session:
+        # Get all call records that need extraction
+        query = select(CallRecord).where(
+            CallRecord.transcript.isnot(None),
+            or_(
+                CallRecord.extraction_status.is_(None),
+                CallRecord.extraction_status == "pending",
+                CallRecord.extraction_status == "failed"
+            )
+        )
+        
+        if property_manager_id:
+            # Filter by PM's phone numbers if needed
+            pm_numbers = session.exec(
+                select(PurchasedPhoneNumber.phone_number)
+                .where(PurchasedPhoneNumber.property_manager_id == property_manager_id)
+            ).all()
+            if pm_numbers:
+                query = query.where(CallRecord.realtor_number.in_(pm_numbers))
+        
+        pending_calls = session.exec(
+            query.order_by(CallRecord.created_at.desc()).limit(100)  # Process up to 100 at a time
+        ).all()
+        
+        print(f"   Found {len(pending_calls)} call records needing extraction")
+        
+        if len(pending_calls) == 0:
+            print(f"   ✅ No pending extractions")
+            return
+        
+        # Process in parallel (max 5 workers to avoid overwhelming Gemini API)
+        completed = 0
+        failed = 0
+        
+        def extract_one(call_record):
+            nonlocal completed, failed
+            try:
+                with Session(engine) as call_session:
+                    # Refresh the call record in this session
+                    call_record = call_session.get(CallRecord, call_record.id)
+                    if call_record:
+                        extract_and_store_intel_for_call_record(
+                            call_record, call_session, force_re_extract=False
+                        )
+                        completed += 1
+            except Exception as e:
+                failed += 1
+                print(f"   ⚠️  Extraction failed for call {call_record.call_id if call_record else 'unknown'}: {e}")
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(extract_one, call_record) for call_record in pending_calls]
             
-            # Return the longest location (likely most complete address)
-            if locations:
-                return max(locations, key=len)
-        except Exception as e:
-            print(f"⚠️  NER property extraction failed: {e}")
-    
-    return None
-
-
-def _hybrid_extraction_fallback(user_text: str, all_text: str) -> Dict[str, Optional[str]]:
-    """
-    Hybrid extraction using Regex + CRF/NER (spaCy).
-    
-    Strategy:
-    - Email: Regex (best for structured patterns)
-    - Name: CRF/NER (better for natural speech)
-    - Property: Hybrid (regex first, then NER)
-    - Purpose: Keyword matching (simple but effective)
-    - Region: Regex + NER hybrid
-    """
-    import re
-    
-    result = {
-        "email": None,
-        "inferred_name": None,
-        "region": None,
-        "inquiry_property": None,
-        "inquiry_purpose": None,
-        "inquiry_summary": None,
-    }
-    
-    # 1. EMAIL: Regex (best choice for emails)
-    m = re.search(r"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", user_text)
-    if m:
-        result["email"] = m.group(1).strip().lower()
-    
-    # spoken email patterns
-    if not result["email"]:
-        candidates = []
-        for mm in re.finditer(r"(my email is|email is)\s+(.{0,80})", user_text, re.IGNORECASE):
-            candidates.append(mm.group(2))
-        for mm in re.finditer(r"([a-zA-Z0-9._\-\s]+)\s+at\s+([a-zA-Z0-9\-\s]+)\s+(dot\s+[a-zA-Z0-9\-\s]+)", user_text, re.IGNORECASE):
-            candidates.append(mm.group(0))
-        for c in candidates:
-            normalized = _normalize_spoken_email(c)
-            if normalized:
-                result["email"] = normalized
-                break
-    
-    # 2. NAME: CRF/NER (better than regex for natural speech)
-    result["inferred_name"] = _extract_name_with_ner(user_text)
-    
-    # Fallback to email inference if NER didn't find name
-    if not result["inferred_name"] and result["email"]:
-        result["inferred_name"] = _infer_name_from_email(result["email"])
-    
-    # 3. PROPERTY: Hybrid (regex first, then NER)
-    result["inquiry_property"] = _extract_property_with_ner(user_text)
-    
-    # 4. PURPOSE: Keyword matching (simple but effective)
-    user_lower = user_text.lower()
-    if any(k in user_lower for k in ["book", "booking", "tour", "visit", "schedule"]):
-        result["inquiry_purpose"] = "booking a tour"
-    elif any(k in user_lower for k in ["availability", "available", "vacancy", "vacant"]):
-        result["inquiry_purpose"] = "availability inquiry"
-    elif any(k in user_lower for k in ["price", "rent", "cost", "how much"]):
-        result["inquiry_purpose"] = "pricing inquiry"
-    elif any(k in user_lower for k in ["maintenance", "repair", "broken", "leak"]):
-        result["inquiry_purpose"] = "maintenance request"
-    elif any(k in user_lower for k in ["info", "information", "details", "tell me about"]):
-        result["inquiry_purpose"] = "general information"
-    
-    # 5. REGION: Hybrid (regex + NER)
-    city_state = re.search(r"\b([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)\b", user_text)
-    if city_state:
-        result["region"] = city_state.group(1).strip()
-    else:
-        state = re.search(r"\b(California|Texas|Florida|New York|New Jersey|Virginia|Washington)\b", user_text, re.IGNORECASE)
-        if state:
-            result["region"] = state.group(1).strip()
-        else:
-            # Try NER for location
-            nlp = _get_spacy_model()
-            if nlp:
+            for future in as_completed(futures):
                 try:
-                    doc = nlp(user_text)
-                    for ent in doc.ents:
-                        if ent.label_ == "GPE":  # Geopolitical entity (states, cities)
-                            loc = ent.text.strip()
-                            if loc in ["California", "Texas", "Florida", "New York", "New Jersey", "Virginia", "Washington"]:
-                                result["region"] = loc
-                                break
-                except:
-                    pass
+                    future.result()
+                    if (completed + failed) % 10 == 0:
+                        print(f"   📊 Progress: {completed + failed}/{len(pending_calls)} calls processed...")
+                except Exception as e:
+                    print(f"   ⚠️  Future error: {e}")
+        
+        print(f"   ✅ Background extraction completed: {completed} succeeded, {failed} failed out of {len(pending_calls)} total")
     
-    # Build summary
-    summary_parts = []
-    if result["inquiry_purpose"]:
-        summary_parts.append(f"Purpose: {result['inquiry_purpose']}")
-    if result["inquiry_property"]:
-        summary_parts.append(f"Property: {result['inquiry_property']}")
-    if result["email"]:
-        summary_parts.append(f"Email: {result['email']}")
-    result["inquiry_summary"] = " | ".join(summary_parts) if summary_parts else None
-    
-    return result
+    print(f"{'='*80}\n")
 
 
 def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str, Optional[str]]:
     """
     Extract **caller email first**, then infer name, plus last-call purpose and property/address.
 
-    EXTRACTION STRATEGY (Priority Order):
-    1. GEMINI AI FIRST - Primary extraction method for accuracy
-    2. HYBRID CRF/NER + REGEX FALLBACK - If AI fails:
-       - Email: Regex (best for structured patterns)
-       - Name: CRF/NER (spaCy) - better for natural speech
-       - Property: Hybrid (Regex first, then NER) - handles noise better
-       - Purpose: Keyword matching
-       - Region: Hybrid (Regex + NER)
+    EXTRACTION STRATEGY:
+    - GEMINI AI ONLY - Uses Gemini API for accurate extraction
+    - If Gemini fails or is unavailable, returns empty/null values
     
-    We prioritize accuracy over speed - can't risk making mistakes.
+    We prioritize accuracy - using only AI extraction to avoid mistakes.
 
     Returns:
         {
@@ -778,41 +739,59 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
             transcript_snippet = transcript[:8000] if len(transcript) > 8000 else transcript
             print(f"Using transcript snippet: {len(transcript_snippet)} chars")
             
-            # Build ULTRA-EXPLICIT prompt that aggressively filters bot responses
-            prompt = f"""You are a professional data extraction specialist. Extract ONLY customer information from a phone call transcript.
+            # Build PERFECTED prompt with enhanced extraction rules
+            prompt = f"""You are an expert data extraction specialist. Extract ONLY customer information from a phone call transcript.
 
-⚠️ CRITICAL: The AI assistant is named "Riley". IGNORE EVERYTHING Riley says. ONLY extract from CUSTOMER/USER statements.
+⚠️ CRITICAL RULES:
+1. The AI assistant is named "Riley" - IGNORE EVERYTHING Riley/Bot/Assistant says
+2. ONLY extract from CUSTOMER/USER statements (lines starting with "User:", "Customer:", or direct customer speech)
+3. Be thorough - extract ALL available information, even if partially mentioned
+4. Normalize spoken formats (e.g., "at" = @, "dot" = .)
 
-TRANSCRIPT FORMAT:
-- Lines starting with "User:" or "Customer:" = CUSTOMER (EXTRACT FROM THESE)
-- Lines starting with "Bot:" or "Assistant:" or containing "Riley" = AI ASSISTANT (IGNORE COMPLETELY)
+TRANSCRIPT FORMAT IDENTIFICATION:
+- "User:" or "Customer:" lines = CUSTOMER SPEECH (EXTRACT FROM THESE)
+- "Bot:", "Assistant:", "AI:", or lines containing "Riley" = AI ASSISTANT (IGNORE COMPLETELY)
+- If format unclear, identify customer speech by context (questions, requests, personal info)
 
-EXTRACTION RULES (MANDATORY):
-1. EMAIL: Extract if customer says their email (e.g., "my email is rehan@gmail.com" or "rehan at gmail dot com")
-   - Must be valid format: user@domain.com
-   - Normalize spoken emails: "at" = @, "dot" = .
-   - Return null if not found
+DETAILED EXTRACTION RULES:
 
-2. CUSTOMER_NAME: Extract the CUSTOMER's actual name (NOT "Riley", NOT "assistant", NOT "bot")
-   - Look for: "my name is X", "I'm X", "this is X", "call me X"
-   - MUST be a real person name (e.g., "Rehan", "John", "Sarah")
-   - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is Riley speaking"
-   - Return null if only bot name found
+1. EMAIL (HIGH PRIORITY):
+   - Extract ANY email mentioned: "my email is X", "email X", "X at Y dot com", "X@Y.com"
+   - Normalize spoken: "at" → @, "dot" → ., remove spaces
+   - Accept partial emails if reconstructable (e.g., "rehan at gmail" → "rehan@gmail.com")
+   - Return null ONLY if absolutely no email mentioned
 
-3. INQUIRY_PROPERTY: Extract property address ONLY if customer mentions a specific address
-   - Must include street number (e.g., "188 Alexandra Road", "123 Main St")
+2. CUSTOMER_NAME (HIGH PRIORITY):
+   - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X"
+   - Extract FIRST NAME if full name given (e.g., "John Smith" → "John")
+   - MUST be a real person name (2+ characters, not generic words)
+   - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
+   - If name unclear but email found, infer from email username if reasonable
+   - Return null ONLY if no name mentioned and cannot infer from email
+
+3. INQUIRY_PROPERTY (MEDIUM PRIORITY):
+   - Extract ANY property address mentioned, even if partial
+   - Look for: street numbers + street names, apartment numbers, building names
+   - Examples: "188 Alexandra Road", "123 Main St", "Apartment 5B at 456 Oak Ave"
+   - Include city/state if mentioned together (e.g., "188 Alexandra Road, Santa Clara, California")
    - REJECT: Generic phrases like "apartment searches", "visits booking", "general inquiries"
-   - Return null if no specific address mentioned
+   - Return null ONLY if no specific address mentioned
 
-4. INQUIRY_PURPOSE: Extract customer's intent from their statements
-   - Options: "booking a tour", "availability inquiry", "pricing inquiry", "maintenance request", "general information"
-   - REJECT: Bot greeting phrases
-   - Return null if unclear
+4. INQUIRY_PURPOSE (MEDIUM PRIORITY):
+   - Extract customer's intent from their statements
+   - Options: "booking a tour", "availability inquiry", "pricing inquiry", "maintenance request", "general information", "viewing request", "application inquiry"
+   - Look for keywords: "book", "tour", "visit", "view", "available", "price", "rent", "cost", "maintenance", "repair"
+   - Infer from context if not explicitly stated
+   - REJECT: Bot greeting phrases, generic "how can I help"
+   - Return null ONLY if intent completely unclear
 
-5. REGION: Extract state or city,state if mentioned (e.g., "California", "Santa Clara, California")
+5. REGION (LOW PRIORITY):
+   - Extract state, city, or city+state if mentioned
+   - Examples: "California", "Santa Clara", "Santa Clara, California", "CA"
+   - Look in property address or separate mentions
    - Return null if not mentioned
 
-OUTPUT FORMAT (JSON ONLY):
+OUTPUT FORMAT (STRICT JSON):
 {{
   "email": "customer@email.com" or null,
   "customer_name": "ActualCustomerName" or null,
@@ -825,16 +804,19 @@ OUTPUT FORMAT (JSON ONLY):
 NOTE: Both "customer_name" and "inferred_name" should contain the same value (the customer's name).
 
 EXAMPLES:
-- If customer says "Hi, I'm Rehan, my email is rehan@gmail.com, I want to book a tour for 188 Alexandra Road"
-  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inferred_name": "Rehan", "inquiry_property": "188 Alexandra Road", "inquiry_purpose": "booking a tour", "region": null}}
+- Customer: "Hi, I'm Rehan, my email is rehan@gmail.com, I want to book a tour for 188 Alexandra Road, Santa Clara"
+  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inferred_name": "Rehan", "inquiry_property": "188 Alexandra Road, Santa Clara", "inquiry_purpose": "booking a tour", "region": "Santa Clara"}}
 
-- If only bot says "Riley speaking, how can I help?"
+- Customer: "Yeah, my name is John and email is john at gmail dot com"
+  → {{"email": "john@gmail.com", "customer_name": "John", "inferred_name": "John", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
+
+- Only bot speaks: "Riley speaking, how can I help?"
   → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": null, "inquiry_purpose": null, "region": null}}
 
-TRANSCRIPT:
+TRANSCRIPT TO ANALYZE:
 {transcript_snippet}
 
-Return ONLY the JSON object, no other text:"""
+Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
             
             print(f"\n📤 SENDING PROMPT TO GEMINI:")
             print(f"   Prompt length: {len(prompt)} chars")
@@ -992,7 +974,7 @@ Return ONLY the JSON object, no other text:"""
                 print(f"   Reason: ai_client is None")
             elif not ai_client.is_available():
                 print(f"   Reason: ai_client.is_available() returned False")
-            print(f"   Will use hybrid CRF/NER + Regex fallback")
+            print(f"   Extraction will return empty values")
             print(f"{'='*80}\n")
             ai_success = False
     except Exception as e:
@@ -1009,11 +991,11 @@ Return ONLY the JSON object, no other text:"""
             print(f"   1. Generate a new API key: https://aistudio.google.com/app/apikey")
             print(f"   2. Update GEMINI_API_KEY in your deployment environment variables")
             print(f"   3. Redeploy your backend")
-            print(f"   Falling back to hybrid CRF/NER + Regex extraction...")
+            print(f"   Extraction will return empty values until API key is fixed.")
         elif "NotFound" in error_type or "404" in error_msg:
-            print(f"\n   📦 Model not available - using hybrid fallback extraction...")
+            print(f"\n   📦 Model not available - extraction will return empty values.")
         else:
-            print(f"\n   Using hybrid CRF/NER + Regex fallback extraction...")
+            print(f"\n   Extraction will return empty values due to error.")
         
         import traceback
         traceback.print_exc()
@@ -1021,20 +1003,10 @@ Return ONLY the JSON object, no other text:"""
         ai_success = False
 
     # ============================================================================
-    # STEP 2: HYBRID CRF/NER + REGEX FALLBACK (ONLY if AI failed or didn't find everything)
+    # NO FALLBACK - Only use Gemini AI extraction
     # ============================================================================
-    if not ai_success or not email or not inquiry_property or not inquiry_purpose:
-        print("🔄 Using hybrid CRF/NER + Regex fallback for missing fields...")
-        
-        # Use hybrid extraction (Regex for emails, CRF/NER for names/properties)
-        hybrid_result = _hybrid_extraction_fallback(user_text, all_text)
-        
-        # Merge results (prefer AI results, fill gaps with hybrid)
-        email = email or hybrid_result.get("email")
-        inferred_name = inferred_name or hybrid_result.get("inferred_name")
-        inquiry_property = inquiry_property or hybrid_result.get("inquiry_property")
-        inquiry_purpose = inquiry_purpose or hybrid_result.get("inquiry_purpose")
-        region = region or hybrid_result.get("region")
+    if not ai_success:
+        print("⚠️  Gemini AI extraction failed - returning empty values")
 
     # Extract summary from transcript (if present)
     # Summaries are often at the end of transcripts with markers like "Summary:", "---", etc.
@@ -1164,171 +1136,173 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                     "direction": call.call_direction or "inbound"
                 }
     
-    # Second pass: get or create contacts for each unique phone number
-    for phone, call_info in phone_to_latest_call.items():
+    # Second pass: get or create contacts and extract intel (with parallelization)
+    # Use ThreadPoolExecutor for parallel extraction to improve latency
+    def process_candidate(phone_and_info):
+        """Process a single candidate - can be run in parallel"""
+        phone, call_info = phone_and_info
         try:
-            # Get or create contact
-            contact = session.exec(
-                select(Contact).where(Contact.phone_number == phone)
-            ).first()
-            
-            if not contact:
-                # Create contact with consent from previous call
-                try:
-                    contact = get_or_create_contact(
-                        phone,
-                        session,
-                        timezone="America/New_York"  # Default, can be updated
-                    )
-                    # Record consent from previous call
-                    record_consent(phone, session, source="call")
-                    session.commit()
-                except Exception as e:
-                    print(f"⚠️  Error creating contact for {phone}: {e}")
-                    continue  # Skip this candidate
-            
-            # Extract customer intel from transcript (email-first + intent/property)
-            # ALWAYS re-extract to ensure we have the latest data from Gemini
-            extracted_info = {
-                "email": None,
-                "inferred_name": None,
-                "region": None,
-                "inquiry_property": None,
-                "inquiry_purpose": None,
-                "inquiry_summary": None,
-            }
-            transcript = call_info.get("transcript")
-            
-            if transcript and len(transcript.strip()) >= 50:
-                print(f"\n{'='*80}")
-                print(f"📞 EXTRACTING FROM TRANSCRIPT FOR {phone}")
-                print(f"{'='*80}")
-                print(f"   Call ID: {call_info.get('call_id')}")
-                print(f"   Current contact.name: '{contact.name}'")
-                print(f"   Current contact.email: '{contact.email}'")
-                print(f"   Transcript length: {len(transcript)} chars")
-                print(f"   Transcript preview (first 500 chars):\n{transcript[:500]}\n...")
+            with Session(engine) as candidate_session:
+                # Get or create contact
+                contact = candidate_session.exec(
+                    select(Contact).where(Contact.phone_number == phone)
+                ).first()
                 
-                try:
-                    # ALWAYS re-extract (don't trust cached data)
-                    print(f"\n   ⚡ CALLING extract_contact_intel_from_transcript()...")
-                    extracted_info = extract_contact_intel_from_transcript(transcript)
-                    print(f"   ✅ extract_contact_intel_from_transcript() completed")
+                if not contact:
+                    # Create contact with consent from previous call
+                    try:
+                        contact = get_or_create_contact(
+                            phone,
+                            candidate_session,
+                            timezone="America/New_York"  # Default, can be updated
+                        )
+                        # Record consent from previous call
+                        record_consent(phone, candidate_session, source="call")
+                        candidate_session.commit()
+                    except Exception as e:
+                        print(f"⚠️  Error creating contact for {phone}: {e}")
+                        return None  # Skip this candidate
+                
+                # MULTI-CALL FALLBACK: Check multiple recent calls if last call has no data
+                extracted_info = {
+                    "email": None,
+                    "inferred_name": None,
+                    "region": None,
+                    "inquiry_property": None,
+                    "inquiry_purpose": None,
+                    "inquiry_summary": None,
+                    "call_summary": None,
+                }
+                
+                # Get recent calls for this phone number (up to 5 most recent)
+                recent_calls = candidate_session.exec(
+                    select(CallRecord)
+                    .where(CallRecord.caller_number == phone)
+                    .where(CallRecord.transcript.isnot(None))
+                    .order_by(CallRecord.created_at.desc())
+                    .limit(5)
+                ).all()
+                
+                # Try each recent call until we find one with extractable data
+                for recent_call in recent_calls:
+                    # Use cached extraction if available
+                    if recent_call.extracted_intel and recent_call.extraction_status == "completed":
+                        cached_intel = recent_call.extracted_intel
+                        # Check if cached intel has any useful data
+                        has_data = (
+                            cached_intel.get("email") or
+                            cached_intel.get("inferred_name") or
+                            cached_intel.get("inquiry_property") or
+                            cached_intel.get("inquiry_purpose")
+                        )
+                        if has_data:
+                            print(f"   ✅ Using cached extraction from call {recent_call.call_id} for {phone}")
+                            extracted_info = cached_intel
+                            call_info["call_id"] = recent_call.call_id
+                            call_info["call_at"] = recent_call.created_at
+                            break
                     
-                    print(f"   ✅ Extraction result:")
-                    print(f"      - Email: {extracted_info.get('email') or 'None'}")
-                    print(f"      - Name: {extracted_info.get('inferred_name') or 'None'}")
-                    print(f"      - Property: {extracted_info.get('inquiry_property') or 'None'}")
-                    print(f"      - Purpose: {extracted_info.get('inquiry_purpose') or 'None'}")
-
-                    # ALWAYS update email if we extracted one (even if contact already has one - might be better)
-                    if extracted_info.get("email"):
-                        new_email = extracted_info["email"]
-                        if not contact.email or contact.email != new_email:
-                            contact.email = new_email
-                            session.add(contact)
-                            try:
-                                session.commit()
-                                print(f"   ✅ Updated email: {new_email}")
-                            except Exception:
-                                session.rollback()
-
-                    # ALWAYS update name - replace bad names like "Riley" even if we don't have a better one
-                    inferred_name = extracted_info.get("inferred_name")
-                    bad = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello", "riley speaking"}
-                    
-                    # Check if current stored name is bad
-                    current_name_is_bad = False
-                    if contact.name:
-                        contact_name_lower = contact.name.lower().strip()
-                        current_name_is_bad = (contact_name_lower in bad or "riley" in contact_name_lower)
-                    
-                    # If we have a good inferred name, use it
-                    if inferred_name:
-                        inferred_clean = inferred_name.lower().strip()
-                        inferred_is_good = (inferred_clean not in bad and "riley" not in inferred_clean and len(inferred_name) > 1)
-                        
-                        if inferred_is_good:
-                            # Always update if we have a good inferred name (even if stored name is also good)
-                            old_name = contact.name
-                            contact.name = inferred_name
-                            session.add(contact)
-                            try:
-                                session.commit()
-                                print(f"   ✅ Updated name: '{old_name}' → '{inferred_name}'")
-                            except Exception:
-                                session.rollback()
-                                print(f"   ⚠️  Failed to commit name update")
-                        else:
-                            print(f"   ❌ Rejected bad inferred name: '{inferred_name}'")
-                    
-                    # If stored name is bad and we don't have a good inferred name, clear it
-                    elif current_name_is_bad:
-                        print(f"   🗑️  Clearing bad stored name: '{contact.name}' (no good replacement found)")
-                        old_bad_name = contact.name
-                        contact.name = None
-                        session.add(contact)
+                    # If no cache or cache is empty, extract now
+                    if recent_call.transcript and len(recent_call.transcript.strip()) >= 50:
+                        print(f"   🔍 Extracting from call {recent_call.call_id} for {phone}...")
                         try:
-                            session.commit()
-                            print(f"   ✅ Cleared bad name '{old_bad_name}' from database (set to None)")
+                            # Extract intel (will use cache if available)
+                            temp_extracted = extract_and_store_intel_for_call_record(
+                                recent_call, candidate_session, force_re_extract=False
+                            )
+                            
+                            # Check if we got useful data
+                            has_data = (
+                                temp_extracted.get("email") or
+                                temp_extracted.get("inferred_name") or
+                                temp_extracted.get("inquiry_property") or
+                                temp_extracted.get("inquiry_purpose")
+                            )
+                            
+                            if has_data:
+                                print(f"   ✅ Found extractable data in call {recent_call.call_id} for {phone}")
+                                extracted_info = temp_extracted
+                                call_info["call_id"] = recent_call.call_id
+                                call_info["call_at"] = recent_call.created_at
+                                break
+                            else:
+                                print(f"   ⚠️  No extractable data in call {recent_call.call_id} for {phone}, trying next...")
                         except Exception as e:
-                            session.rollback()
-                            print(f"   ⚠️  Failed to clear bad name: {e}")
-                    
-                    # Log final state
-                    print(f"   📝 Final contact state after extraction:")
-                    print(f"      - contact.name: '{contact.name}'")
-                    print(f"      - contact.email: '{contact.email}'")
-                except Exception as e:
-                    # Don't fail candidate processing if extraction fails
-                    print(f"   ❌ Error extracting info from transcript: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Initialize with defaults
-                    extracted_info = {
-                        "email": None,
-                        "inferred_name": None,
-                        "region": None,
-                        "inquiry_property": None,
-                        "inquiry_purpose": None,
-                        "inquiry_summary": None,
-                        "call_summary": None,
-                    }
-                    
-                    # FORCE extraction to run - don't skip even if contact already has data
-                    print(f"   ⚡ FORCING EXTRACTION (will update contact if better data found)")
-            else:
-                print(f"   ⚠️  No transcript or transcript too short for {phone}")
-            
-            # In testing mode, show ALL candidates regardless of status
-            # In production, we could filter here, but for now show all
-            
-            # Add to candidates (show all, regardless of booking/opt-out status)
-            candidates.append({
-                "contact": contact,
-                "last_call_id": call_info["call_id"],
-                "last_call_at": call_info["call_at"],
-                "call_transcript": call_info["transcript"],
-                "call_direction": call_info["direction"],
-                # extracted fields for frontend + outbound-call context
-                "extracted_email": extracted_info.get("email"),
-                "inferred_name": extracted_info.get("inferred_name"),
-                "extracted_region": extracted_info.get("region"),
-                "inquiry_property": extracted_info.get("inquiry_property"),
-                "inquiry_purpose": extracted_info.get("inquiry_purpose"),
-                "inquiry_summary": extracted_info.get("inquiry_summary"),
-            })
-            
-            # Apply limit if specified
-            if limit > 0 and len(candidates) >= limit:
-                break
+                            print(f"   ❌ Error extracting from call {recent_call.call_id} for {phone}: {e}")
+                            continue
                 
+                # Update contact with extracted data
+                if extracted_info.get("email") or extracted_info.get("inferred_name"):
+                    if extracted_info.get("email") and not contact.email:
+                        contact.email = extracted_info["email"]
+                        candidate_session.add(contact)
+                    if extracted_info.get("inferred_name"):
+                        bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello", "riley speaking"}
+                        name_lower = extracted_info["inferred_name"].lower().strip()
+                        if name_lower not in bad_names and "riley" not in name_lower:
+                            if not contact.name or contact.name.lower() in bad_names:
+                                contact.name = extracted_info["inferred_name"]
+                                candidate_session.add(contact)
+                    try:
+                        candidate_session.commit()
+                    except:
+                        candidate_session.rollback()
+                
+                return {
+                    "contact": contact,
+                    "last_call_id": call_info["call_id"],
+                    "last_call_at": call_info["call_at"],
+                    "call_transcript": call_info.get("transcript"),
+                    "call_direction": call_info["direction"],
+                    "extracted_email": extracted_info.get("email"),
+                    "inferred_name": extracted_info.get("inferred_name"),
+                    "extracted_region": extracted_info.get("region"),
+                    "inquiry_property": extracted_info.get("inquiry_property"),
+                    "inquiry_purpose": extracted_info.get("inquiry_purpose"),
+                    "inquiry_summary": extracted_info.get("inquiry_summary"),
+                    "call_summary": extracted_info.get("call_summary"),
+                }
         except Exception as e:
-            # Skip this candidate on any error and continue
             print(f"⚠️  Error processing candidate {phone}: {e}")
             import traceback
             traceback.print_exc()
-            continue
+            return None
+    
+    # Process candidates in parallel (max 10 workers to avoid overwhelming Gemini API)
+    max_workers = min(10, len(phone_to_latest_call))
+    candidates = []
+    
+    if max_workers > 1 and len(phone_to_latest_call) > 1:
+        print(f"🚀 Processing {len(phone_to_latest_call)} candidates in parallel (max {max_workers} workers)...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_phone = {
+                executor.submit(process_candidate, (phone, info)): phone 
+                for phone, info in phone_to_latest_call.items()
+            }
+            
+            for future in as_completed(future_to_phone):
+                phone = future_to_phone[future]
+                try:
+                    result = future.result()
+                    if result:
+                        candidates.append(result)
+                        # Apply limit if specified
+                        if limit > 0 and len(candidates) >= limit:
+                            # Cancel remaining futures
+                            for f in future_to_phone:
+                                f.cancel()
+                            break
+                except Exception as e:
+                    print(f"⚠️  Error processing candidate {phone}: {e}")
+    else:
+        # Sequential processing for small batches
+        print(f"📋 Processing {len(phone_to_latest_call)} candidates sequentially...")
+        for phone, call_info in phone_to_latest_call.items():
+            result = process_candidate((phone, call_info))
+            if result:
+                candidates.append(result)
+                if limit > 0 and len(candidates) >= limit:
+                    break
     
     print(f"✅ Found {len(candidates)} unique candidate contacts from {len(seen_phones)} unique phone numbers")
     return candidates

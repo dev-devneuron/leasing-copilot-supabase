@@ -2811,6 +2811,24 @@ async def login_realtor(request: Request, payload: dict = Body(...)):
         # Explicitly add CORS headers to ensure they're present
         add_cors_headers_to_response(response, request)
         
+        # BACKGROUND TASK: Trigger extraction for outbound candidates on successful login
+        try:
+            import threading
+            from DB.outbound_calling import trigger_background_extraction
+            
+            def run_background_extraction():
+                try:
+                    print(f"🚀 Starting background extraction for realtor {result.get('user_id')}...")
+                    trigger_background_extraction(property_manager_id=None)  # Extract all pending calls
+                except Exception as e:
+                    print(f"⚠️  Background extraction failed (non-critical): {e}")
+            
+            thread = threading.Thread(target=run_background_extraction, daemon=True)
+            thread.start()
+            print("✅ Background extraction task started")
+        except Exception as e:
+            print(f"⚠️  Failed to start background extraction (non-critical): {e}")
+        
         print("Realtor login successful")
         return response
 
@@ -2860,6 +2878,30 @@ async def login_property_manager(request: Request, payload: dict = Body(...)):
         
         # Explicitly add CORS headers to ensure they're present
         add_cors_headers_to_response(response, request)
+        
+        # BACKGROUND TASK: Trigger extraction for outbound candidates on successful login
+        # This runs asynchronously so login response is not delayed
+        try:
+            from fastapi import BackgroundTasks
+            from DB.outbound_calling import trigger_background_extraction
+            
+            # Schedule background extraction (non-blocking)
+            # Note: We'll add this as a background task when we have access to BackgroundTasks
+            # For now, we'll trigger it in a separate thread to avoid blocking
+            import threading
+            def run_background_extraction():
+                try:
+                    print(f"🚀 Starting background extraction for property manager {result.get('user_id')}...")
+                    trigger_background_extraction(property_manager_id=result.get('user_id'))
+                except Exception as e:
+                    print(f"⚠️  Background extraction failed (non-critical): {e}")
+            
+            # Start in background thread (non-blocking)
+            thread = threading.Thread(target=run_background_extraction, daemon=True)
+            thread.start()
+            print("✅ Background extraction task started")
+        except Exception as e:
+            print(f"⚠️  Failed to start background extraction (non-critical): {e}")
         
         print("Property Manager login successful")
         return response
@@ -7820,6 +7862,35 @@ async def vapi_webhook_hyphen(request: Request):
                 print(f"📄 Storing transcript for call {call_id}: {len(full_transcript)} chars")
                 call_record.transcript = full_transcript
                 updated = True
+                
+                # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
+                try:
+                    from DB.outbound_calling import extract_and_store_intel_for_call_record
+                    print(f"🔍 Triggering real-time extraction for call {call_id}...")
+                    extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=False)
+                    
+                    # Update contact if we found email/name
+                    if call_record.contact_id:
+                        contact = session.get(Contact, call_record.contact_id)
+                        if contact:
+                            if extracted_intel.get("email") and not contact.email:
+                                contact.email = extracted_intel["email"]
+                                session.add(contact)
+                            if extracted_intel.get("inferred_name"):
+                                bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
+                                name_lower = extracted_intel["inferred_name"].lower().strip()
+                                if name_lower not in bad_names and "riley" not in name_lower:
+                                    if not contact.name or contact.name.lower() in bad_names:
+                                        contact.name = extracted_intel["inferred_name"]
+                                        session.add(contact)
+                            try:
+                                session.commit()
+                                print(f"✅ Updated contact from real-time extraction")
+                            except:
+                                session.rollback()
+                except Exception as e:
+                    print(f"⚠️  Real-time extraction failed (non-critical): {e}")
+                    # Don't fail webhook if extraction fails
             
             # Store call status and other metadata
             call_record.call_status = message.get("status") or payload.get("status", "ended")
@@ -8123,6 +8194,35 @@ async def vapi_webhook(request: Request):
                     call_record.transcript = final_transcript
                     call_record.updated_at = now
                     updated = True
+                    
+                    # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
+                    try:
+                        from DB.outbound_calling import extract_and_store_intel_for_call_record
+                        print(f"🔍 Triggering real-time extraction for call {call_id}...")
+                        extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=False)
+                        
+                        # Update contact if we found email/name
+                        if call_record.contact_id:
+                            contact = session.get(Contact, call_record.contact_id)
+                            if contact:
+                                if extracted_intel.get("email") and not contact.email:
+                                    contact.email = extracted_intel["email"]
+                                    session.add(contact)
+                                if extracted_intel.get("inferred_name"):
+                                    bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
+                                    name_lower = extracted_intel["inferred_name"].lower().strip()
+                                    if name_lower not in bad_names and "riley" not in name_lower:
+                                        if not contact.name or contact.name.lower() in bad_names:
+                                            contact.name = extracted_intel["inferred_name"]
+                                            session.add(contact)
+                                try:
+                                    session.commit()
+                                    print(f"✅ Updated contact from real-time extraction")
+                                except:
+                                    session.rollback()
+                    except Exception as e:
+                        print(f"⚠️  Real-time extraction failed (non-critical): {e}")
+                        # Don't fail webhook if extraction fails
                 
                 # Store call status and duration
                 call_record.call_status = "ended"

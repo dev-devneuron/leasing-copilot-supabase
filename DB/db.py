@@ -650,6 +650,15 @@ class CallRecord(SQLModel, table=True):
         default=None,
         sa_column=Column(JSONB)  # Store additional VAPI event data
     )
+    
+    # Extracted intelligence fields (cached from Gemini AI extraction)
+    extracted_intel: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)  # Stores: email, inferred_name, inquiry_property, inquiry_purpose, region, call_summary
+    )
+    extracted_intel_updated_at: Optional[datetime] = None  # When extraction was last performed
+    extraction_status: Optional[str] = Field(default=None, index=True)  # 'pending', 'completed', 'failed', 'skipped'
+    
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
