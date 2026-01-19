@@ -131,9 +131,10 @@ GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 
 # Vertex AI model name for text generation
-# Options: gemini-1.5-flash (cheapest, recommended), gemini-1.5-pro, gemini-2.0-flash-exp
-# For Gemini API: gemini-1.5-flash is the cheapest and perfect for transcript extraction
-VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-1.5-flash")
+# NOTE: gemini-1.5-flash models are RETIRED (as of 2025)
+# Options: gemini-2.0-flash-lite-001 (cheapest, recommended), gemini-2.0-flash-001, gemini-2.5-flash
+# For Gemini API: gemini-2.0-flash-lite-001 is the cheapest available and perfect for transcript extraction
+VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-2.0-flash-lite-001")
 
 # Vertex AI embedding model name
 VERTEX_AI_EMBEDDING_MODEL = os.getenv("VERTEX_AI_EMBEDDING_MODEL", "textembedding-gecko@003")

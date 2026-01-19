@@ -104,18 +104,20 @@ class VertexAIClient:
                     model_name = model_name.replace("models/", "")
                     print(f"   ✅ Removed 'models/' prefix: {model_name}")
                 
-                # Ensure we use the cheapest model for Gemini API
-                # Try gemini-1.5-flash-002 (specific version) or gemini-2.0-flash (newer, still cheap)
-                expensive_models = ["gemini-2.0-flash-exp", "gemini-1.5-pro", "models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]
-                if model_name in expensive_models or any(model_name.startswith(m.replace("models/", "")) for m in expensive_models if "models/" in m):
-                    # Use cheapest available model - try gemini-1.5-flash-002 first (specific version)
-                    # If that fails, fallback will try gemini-2.0-flash
-                    model_name = "gemini-1.5-flash-002"
-                    print(f"💡 Overriding to cheapest Gemini model (specific version): {model_name}")
-                elif model_name == "gemini-1.5-flash":
-                    # Use specific version for better compatibility
-                    model_name = "gemini-1.5-flash-002"
-                    print(f"💡 Using specific version for compatibility: {model_name}")
+                # Ensure we use the cheapest AVAILABLE model for Gemini API
+                # NOTE: gemini-1.5-flash models are RETIRED - use gemini-2.0-flash-lite-001 (cheapest) or gemini-2.0-flash-001
+                expensive_models = ["gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-2.5-pro", "models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]
+                retired_models = ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-flash-002", "gemini-1.5-pro"]
+                
+                # Replace retired models or expensive models with cheapest available
+                if model_name in expensive_models or model_name in retired_models or any(model_name.startswith(m.replace("models/", "")) for m in expensive_models + retired_models if "models/" in m):
+                    # Use cheapest available model: gemini-2.0-flash-lite-001 (cheapest stable model)
+                    model_name = "gemini-2.0-flash-lite-001"
+                    print(f"💡 Overriding to cheapest available Gemini model: {model_name}")
+                elif model_name.startswith("gemini-1.5"):
+                    # All 1.5 models are retired - replace with 2.0 flash lite
+                    model_name = "gemini-2.0-flash-lite-001"
+                    print(f"💡 Replacing retired 1.5 model with: {model_name}")
                 
                 # FINAL CHECK: Ensure no "models/" prefix (critical for Python SDK)
                 if model_name.startswith("models/"):
@@ -124,20 +126,25 @@ class VertexAIClient:
                 
                 print(f"   🎯 FINAL model name (for Python SDK): '{model_name}'")
                 print(f"   Creating GenerativeModel with: {model_name}")
+                
+                # CRITICAL: Pass model name WITHOUT "models/" prefix to Python SDK
+                # The SDK will handle the API path internally
                 self.model = genai.GenerativeModel(model_name)
                 print(f"✅ Gemini API initialized successfully: {model_name}")
-                print(f"   Model object created: {type(self.model)}")
-                # Verify the model name in the object
-                if hasattr(self.model, '_model_name'):
-                    print(f"   Verified model name in object: {self.model._model_name}")
+                print(f"   Model object type: {type(self.model)}")
             except Exception as e:
                 print(f"⚠️  Gemini API initialization failed: {e}")
                 print(f"   Error type: {type(e).__name__}")
                 import traceback
                 traceback.print_exc()
                 # Try fallback models (without models/ prefix for Python SDK)
-                # Try specific version first, then newer model
-                fallback_models = ["gemini-1.5-flash-002", "gemini-2.0-flash", "gemini-1.5-flash"]
+                # Use stable, available models (gemini-1.5 models are RETIRED)
+                fallback_models = [
+                    "gemini-2.0-flash-lite-001",  # Cheapest available
+                    "gemini-2.0-flash-001",       # Stable alternative
+                    "gemini-2.5-flash",           # Newest stable
+                    "gemini-2.0-flash"            # Alias (if supported)
+                ]
                 fallback_success = False
                 for fallback_model in fallback_models:
                     try:
