@@ -154,8 +154,18 @@ class CORSEnforcementMiddleware(BaseHTTPMiddleware):
         else:
             allowed_origin = "*"
         
-        # Process the request (let CORS middleware handle OPTIONS)
-        response = await call_next(request)
+        try:
+            # Process the request (let CORS middleware handle OPTIONS)
+            response = await call_next(request)
+        except Exception as e:
+            # If there's an error, create a response with CORS headers
+            import traceback
+            print(f"❌ Error in middleware: {e}")
+            traceback.print_exc()
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error"}
+            )
         
         # Ensure CORS headers are present (add if missing)
         # This catches cases where CORS middleware didn't add headers (e.g., errors)
