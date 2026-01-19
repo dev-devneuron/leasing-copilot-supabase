@@ -493,11 +493,225 @@ def _infer_name_from_email(email: str) -> Optional[str]:
     return first[:1].upper() + first[1:].lower()
 
 
+# ============================================================================
+# HYBRID CRF/NER EXTRACTION (Fallback when AI fails)
+# ============================================================================
+
+# Global spaCy model instance (lazy loaded)
+_nlp_model = None
+
+def _get_spacy_model():
+    """Lazy load spaCy model for NER (CRF-like capabilities)."""
+    global _nlp_model
+    if _nlp_model is None:
+        try:
+            import spacy
+            # Try to load English model (small for speed, but has NER)
+            try:
+                _nlp_model = spacy.load("en_core_web_sm")
+            except OSError:
+                # Model not installed, try to download it
+                print("⚠️  spaCy model 'en_core_web_sm' not found. Installing...")
+                import subprocess
+                import sys
+                subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+                _nlp_model = spacy.load("en_core_web_sm")
+            print("✅ spaCy NER model loaded for hybrid extraction")
+        except ImportError:
+            print("⚠️  spaCy not installed. Install with: pip install spacy && python -m spacy download en_core_web_sm")
+            _nlp_model = False  # Mark as unavailable
+        except Exception as e:
+            print(f"⚠️  Failed to load spaCy model: {e}")
+            _nlp_model = False
+    return _nlp_model if _nlp_model is not False else None
+
+
+def _extract_name_with_ner(text: str) -> Optional[str]:
+    """
+    Extract person name using spaCy NER (CRF-based).
+    Better than regex for handling natural speech and noise.
+    """
+    nlp = _get_spacy_model()
+    if not nlp:
+        return None
+    
+    try:
+        doc = nlp(text)
+        # Find PERSON entities
+        for ent in doc.ents:
+            if ent.label_ == "PERSON":
+                name = ent.text.strip()
+                # Filter out bot names
+                bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello"}
+                if name.lower() not in bad_names and "riley" not in name.lower() and len(name) > 1:
+                    # Take first name if multiple words
+                    first_name = name.split()[0] if name.split() else name
+                    if len(first_name) > 1:
+                        return first_name
+        return None
+    except Exception as e:
+        print(f"⚠️  NER name extraction failed: {e}")
+        return None
+
+
+def _extract_property_with_ner(text: str) -> Optional[str]:
+    """
+    Extract property address using spaCy NER + regex hybrid.
+    Better than regex alone for handling natural speech patterns.
+    """
+    import re
+    
+    nlp = _get_spacy_model()
+    
+    # First, try regex for structured addresses (most reliable)
+    addr_match = re.search(
+        r"\b(\d{1,6}\s+[A-Za-z0-9.\s]{2,60}\s+(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Wy|Parkway|Pkwy)\b(?:[^\n]{0,80})?)",
+        text,
+        re.IGNORECASE,
+    )
+    if addr_match:
+        addr = addr_match.group(1).strip()
+        # Validate it's not bot text
+        bot_patterns = ["searches", "visits", "booking", "general apartment inquiries"]
+        if not any(pattern in addr.lower() for pattern in bot_patterns):
+            return addr
+    
+    # If regex fails, use NER to find LOCATION entities
+    if nlp:
+        try:
+            doc = nlp(text)
+            locations = []
+            for ent in doc.ents:
+                if ent.label_ in ["LOC", "GPE", "FAC"]:  # Location, Geopolitical, Facility
+                    loc = ent.text.strip()
+                    # Must contain a number (real addresses have numbers)
+                    if re.search(r"\d", loc) and len(loc) > 10:
+                        # Filter bot text
+                        bot_patterns = ["searches", "visits", "booking", "general apartment"]
+                        if not any(pattern in loc.lower() for pattern in bot_patterns):
+                            locations.append(loc)
+            
+            # Return the longest location (likely most complete address)
+            if locations:
+                return max(locations, key=len)
+        except Exception as e:
+            print(f"⚠️  NER property extraction failed: {e}")
+    
+    return None
+
+
+def _hybrid_extraction_fallback(user_text: str, all_text: str) -> Dict[str, Optional[str]]:
+    """
+    Hybrid extraction using Regex + CRF/NER (spaCy).
+    
+    Strategy:
+    - Email: Regex (best for structured patterns)
+    - Name: CRF/NER (better for natural speech)
+    - Property: Hybrid (regex first, then NER)
+    - Purpose: Keyword matching (simple but effective)
+    - Region: Regex + NER hybrid
+    """
+    import re
+    
+    result = {
+        "email": None,
+        "inferred_name": None,
+        "region": None,
+        "inquiry_property": None,
+        "inquiry_purpose": None,
+        "inquiry_summary": None,
+    }
+    
+    # 1. EMAIL: Regex (best choice for emails)
+    m = re.search(r"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", user_text)
+    if m:
+        result["email"] = m.group(1).strip().lower()
+    
+    # spoken email patterns
+    if not result["email"]:
+        candidates = []
+        for mm in re.finditer(r"(my email is|email is)\s+(.{0,80})", user_text, re.IGNORECASE):
+            candidates.append(mm.group(2))
+        for mm in re.finditer(r"([a-zA-Z0-9._\-\s]+)\s+at\s+([a-zA-Z0-9\-\s]+)\s+(dot\s+[a-zA-Z0-9\-\s]+)", user_text, re.IGNORECASE):
+            candidates.append(mm.group(0))
+        for c in candidates:
+            normalized = _normalize_spoken_email(c)
+            if normalized:
+                result["email"] = normalized
+                break
+    
+    # 2. NAME: CRF/NER (better than regex for natural speech)
+    result["inferred_name"] = _extract_name_with_ner(user_text)
+    
+    # Fallback to email inference if NER didn't find name
+    if not result["inferred_name"] and result["email"]:
+        result["inferred_name"] = _infer_name_from_email(result["email"])
+    
+    # 3. PROPERTY: Hybrid (regex first, then NER)
+    result["inquiry_property"] = _extract_property_with_ner(user_text)
+    
+    # 4. PURPOSE: Keyword matching (simple but effective)
+    user_lower = user_text.lower()
+    if any(k in user_lower for k in ["book", "booking", "tour", "visit", "schedule"]):
+        result["inquiry_purpose"] = "booking a tour"
+    elif any(k in user_lower for k in ["availability", "available", "vacancy", "vacant"]):
+        result["inquiry_purpose"] = "availability inquiry"
+    elif any(k in user_lower for k in ["price", "rent", "cost", "how much"]):
+        result["inquiry_purpose"] = "pricing inquiry"
+    elif any(k in user_lower for k in ["maintenance", "repair", "broken", "leak"]):
+        result["inquiry_purpose"] = "maintenance request"
+    elif any(k in user_lower for k in ["info", "information", "details", "tell me about"]):
+        result["inquiry_purpose"] = "general information"
+    
+    # 5. REGION: Hybrid (regex + NER)
+    city_state = re.search(r"\b([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)\b", user_text)
+    if city_state:
+        result["region"] = city_state.group(1).strip()
+    else:
+        state = re.search(r"\b(California|Texas|Florida|New York|New Jersey|Virginia|Washington)\b", user_text, re.IGNORECASE)
+        if state:
+            result["region"] = state.group(1).strip()
+        else:
+            # Try NER for location
+            nlp = _get_spacy_model()
+            if nlp:
+                try:
+                    doc = nlp(user_text)
+                    for ent in doc.ents:
+                        if ent.label_ == "GPE":  # Geopolitical entity (states, cities)
+                            loc = ent.text.strip()
+                            if loc in ["California", "Texas", "Florida", "New York", "New Jersey", "Virginia", "Washington"]:
+                                result["region"] = loc
+                                break
+                except:
+                    pass
+    
+    # Build summary
+    summary_parts = []
+    if result["inquiry_purpose"]:
+        summary_parts.append(f"Purpose: {result['inquiry_purpose']}")
+    if result["inquiry_property"]:
+        summary_parts.append(f"Property: {result['inquiry_property']}")
+    if result["email"]:
+        summary_parts.append(f"Email: {result['email']}")
+    result["inquiry_summary"] = " | ".join(summary_parts) if summary_parts else None
+    
+    return result
+
+
 def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str, Optional[str]]:
     """
     Extract **caller email first**, then infer name, plus last-call purpose and property/address.
 
-    GEMINI AI FIRST - Primary extraction method for accuracy. Regex is ONLY used as fallback if AI fails.
+    EXTRACTION STRATEGY (Priority Order):
+    1. GEMINI AI FIRST - Primary extraction method for accuracy
+    2. HYBRID CRF/NER + REGEX FALLBACK - If AI fails:
+       - Email: Regex (best for structured patterns)
+       - Name: CRF/NER (spaCy) - better for natural speech
+       - Property: Hybrid (Regex first, then NER) - handles noise better
+       - Purpose: Keyword matching
+       - Region: Hybrid (Regex + NER)
+    
     We prioritize accuracy over speed - can't risk making mistakes.
 
     Returns:
@@ -649,67 +863,20 @@ JSON:"""
         ai_success = False
 
     # ============================================================================
-    # STEP 2: REGEX FALLBACK (ONLY if AI failed or didn't find everything)
+    # STEP 2: HYBRID CRF/NER + REGEX FALLBACK (ONLY if AI failed or didn't find everything)
     # ============================================================================
     if not ai_success or not email or not inquiry_property or not inquiry_purpose:
-        print("🔄 Using regex fallback for missing fields...")
+        print("🔄 Using hybrid CRF/NER + Regex fallback for missing fields...")
         
-        # Regex fallback for email
-        if not email:
-            m = re.search(r"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", user_text)
-            if m:
-                email = m.group(1).strip().lower()
-            
-            # spoken email patterns
-            if not email:
-                candidates = []
-                for mm in re.finditer(r"(my email is|email is)\s+(.{0,80})", user_text, re.IGNORECASE):
-                    candidates.append(mm.group(2))
-                for mm in re.finditer(r"([a-zA-Z0-9._\-\s]+)\s+at\s+([a-zA-Z0-9\-\s]+)\s+(dot\s+[a-zA-Z0-9\-\s]+)", user_text, re.IGNORECASE):
-                    candidates.append(mm.group(0))
-                for c in candidates:
-                    normalized = _normalize_spoken_email(c)
-                    if normalized:
-                        email = normalized
-                        break
+        # Use hybrid extraction (Regex for emails, CRF/NER for names/properties)
+        hybrid_result = _hybrid_extraction_fallback(user_text, all_text)
         
-        # Update inferred name if we got email from regex
-        if not inferred_name and email:
-            inferred_name = _infer_name_from_email(email)
-
-        # Regex fallback for property
-        if not inquiry_property:
-            addr_match = re.search(
-                r"\b(\d{1,6}\s+[A-Za-z0-9.\s]{2,60}\s+(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Wy|Parkway|Pkwy)\b(?:[^\n]{0,80})?)",
-                user_text,
-                re.IGNORECASE,
-            )
-            if addr_match:
-                inquiry_property = addr_match.group(1).strip()
-
-        # Regex fallback for purpose
-        if not inquiry_purpose:
-            user_lower = user_text.lower()
-            if any(k in user_lower for k in ["book", "booking", "tour", "visit", "schedule"]):
-                inquiry_purpose = "booking a tour"
-            elif any(k in user_lower for k in ["availability", "available", "vacancy", "vacant"]):
-                inquiry_purpose = "availability inquiry"
-            elif any(k in user_lower for k in ["price", "rent", "cost", "how much"]):
-                inquiry_purpose = "pricing inquiry"
-            elif any(k in user_lower for k in ["maintenance", "repair", "broken", "leak"]):
-                inquiry_purpose = "maintenance request"
-            elif any(k in user_lower for k in ["info", "information", "details", "tell me about"]):
-                inquiry_purpose = "general information"
-
-        # Regex fallback for region
-        if not region:
-            city_state = re.search(r"\b([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)\b", user_text)
-            if city_state:
-                region = city_state.group(1).strip()
-            else:
-                state = re.search(r"\b(California|Texas|Florida|New York|New Jersey|Virginia|Washington)\b", user_text, re.IGNORECASE)
-                if state:
-                    region = state.group(1).strip()
+        # Merge results (prefer AI results, fill gaps with hybrid)
+        email = email or hybrid_result.get("email")
+        inferred_name = inferred_name or hybrid_result.get("inferred_name")
+        inquiry_property = inquiry_property or hybrid_result.get("inquiry_property")
+        inquiry_purpose = inquiry_purpose or hybrid_result.get("inquiry_purpose")
+        region = region or hybrid_result.get("region")
 
     # Build summary
     summary_parts = []
