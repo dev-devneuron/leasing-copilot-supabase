@@ -754,110 +754,196 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
     try:
         ai_client = get_vertex_ai_client()
         if ai_client and ai_client.is_available():
-            print("🔍 Using Gemini AI for transcript extraction (primary method)...")
+            print(f"🔍 Using Gemini AI for transcript extraction (primary method)...")
+            print(f"   Transcript length: {len(transcript)} chars")
             
-            # Build comprehensive prompt that explicitly filters bot responses
-            prompt = f"""You are extracting customer information from a phone call transcript between a customer and an AI assistant named "Riley".
-
-CRITICAL RULES - FOLLOW EXACTLY:
-1. IGNORE everything the AI assistant/bot says (lines starting with "Bot:" or containing "Riley", "assistant", "bot", "AI", "speaking")
-2. ONLY extract information from what the CUSTOMER/USER says (lines starting with "User:")
-3. If the customer didn't mention something, return null for that field
-4. Do NOT extract generic phrases like "searches, visits booking" - these are bot greetings, not customer intent
-5. Property must be an actual address with a street number (e.g., "188 Alexandra Road, Santa Clara, California"), not generic phrases
-6. Name must be the CUSTOMER's name, NOT "Riley" or any bot/assistant name
-7. Email must be a valid email format (user@domain.com)
-8. Be precise and accurate - we cannot risk mistakes
-
-Extract the following from USER/CUSTOMER lines ONLY:
-- email: Customer's email address (if mentioned, must be valid format) or null
-- customer_name: Customer's actual name (first name is fine, e.g., "Rehan", "John") - NOT "Riley" or bot names, or null
-- inquiry_property: Specific property address the customer inquired about (must include street number, e.g., "188 Alexandra Road, Santa Clara, California") or null
-- inquiry_purpose: Customer's actual intent: "booking a tour", "availability inquiry", "pricing inquiry", "maintenance request", "general information", or null
-- region: State or city,state if mentioned (e.g., "California" or "Santa Clara, California") or null
-
-Return ONLY valid JSON with these exact keys: email, customer_name, inquiry_property, inquiry_purpose, region
-Use null for any field that wasn't mentioned by the customer or is invalid.
-
-Transcript:
-{transcript[:3000]}
-
-JSON:"""
+            # Use full transcript (up to 8000 chars for Gemini 1.5-flash)
+            transcript_snippet = transcript[:8000] if len(transcript) > 8000 else transcript
             
+            # Build ULTRA-EXPLICIT prompt that aggressively filters bot responses
+            prompt = f"""You are a professional data extraction specialist. Extract ONLY customer information from a phone call transcript.
+
+⚠️ CRITICAL: The AI assistant is named "Riley". IGNORE EVERYTHING Riley says. ONLY extract from CUSTOMER/USER statements.
+
+TRANSCRIPT FORMAT:
+- Lines starting with "User:" or "Customer:" = CUSTOMER (EXTRACT FROM THESE)
+- Lines starting with "Bot:" or "Assistant:" or containing "Riley" = AI ASSISTANT (IGNORE COMPLETELY)
+
+EXTRACTION RULES (MANDATORY):
+1. EMAIL: Extract if customer says their email (e.g., "my email is rehan@gmail.com" or "rehan at gmail dot com")
+   - Must be valid format: user@domain.com
+   - Normalize spoken emails: "at" = @, "dot" = .
+   - Return null if not found
+
+2. CUSTOMER_NAME: Extract the CUSTOMER's actual name (NOT "Riley", NOT "assistant", NOT "bot")
+   - Look for: "my name is X", "I'm X", "this is X", "call me X"
+   - MUST be a real person name (e.g., "Rehan", "John", "Sarah")
+   - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is Riley speaking"
+   - Return null if only bot name found
+
+3. INQUIRY_PROPERTY: Extract property address ONLY if customer mentions a specific address
+   - Must include street number (e.g., "188 Alexandra Road", "123 Main St")
+   - REJECT: Generic phrases like "apartment searches", "visits booking", "general inquiries"
+   - Return null if no specific address mentioned
+
+4. INQUIRY_PURPOSE: Extract customer's intent from their statements
+   - Options: "booking a tour", "availability inquiry", "pricing inquiry", "maintenance request", "general information"
+   - REJECT: Bot greeting phrases
+   - Return null if unclear
+
+5. REGION: Extract state or city,state if mentioned (e.g., "California", "Santa Clara, California")
+   - Return null if not mentioned
+
+OUTPUT FORMAT (JSON ONLY):
+{{
+  "email": "customer@email.com" or null,
+  "customer_name": "ActualCustomerName" or null,
+  "inquiry_property": "123 Street Address, City, State" or null,
+  "inquiry_purpose": "booking a tour" or null,
+  "region": "California" or null
+}}
+
+EXAMPLES:
+- If customer says "Hi, I'm Rehan, my email is rehan@gmail.com, I want to book a tour for 188 Alexandra Road"
+  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inquiry_property": "188 Alexandra Road", "inquiry_purpose": "booking a tour", "region": null}}
+
+- If only bot says "Riley speaking, how can I help?"
+  → {{"email": null, "customer_name": null, "inquiry_property": null, "inquiry_purpose": null, "region": null}}
+
+TRANSCRIPT:
+{transcript_snippet}
+
+Return ONLY the JSON object, no other text:"""
+            
+            print(f"   Sending prompt to Gemini (length: {len(prompt)} chars)...")
             resp = ai_client.generate_content(prompt).strip()
+            print(f"   Gemini response length: {len(resp)} chars")
+            print(f"   Gemini response preview: {resp[:300]}...")
             
-            # Extract JSON from response
+            # Extract JSON from response (try multiple methods)
+            json_data = None
+            
+            # Method 1: Find JSON object
             start = resp.find("{")
             end = resp.rfind("}") + 1
             if start >= 0 and end > start:
                 try:
-                    data = json.loads(resp[start:end])
-                    
-                    # Extract email from AI
-                    ai_email = data.get("email")
-                    if ai_email:
-                        ai_email = ai_email.strip().lower()
-                        # Validate email format
-                        if re.match(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", ai_email):
-                            email = ai_email
-                    
-                    # Extract customer name from AI (prefer this over email inference)
-                    ai_customer_name = data.get("customer_name")
-                    if ai_customer_name:
-                        ai_customer_name = ai_customer_name.strip()
-                        # Clean and validate name - reject bot names
-                        bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello"}
-                        if ai_customer_name.lower() not in bad_names and "riley" not in ai_customer_name.lower() and len(ai_customer_name) > 1:
-                            inferred_name = ai_customer_name
-                    
-                    # Fallback to email inference if AI didn't find name but found email
-                    if not inferred_name and email:
-                        inferred_name = _infer_name_from_email(email)
-                    
-                    # Extract property (with validation)
-                    ai_property = data.get("inquiry_property")
-                    if ai_property:
-                        ai_property = ai_property.strip()
-                        # Validate it's not bot text
-                        bot_patterns = [
-                            "searches", "visits", "booking", "general apartment inquiries",
-                            "apartment searches", "or general", "how can i assist", "visits booking",
-                            "apartment searches visits", "or general apartment"
-                        ]
-                        property_lower = ai_property.lower()
-                        # Must contain a number (real addresses have numbers) and not be bot text
-                        if re.search(r"\d", ai_property) and not any(pattern in property_lower for pattern in bot_patterns):
-                            inquiry_property = ai_property
-                    
-                    # Extract purpose (with validation)
-                    ai_purpose = data.get("inquiry_purpose")
-                    if ai_purpose:
-                        ai_purpose = ai_purpose.strip()
-                        # Validate it's not bot text
-                        bot_phrases = [
-                            "searches", "visits booking", "general apartment inquiries",
-                            "apartment searches visits", "how can i assist", "searches, visits"
-                        ]
-                        if not any(phrase in ai_purpose.lower() for phrase in bot_phrases):
-                            inquiry_purpose = ai_purpose
-                    
-                    # Extract region
-                    ai_region = data.get("region")
-                    if ai_region:
-                        region = ai_region.strip()
-                    
-                    ai_success = True
-                    print(f"✅ Gemini AI extraction successful: email={bool(email)}, name={bool(inferred_name)}, property={bool(inquiry_property)}, purpose={bool(inquiry_purpose)}")
-                        
+                    json_str = resp[start:end]
+                    json_data = json.loads(json_str)
+                    print(f"   ✅ Successfully parsed JSON from response")
                 except json.JSONDecodeError as e:
-                    print(f"⚠️  Failed to parse AI JSON response: {e}")
-                    print(f"   Response was: {resp[:200]}")
-                    ai_success = False
+                    print(f"   ⚠️  JSON parse error: {e}")
+                    print(f"   JSON string: {json_str[:500]}")
+            
+            # Method 2: Try parsing entire response as JSON
+            if not json_data:
+                try:
+                    json_data = json.loads(resp)
+                    print(f"   ✅ Successfully parsed entire response as JSON")
+                except:
+                    pass
+            
+            if json_data:
+                print(f"   📊 Extracted data: {json.dumps(json_data, indent=2)}")
+                
+                # Extract email from AI
+                ai_email = json_data.get("email")
+                if ai_email:
+                    ai_email = str(ai_email).strip().lower()
+                    # Validate email format
+                    if re.match(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", ai_email):
+                        email = ai_email
+                        print(f"   ✅ Extracted email: {email}")
+                    else:
+                        print(f"   ⚠️  Invalid email format: {ai_email}")
+                
+                # Extract customer name from AI (AGGRESSIVE filtering)
+                ai_customer_name = json_data.get("customer_name")
+                if ai_customer_name:
+                    ai_customer_name = str(ai_customer_name).strip()
+                    # AGGRESSIVE bot name filtering
+                    bad_names = {
+                        "riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", 
+                        "this is", "hi", "hello", "hey", "yes", "no", "okay", "ok",
+                        "riley speaking", "this is riley", "i'm riley", "my name is riley"
+                    }
+                    name_lower = ai_customer_name.lower().strip()
+                    
+                    # Check if it's a bot name
+                    is_bot_name = (
+                        name_lower in bad_names or 
+                        "riley" in name_lower or 
+                        name_lower.startswith("riley") or
+                        len(ai_customer_name) < 2
+                    )
+                    
+                    if not is_bot_name:
+                        inferred_name = ai_customer_name
+                        print(f"   ✅ Extracted name: {inferred_name}")
+                    else:
+                        print(f"   ❌ Rejected bot name: '{ai_customer_name}'")
+                
+                # Fallback to email inference if AI didn't find name but found email
+                if not inferred_name and email:
+                    inferred_name = _infer_name_from_email(email)
+                    if inferred_name:
+                        print(f"   ✅ Inferred name from email: {inferred_name}")
+                
+                # Extract property (with STRICT validation)
+                ai_property = json_data.get("inquiry_property")
+                if ai_property:
+                    ai_property = str(ai_property).strip()
+                    # STRICT validation - must be a real address
+                    bot_patterns = [
+                        "searches", "visits", "booking", "general apartment inquiries",
+                        "apartment searches", "or general", "how can i assist", "visits booking",
+                        "apartment searches visits", "or general apartment", "apartment", "inquiries"
+                    ]
+                    property_lower = ai_property.lower()
+                    
+                    # Must contain a number AND not be bot text AND be substantial
+                    has_number = re.search(r"\d", ai_property)
+                    is_bot_text = any(pattern in property_lower for pattern in bot_patterns)
+                    is_substantial = len(ai_property) > 15  # Real addresses are longer
+                    
+                    if has_number and not is_bot_text and is_substantial:
+                        inquiry_property = ai_property
+                        print(f"   ✅ Extracted property: {inquiry_property}")
+                    else:
+                        print(f"   ❌ Rejected invalid property: '{ai_property}' (has_number={has_number}, is_bot={is_bot_text}, substantial={is_substantial})")
+                
+                # Extract purpose (with validation)
+                ai_purpose = json_data.get("inquiry_purpose")
+                if ai_purpose:
+                    ai_purpose = str(ai_purpose).strip()
+                    # Validate it's not bot text
+                    bot_phrases = [
+                        "searches", "visits booking", "general apartment inquiries",
+                        "apartment searches visits", "how can i assist", "searches, visits"
+                    ]
+                    if not any(phrase in ai_purpose.lower() for phrase in bot_phrases):
+                        inquiry_purpose = ai_purpose
+                        print(f"   ✅ Extracted purpose: {inquiry_purpose}")
+                    else:
+                        print(f"   ❌ Rejected bot purpose: '{ai_purpose}'")
+                
+                # Extract region
+                ai_region = json_data.get("region")
+                if ai_region:
+                    region = str(ai_region).strip()
+                    print(f"   ✅ Extracted region: {region}")
+                
+                ai_success = True
+                print(f"   ✅ Gemini AI extraction COMPLETE: email={bool(email)}, name={bool(inferred_name)}, property={bool(inquiry_property)}, purpose={bool(inquiry_purpose)}, region={bool(region)}")
+            else:
+                print(f"   ❌ Failed to extract JSON from Gemini response")
+                print(f"   Full response: {resp}")
+                ai_success = False
         else:
-            print("⚠️  AI client not available, will use regex fallback")
+            print("⚠️  AI client not available, will use hybrid fallback")
             ai_success = False
     except Exception as e:
-        print(f"⚠️  AI extraction failed: {e}")
+        print(f"❌ AI extraction failed with exception: {e}")
         import traceback
         traceback.print_exc()
         ai_success = False
@@ -878,7 +964,41 @@ JSON:"""
         inquiry_purpose = inquiry_purpose or hybrid_result.get("inquiry_purpose")
         region = region or hybrid_result.get("region")
 
-    # Build summary
+    # Extract summary from transcript (if present)
+    # Summaries are often at the end of transcripts with markers like "Summary:", "---", etc.
+    call_summary: Optional[str] = None
+    if transcript:
+        # Look for summary markers
+        summary_markers = [
+            "Summary:",
+            "---\nSummary:",
+            "Call Summary:",
+            "Summary",
+            "=== Summary ===",
+            "SUMMARY:"
+        ]
+        transcript_lower = transcript.lower()
+        for marker in summary_markers:
+            marker_lower = marker.lower()
+            if marker_lower in transcript_lower:
+                # Extract text after the marker
+                marker_index = transcript_lower.find(marker_lower)
+                if marker_index >= 0:
+                    summary_start = marker_index + len(marker)
+                    summary_text = transcript[summary_start:].strip()
+                    # Take up to 500 chars or until next section
+                    if summary_text:
+                        # Stop at common section markers
+                        for stop_marker in ["\n---", "\n===", "\nNotes:", "\nTranscript:", "\n\n\n"]:
+                            stop_index = summary_text.find(stop_marker)
+                            if stop_index > 0:
+                                summary_text = summary_text[:stop_index].strip()
+                        call_summary = summary_text[:500].strip() if summary_text else None
+                        if call_summary:
+                            print(f"   ✅ Extracted call summary: {call_summary[:100]}...")
+                            break
+    
+    # Build inquiry summary (structured summary of extracted fields)
     summary_parts = []
     if inquiry_purpose:
         summary_parts.append(f"Purpose: {inquiry_purpose}")
@@ -895,6 +1015,7 @@ JSON:"""
         "inquiry_property": inquiry_property,
         "inquiry_purpose": inquiry_purpose,
         "inquiry_summary": inquiry_summary,
+        "call_summary": call_summary,  # Full summary from transcript if available
     }
 
 
@@ -995,7 +1116,7 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                     continue  # Skip this candidate
             
             # Extract customer intel from transcript (email-first + intent/property)
-            # Only extract if transcript exists and is meaningful (at least 50 chars)
+            # ALWAYS re-extract to ensure we have the latest data from Gemini
             extracted_info = {
                 "email": None,
                 "inferred_name": None,
@@ -1005,48 +1126,66 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                 "inquiry_summary": None,
             }
             transcript = call_info.get("transcript")
+            
             if transcript and len(transcript.strip()) >= 50:
+                print(f"\n📞 Extracting from transcript for {phone} (length: {len(transcript)} chars)")
+                print(f"   Call ID: {call_info.get('call_id')}")
+                print(f"   Transcript preview: {transcript[:200]}...")
+                
                 try:
+                    # ALWAYS re-extract (don't trust cached data)
                     extracted_info = extract_contact_intel_from_transcript(transcript)
+                    
+                    print(f"   ✅ Extraction result:")
+                    print(f"      - Email: {extracted_info.get('email') or 'None'}")
+                    print(f"      - Name: {extracted_info.get('inferred_name') or 'None'}")
+                    print(f"      - Property: {extracted_info.get('inquiry_property') or 'None'}")
+                    print(f"      - Purpose: {extracted_info.get('inquiry_purpose') or 'None'}")
 
-                    # Store email if we extracted one and contact doesn't already have it
-                    if extracted_info.get("email") and not contact.email:
-                        contact.email = extracted_info["email"]
-                        session.add(contact)
-                        try:
-                            session.commit()
-                        except Exception:
-                            session.rollback()
+                    # ALWAYS update email if we extracted one (even if contact already has one - might be better)
+                    if extracted_info.get("email"):
+                        new_email = extracted_info["email"]
+                        if not contact.email or contact.email != new_email:
+                            contact.email = new_email
+                            session.add(contact)
+                            try:
+                                session.commit()
+                                print(f"   ✅ Updated email: {new_email}")
+                            except Exception:
+                                session.rollback()
 
-                    # Store inferred name - replace bad names (like "Riley") with better ones
+                    # ALWAYS update name if we found a good one (replace bad names like "Riley")
                     inferred_name = extracted_info.get("inferred_name")
                     if inferred_name:
-                        bad = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is"}
+                        bad = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello"}
                         inferred_clean = inferred_name.lower().strip()
                         
-                        # If contact has a bad name, replace it
+                        # If contact has a bad name OR no name, update it
+                        should_update_name = False
                         if contact.name:
                             contact_name_lower = contact.name.lower().strip()
+                            # Update if current name is bad OR if new name is better
                             if contact_name_lower in bad or "riley" in contact_name_lower:
-                                # Replace bad name with good one
-                                if inferred_clean not in bad and "riley" not in inferred_clean:
-                                    contact.name = inferred_name
-                                    session.add(contact)
-                                    try:
-                                        session.commit()
-                                    except Exception:
-                                        session.rollback()
-                        elif inferred_clean not in bad and "riley" not in inferred_clean:
+                                should_update_name = True
+                                print(f"   🔄 Replacing bad name '{contact.name}' with '{inferred_name}'")
+                        else:
                             # No name yet, add the inferred one
+                            should_update_name = True
+                            print(f"   ➕ Adding new name: '{inferred_name}'")
+                        
+                        if should_update_name and inferred_clean not in bad and "riley" not in inferred_clean and len(inferred_name) > 1:
                             contact.name = inferred_name
                             session.add(contact)
                             try:
                                 session.commit()
+                                print(f"   ✅ Updated name: {inferred_name}")
                             except Exception:
                                 session.rollback()
+                        elif inferred_clean in bad or "riley" in inferred_clean:
+                            print(f"   ❌ Rejected bad name: '{inferred_name}'")
                 except Exception as e:
                     # Don't fail candidate processing if extraction fails
-                    print(f"⚠️  Error extracting info from transcript: {e}")
+                    print(f"   ❌ Error extracting info from transcript: {e}")
                     import traceback
                     traceback.print_exc()
                     extracted_info = {
@@ -1056,7 +1195,10 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                         "inquiry_property": None,
                         "inquiry_purpose": None,
                         "inquiry_summary": None,
+                        "call_summary": None,
                     }
+            else:
+                print(f"   ⚠️  No transcript or transcript too short for {phone}")
             
             # In testing mode, show ALL candidates regardless of status
             # In production, we could filter here, but for now show all

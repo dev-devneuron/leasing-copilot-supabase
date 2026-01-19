@@ -12929,12 +12929,15 @@ async def get_outbound_call_candidates(
                             "last_call_id": candidate.get("last_call_id"),
                             "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
                             "call_direction": candidate.get("call_direction", "inbound"),
+                            # Extracted information from last call transcript
                             "extracted_email": candidate.get("extracted_email"),
                             "inferred_name": candidate.get("inferred_name"),
                             "extracted_region": candidate.get("extracted_region"),
-                            "inquiry_property": candidate.get("inquiry_property"),
-                            "inquiry_purpose": candidate.get("inquiry_purpose"),
-                            "inquiry_summary": candidate.get("inquiry_summary"),
+                            "inquiry_property": candidate.get("inquiry_property"),  # Property from last interaction
+                            "inquiry_purpose": candidate.get("inquiry_purpose"),  # Purpose of last call
+                            "inquiry_summary": candidate.get("inquiry_summary"),  # Structured summary
+                            "call_summary": candidate.get("call_summary"),  # Full call summary from transcript
+                            # Eligibility information
                             "eligible": eligibility.get("eligible", False) if eligibility else False,
                             "eligibility_reason": eligibility.get("reason", "Unknown") if eligibility else "Unknown",
                             "eligibility_checks": eligibility.get("checks", {}) if eligibility else {},
@@ -13091,28 +13094,70 @@ async def trigger_single_outbound_call(
                     print(f"⚠️  Could not load last call transcript: {e}")
 
                 extracted_intel = {}
+                call_summary = None
                 try:
                     if last_transcript and len(last_transcript.strip()) >= 50:
+                        print(f"📞 Extracting intel from last call transcript (length: {len(last_transcript)} chars)...")
                         extracted_intel = extract_contact_intel_from_transcript(last_transcript)
+                        
+                        # Get call summary if available
+                        call_summary = extracted_intel.get("call_summary")
+                        
                         # persist email if found
                         if extracted_intel.get("email") and not contact.email:
                             contact.email = extracted_intel["email"]
                             session.add(contact)
                             session.commit()
+                            print(f"✅ Updated contact email: {contact.email}")
+                        
+                        # Update name if we found a better one
+                        inferred_name = extracted_intel.get("inferred_name")
+                        if inferred_name:
+                            bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
+                            if (not contact.name or 
+                                contact.name.lower() in bad_names or 
+                                "riley" in contact.name.lower()):
+                                if inferred_name.lower() not in bad_names and "riley" not in inferred_name.lower():
+                                    contact.name = inferred_name
+                                    session.add(contact)
+                                    session.commit()
+                                    print(f"✅ Updated contact name: {contact.name}")
+                        
+                        print(f"📊 Extracted intel: email={extracted_intel.get('email')}, name={extracted_intel.get('inferred_name')}, property={extracted_intel.get('inquiry_property')}, purpose={extracted_intel.get('inquiry_purpose')}")
                 except Exception as e:
                     print(f"⚠️  Failed to extract intel from transcript: {e}")
+                    import traceback
+                    traceback.print_exc()
 
+                # Build comprehensive re-engagement metadata for Vapi
+                # This gives Vapi AI assistant full context about the customer and their last interaction
                 reengagement_metadata = {
                     "reengagementGoal": "Re-engage previously interested customers with AI-powered outreach.",
                     "lastCallId": last_call_id,
                     "lastCallAt": last_call_at,
-                    "lastInquirySummary": extracted_intel.get("inquiry_summary"),
-                    "lastInquiryPurpose": extracted_intel.get("inquiry_purpose"),
-                    "lastInquiryProperty": extracted_intel.get("inquiry_property"),
+                    
+                    # Customer identification
+                    "customerName": (contact.name or extracted_intel.get("inferred_name") or "Customer"),
                     "customerEmail": extracted_intel.get("email") or contact.email,
-                    "customerName": (contact.name or extracted_intel.get("inferred_name")),
+                    "customerPhone": contact.phone_number,
                     "customerRegion": extracted_intel.get("region"),
+                    
+                    # Last interaction details
+                    "lastInquiryProperty": extracted_intel.get("inquiry_property"),  # Property they inquired about
+                    "lastInquiryPurpose": extracted_intel.get("inquiry_purpose"),  # What they wanted (booking, pricing, etc.)
+                    "lastInquirySummary": extracted_intel.get("inquiry_summary"),  # Structured summary
+                    "lastCallSummary": call_summary,  # Full call summary from transcript if available
+                    
+                    # Additional context
+                    "callAttemptCount": contact.call_attempt_count,
+                    "lastCallOutcome": contact.last_call_outcome,
                 }
+                
+                print(f"📤 Sending re-engagement metadata to Vapi:")
+                print(f"   - Customer: {reengagement_metadata.get('customerName')} ({reengagement_metadata.get('customerEmail')})")
+                print(f"   - Last Property: {reengagement_metadata.get('lastInquiryProperty')}")
+                print(f"   - Last Purpose: {reengagement_metadata.get('lastInquiryPurpose')}")
+                print(f"   - Call Summary: {call_summary[:100] if call_summary else 'None'}...")
 
                 # Trigger call (will use PM's assigned Twilio number if from_number not provided)
                 try:
