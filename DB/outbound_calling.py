@@ -993,9 +993,25 @@ Return ONLY the JSON object, no other text:"""
             print(f"{'='*80}\n")
             ai_success = False
     except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
         print(f"\n❌ GEMINI AI EXTRACTION FAILED WITH EXCEPTION:")
-        print(f"   Error type: {type(e).__name__}")
-        print(f"   Error message: {str(e)}")
+        print(f"   Error type: {error_type}")
+        print(f"   Error message: {error_msg}")
+        
+        # Provide helpful guidance for common errors
+        if "PermissionDenied" in error_type or "403" in error_msg or "leaked" in error_msg.lower():
+            print(f"\n   🔑 ACTION REQUIRED: API Key Issue")
+            print(f"   Your Gemini API key has been flagged. Please:")
+            print(f"   1. Generate a new API key: https://aistudio.google.com/app/apikey")
+            print(f"   2. Update GEMINI_API_KEY in your deployment environment variables")
+            print(f"   3. Redeploy your backend")
+            print(f"   Falling back to hybrid CRF/NER + Regex extraction...")
+        elif "NotFound" in error_type or "404" in error_msg:
+            print(f"\n   📦 Model not available - using hybrid fallback extraction...")
+        else:
+            print(f"\n   Using hybrid CRF/NER + Regex fallback extraction...")
+        
         import traceback
         traceback.print_exc()
         print(f"{'='*80}\n")

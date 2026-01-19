@@ -234,8 +234,21 @@ class VertexAIClient:
                 
                 return result
         except Exception as e:
-            print(f"❌ [VertexAIClient] Error generating content: {e}")
-            print(f"   Error type: {type(e).__name__}")
+            error_type = type(e).__name__
+            error_msg = str(e)
+            print(f"❌ [VertexAIClient] Error generating content: {error_msg}")
+            print(f"   Error type: {error_type}")
+            
+            # Handle specific error types
+            if "PermissionDenied" in error_type or "403" in error_msg or "leaked" in error_msg.lower():
+                print(f"\n   🔑 API KEY ISSUE DETECTED:")
+                print(f"   The Gemini API key has been flagged as leaked or invalid.")
+                print(f"   Please generate a new API key from: https://aistudio.google.com/app/apikey")
+                print(f"   Then update the GEMINI_API_KEY environment variable in your deployment.")
+            elif "NotFound" in error_type or "404" in error_msg:
+                print(f"\n   📦 MODEL NOT FOUND:")
+                print(f"   The requested model may not be available. Falling back to hybrid extraction.")
+            
             import traceback
             traceback.print_exc()
             raise
@@ -317,12 +330,8 @@ def get_vertex_ai_client() -> VertexAIClient:
         _vertex_ai_client = VertexAIClient()
     else:
         print(f"\n[get_vertex_ai_client] Reusing existing VertexAIClient instance")
-        # Verify the model is still valid
-        if _vertex_ai_client.model:
-            model_info = str(_vertex_ai_client.model)
-            if "models/" in model_info and not _vertex_ai_client.use_vertex_ai:
-                print(f"   ⚠️  WARNING: Model object has 'models/' prefix but using Gemini API!")
-                print(f"   Model info: {model_info}")
+        # Note: The SDK internally stores model names with "models/" prefix in the object representation
+        # This is normal and expected - the SDK handles the API path correctly
     return _vertex_ai_client
 
 def reset_vertex_ai_client():
