@@ -56,7 +56,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from DB.db import *
 from DB.sync import sync_apartment_listings
 from utils.calendar_utils import GoogleCalendar
-from utils.auth_module import get_current_realtor_id, get_current_user_data
+from utils.auth_module import get_current_realtor_id, get_current_user_data, get_admin_auth
 from vapi.rag import RAGEngine
 from vapi.bounded_usage import MessageLimiter
 from config import (
@@ -7533,10 +7533,14 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
 @app.post("/admin/cleanup-bad-names")
 def cleanup_bad_names(
     dry_run: bool = True,
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    auth: Dict[str, Any] = Depends(get_admin_auth)
 ):
     """
     Admin endpoint to clean up existing contacts with bad names (verbs, filler words).
+    
+    Authentication:
+    - ADMIN_API_KEY: Use "Authorization: Bearer <ADMIN_API_KEY>" header
+    - OR Property Manager JWT token
     
     Args:
         dry_run: If True, only count contacts without updating (default: True for safety)
@@ -7544,13 +7548,6 @@ def cleanup_bad_names(
     Returns:
         Statistics about cleanup operation
     """
-    # Validate user type (admin/PM only)
-    user_type = current_user.get("user_type")
-    if user_type not in ["property_manager"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only property managers can run cleanup operations"
-        )
     
     try:
         from DB.outbound_calling import cleanup_bad_contact_names
@@ -7579,10 +7576,14 @@ def cleanup_bad_names(
 def cleanup_short_calls(
     dry_run: bool = True,
     min_duration_seconds: int = 90,
-    current_user: Dict[str, Any] = Depends(get_current_user_data)
+    auth: Dict[str, Any] = Depends(get_admin_auth)
 ):
     """
     Admin endpoint to clean up existing call records that are too short.
+    
+    Authentication:
+    - ADMIN_API_KEY: Use "Authorization: Bearer <ADMIN_API_KEY>" header
+    - OR Property Manager JWT token
     
     Args:
         dry_run: If True, only count records without deleting (default: True for safety)
@@ -7591,13 +7592,6 @@ def cleanup_short_calls(
     Returns:
         Statistics about cleanup operation
     """
-    # Validate user type (admin/PM only)
-    user_type = current_user.get("user_type")
-    if user_type not in ["property_manager"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only property managers can run cleanup operations"
-        )
     
     try:
         from DB.outbound_calling import cleanup_short_call_records
@@ -7627,7 +7621,7 @@ def cleanup_short_calls(
 def import_vapi_calls(
     limit: Optional[int] = 100,
     offset: Optional[int] = 0,
-    # In production, add admin authentication here
+    auth: Dict[str, Any] = Depends(get_admin_auth)
 ):
     """
     Admin endpoint to import historical calls from VAPI API.

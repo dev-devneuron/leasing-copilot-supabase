@@ -1209,15 +1209,23 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
             # Build PERFECTED prompt with enhanced extraction rules
             prompt = f"""You are an expert data extraction specialist. Extract ONLY customer information from a phone call transcript.
 
-⚠️ CRITICAL RULES - BE AGGRESSIVE:
+⚠️ CRITICAL RULES - BE AGGRESSIVE AND INTELLIGENT:
 1. The AI assistant is named "Riley" - IGNORE EVERYTHING Riley/Bot/Assistant says EXCEPT when Riley confirms customer info
-2. ONLY extract from CUSTOMER/USER statements (lines starting with "User:", "Customer:", or direct customer speech)
-3. EXCEPTION: If AI confirms customer email/name and customer says "yes" or "correct", extract from AI's confirmation
-   Example: AI: "Your email is john@gmail.com, correct?" User: "Yes" → Extract "john@gmail.com"
-4. BE AGGRESSIVE - Extract ANY information that MIGHT be customer data, even if uncertain
-5. Normalize spoken formats (e.g., "at" = @, "dot" = .)
-6. IMPORTANT: If you see ANY pattern that COULD be an email or name, extract it. Better to extract than return null.
-7. Look for information in ALL parts of the transcript, not just explicit statements
+2. ANALYZE THE ENTIRE CONVERSATION - Don't just look at isolated statements. Understand context and flow.
+3. USER ALWAYS PROVIDES INFO WHEN AI EXPLICITLY ASKS:
+   - When AI asks "What's your name?" and user responds, extract that name
+   - When AI asks "What's your email?" and user responds, extract that email
+   - When AI asks "Could you provide your email?" and user says "Yes, it's X", extract X
+   - When AI confirms info and user says "yes", "correct", "that's right", extract from AI's confirmation
+4. CONTEXT-AWARE EXTRACTION:
+   - If AI asks a question and user answers in the next line, connect them
+   - Example: AI: "What's your name?" User: "John" → Extract "John"
+   - Example: AI: "Could you provide your email?" User: "Yeah, it's john@gmail.com" → Extract "john@gmail.com"
+5. BE AGGRESSIVE - Extract ANY information that MIGHT be customer data, even if uncertain
+6. Normalize spoken formats (e.g., "at" = @, "dot" = .)
+7. IMPORTANT: If you see ANY pattern that COULD be an email or name, extract it. Better to extract than return null.
+8. Look for information in ALL parts of the transcript, not just explicit statements
+9. UNDERSTAND CONVERSATION FLOW - Track question-answer pairs throughout the entire transcript
 
 TRANSCRIPT FORMAT IDENTIFICATION:
 - "User:" or "Customer:" lines = CUSTOMER SPEECH (EXTRACT FROM THESE)
@@ -1239,19 +1247,23 @@ DETAILED EXTRACTION RULES:
    - Return null ONLY if absolutely no email mentioned anywhere AND no email-like patterns found AND no email in AI confirmations
 
 2. CUSTOMER_NAME (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
+   - ANALYZE THE ENTIRE CONVERSATION - Track question-answer pairs
+   - When AI asks "What's your name?" / "Could you provide your name?" / "May I have your name?" and user responds, extract that response
    - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X", "I go by X"
    - Extract FIRST NAME if full name given (e.g., "John Smith" → "John")
-   - MUST be a real person name (2+ characters, not generic words or verbs)
+   - MUST be a real person name (3+ characters, not generic words or verbs)
    - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
    - REJECT COMMON VERBS: "looking", "searching", "asking", "wanting", "trying", "calling", "needing", "seeking", "finding", "providing", "following", "checking", "wondering", "thinking"
    - REJECT COMMON WORDS / FILLERS: "anyway", "preferably", "should", "would", "could", "please", "thanks", "thank", "so", "yeah", "yep", "nope", "uh", "um", "well"
-   - CRITICAL: NEVER extract verbs as names. If you see "Looking", "Providing", "Following", "Searching", "Asking" - these are VERBS, NOT NAMES. Return null.
+   - CRITICAL: NEVER extract verbs as names. If you see "Looking", "Providing", "Following", "Searching", "Asking", "So" - these are VERBS/FILLERS, NOT NAMES. Return null.
    - CRITICAL: If the word is a verb (action word) or filler/discourse word ("so", "yeah", "uh", etc.), it CANNOT be a name. Return null.
-   - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech ONLY if it's a real name
-   - If customer confirms their name when AI asks, extract from context
+   - CRITICAL: Single words like "So", "Ok", "Yeah" are discourse markers, NOT names. They are responses to questions, not name declarations.
+   - CONTEXT-AWARE: If AI asks "What's your name?" and user says "So" or "Yeah", that's NOT a name - it's a filler response. Look for the actual name later in the conversation.
+   - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech ONLY if it's a real name (3+ chars, not a verb/filler)
+   - If customer confirms their name when AI asks, extract from the actual name provided, not from filler words
    - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John", "rehan@gmail.com" → "Rehan")
    - IMPORTANT: If email exists, ALWAYS try to infer name from email username (capitalize first letter)
-   - CRITICAL: Before returning a name, verify it's NOT a verb. Common verbs to reject: looking, providing, following, searching, asking, wanting, trying, calling, needing, seeking, finding, checking, wondering, thinking
+   - CRITICAL: Before returning a name, verify it's NOT a verb or filler. Common rejections: looking, providing, following, searching, asking, so, yeah, ok, uh, um
    - Return null if the extracted value is a verb, filler word, or bot name
    - Return null ONLY if no name mentioned AND cannot infer from email (even if email username seems unclear, try it)
 

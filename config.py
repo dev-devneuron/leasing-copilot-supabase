@@ -147,6 +147,15 @@ VERTEX_AI_EMBEDDING_MODEL = os.getenv("VERTEX_AI_EMBEDDING_MODEL", "textembeddin
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ============================================================================
+# ADMIN API KEY CONFIGURATION
+# ============================================================================
+
+# Admin API key for programmatic access to admin endpoints
+# Can be used instead of JWT authentication for automated operations
+# Set this in your environment variables for secure admin access
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+
+# ============================================================================
 # TEXT PROCESSING CONFIGURATION
 # ============================================================================
 

@@ -10,7 +10,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 from DB.db import engine, Realtor, PropertyManager, get_user_data_by_auth_id
 from sqlmodel import Session, select
-from config import SUPABASE_JWT_SECRET
+from config import SUPABASE_JWT_SECRET, ADMIN_API_KEY
 
 # HTTP Bearer token security scheme
 security = HTTPBearer()
@@ -99,4 +99,74 @@ def get_current_user_data(
         raise HTTPException(
             status_code=401,
             detail="Invalid token"
+        )
+
+
+def get_admin_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security)
+):
+    """
+    Admin authentication that accepts either:
+    1. ADMIN_API_KEY (for programmatic/automated access)
+    2. Property Manager JWT token (for UI access)
+    
+    Returns:
+        Dict with authentication info:
+        - If API key: {"authenticated": True, "method": "api_key", "user_type": "admin"}
+        - If JWT: Full user data from get_current_user_data()
+    
+    Raises:
+        HTTPException 401: If neither authentication method is valid
+    """
+    token = credentials.credentials
+    
+    # Check if it's an admin API key
+    if ADMIN_API_KEY and token == ADMIN_API_KEY:
+        return {
+            "authenticated": True,
+            "method": "api_key",
+            "user_type": "admin",
+            "id": None,  # No user ID for API key auth
+        }
+    
+    # Otherwise, try JWT authentication (for property managers)
+    try:
+        # Decode without audience verification to prevent mismatch errors
+        payload = jwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            options={"verify_aud": False}
+        )
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid token: missing user ID"
+            )
+
+        # Get user data (works for both Property Managers and Realtors)
+        user_data = get_user_data_by_auth_id(user_id)
+        
+        # Only allow property managers via JWT
+        if user_data.get("user_type") != "property_manager":
+            raise HTTPException(
+                status_code=403,
+                detail="Only property managers can access admin endpoints"
+            )
+        
+        return user_data
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token expired"
+        )
+    except jwt.InvalidTokenError as e:
+        # If it's not a valid JWT and not the admin key, reject
+        print(f"JWT decode error: {e}")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication. Use ADMIN_API_KEY or valid property manager JWT token."
         )
