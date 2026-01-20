@@ -7234,7 +7234,7 @@ def _derive_duration_from_recording(recording_url: str) -> Optional[int]:
     return None
 
 
-def _detect_opt_out(transcript: Optional[str], message: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+def _detect_opt_out(transcript: Optional[str], message: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Detect opt-out from transcript, message, or payload.
     
@@ -7244,10 +7244,15 @@ def _detect_opt_out(transcript: Optional[str], message: Dict[str, Any], payload:
     - Keypad opt-out signals (if configured)
     
     Returns:
-        True if opt-out detected, False otherwise
+        {
+            "detected": bool,
+            "reason": str,  # Reason for opt-out (e.g., "stop calling")
+            "transcript_line": str,  # Exact line from transcript that triggered opt-out
+            "method": str  # "transcript", "message", "payload", or "keypad"
+        }
     """
     if not transcript and not message and not payload:
-        return False
+        return {"detected": False, "reason": None, "transcript_line": None, "method": None}
     
     # Opt-out keywords (case-insensitive)
     opt_out_keywords = [
@@ -7294,9 +7299,23 @@ def _detect_opt_out(transcript: Optional[str], message: Dict[str, Any], payload:
         user_text = " ".join(user_lines)
         for keyword in opt_out_keywords:
             if keyword in user_text:
+                # Find the exact line that contains the keyword
+                matching_line = None
+                for line in lines:
+                    line_lower = line.lower().strip()
+                    if keyword in line_lower and not any(prefix in line_lower for prefix in ["bot:", "ai:", "assistant:", "riley:", "agent:"]):
+                        matching_line = line.strip()
+                        break
+                
                 print(f"🚫 Opt-out keyword detected in USER transcript: '{keyword}'")
+                print(f"   Exact transcript line: {matching_line}")
                 print(f"   User text snippet: {user_text[:200]}...")
-                return True
+                return {
+                    "detected": True,
+                    "reason": keyword,
+                    "transcript_line": matching_line or f"User said: '{keyword}'",
+                    "method": "transcript"
+                }
     
     # Check for explicit opt-out in message/payload
     # Vapi might send explicit opt-out events
@@ -7304,27 +7323,47 @@ def _detect_opt_out(transcript: Optional[str], message: Dict[str, Any], payload:
         message_type = message.get("type", "").lower()
         if "opt" in message_type and "out" in message_type:
             print(f"🚫 Explicit opt-out event detected: {message_type}")
-            return True
+            return {
+                "detected": True,
+                "reason": f"Explicit opt-out event: {message_type}",
+                "transcript_line": None,
+                "method": "message"
+            }
         
         # Check for opt-out flag in message
         if message.get("optOut") or message.get("opt_out") or message.get("optedOut"):
             print(f"🚫 Opt-out flag detected in message")
-            return True
+            return {
+                "detected": True,
+                "reason": "Opt-out flag in message",
+                "transcript_line": None,
+                "method": "message"
+            }
     
     # Check payload for opt-out indicators
     if payload:
         if payload.get("optOut") or payload.get("opt_out") or payload.get("optedOut"):
             print(f"🚫 Opt-out flag detected in payload")
-            return True
+            return {
+                "detected": True,
+                "reason": "Opt-out flag in payload",
+                "transcript_line": None,
+                "method": "payload"
+            }
         
         # Check for keypad input indicating opt-out (e.g., pressing 9)
         # This would need to be configured in Vapi assistant
         keypad_input = payload.get("keypadInput") or payload.get("keypad_input")
         if keypad_input == "9" or keypad_input == "9#":  # Common opt-out keypad code
             print(f"🚫 Opt-out keypad input detected: {keypad_input}")
-            return True
+            return {
+                "detected": True,
+                "reason": f"Keypad opt-out: {keypad_input}",
+                "transcript_line": None,
+                "method": "keypad"
+            }
     
-    return False
+    return {"detected": False, "reason": None, "transcript_line": None, "method": None}
 
 
 def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[CallRecord]:
@@ -7489,6 +7528,51 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
     session.refresh(call_record)
     
     return call_record
+
+
+@app.post("/admin/cleanup-bad-names")
+def cleanup_bad_names(
+    dry_run: bool = True,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Admin endpoint to clean up existing contacts with bad names (verbs, filler words).
+    
+    Args:
+        dry_run: If True, only count contacts without updating (default: True for safety)
+    
+    Returns:
+        Statistics about cleanup operation
+    """
+    # Validate user type (admin/PM only)
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can run cleanup operations"
+        )
+    
+    try:
+        from DB.outbound_calling import cleanup_bad_contact_names
+        
+        with Session(engine) as session:
+            result = cleanup_bad_contact_names(
+                session=session,
+                dry_run=dry_run
+            )
+            
+            return JSONResponse(content={
+                "message": "Cleanup completed" if not dry_run else "Dry run completed",
+                "result": result
+            })
+    except Exception as e:
+        print(f"❌ Error during cleanup: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cleanup failed: {str(e)}"
+        )
 
 
 @app.post("/admin/cleanup-short-calls")
@@ -8105,7 +8189,8 @@ async def vapi_webhook_hyphen(request: Request):
             # ========================================================================
             # Check for opt-out in transcript or explicit opt-out events
             if full_transcript or message_type:
-                opt_out_detected = _detect_opt_out(full_transcript, message, payload)
+                opt_out_result = _detect_opt_out(full_transcript, message, payload)
+                opt_out_detected = opt_out_result.get("detected", False)
                 
                 if opt_out_detected:
                     # Get caller number for opt-out processing
@@ -8126,15 +8211,19 @@ async def vapi_webhook_hyphen(request: Request):
                                 call_id=call_id
                             )
                             
-                            # Mark call record
+                            # Mark call record with opt-out details
                             call_record.opt_out_triggered = True
                             if call_record.call_metadata is None:
                                 call_record.call_metadata = {}
                             call_record.call_metadata["opt_out_detected_at"] = now.isoformat()
-                            call_record.call_metadata["opt_out_method"] = "voice"
+                            call_record.call_metadata["opt_out_method"] = opt_out_result.get("method", "voice")
+                            call_record.call_metadata["opt_out_reason"] = opt_out_result.get("reason", "Opt-out detected")
+                            call_record.call_metadata["opt_out_transcript_line"] = opt_out_result.get("transcript_line")
                             updated = True
                             
                             print(f"🚫 OPT-OUT DETECTED AND RECORDED: {normalized_phone} (call_id: {call_id})")
+                            print(f"   Reason: {opt_out_result.get('reason')}")
+                            print(f"   Transcript line: {opt_out_result.get('transcript_line')}")
                         except Exception as e:
                             print(f"⚠️  Error recording opt-out: {e}")
             
@@ -13129,27 +13218,46 @@ async def get_outbound_call_candidates(
                             
                         eligibility = check_eligibility(contact, session)
                         
-                        # Smart name selection: reject bad stored names, prefer extracted
-                        stored_name = contact.name
-                        inferred_name = candidate.get("inferred_name")
-                        bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "riley speaking"}
+                        # Import name sanitization helper
+                        from DB.outbound_calling import _is_bad_person_name
                         
-                        # If stored name is bad, ignore it and use inferred
-                        if stored_name:
-                            stored_name_lower = stored_name.lower().strip()
-                            if stored_name_lower in bad_names or "riley" in stored_name_lower:
-                                stored_name = None  # Ignore bad stored name
+                        # Sanitize names before using them
+                        inferred_name_raw = candidate.get("inferred_name")
+                        stored_name_raw = contact.name
+                        
+                        # Filter out bad names using centralized helper
+                        inferred_name = inferred_name_raw if inferred_name_raw and not _is_bad_person_name(inferred_name_raw) else None
+                        stored_name = stored_name_raw if stored_name_raw and not _is_bad_person_name(stored_name_raw) else None
                         
                         # Prefer inferred name if stored name is bad or missing
                         display_name = inferred_name if inferred_name else stored_name
+                        
+                        # Get opt-out details from most recent call if contact opted out
+                        opt_out_reason = None
+                        opt_out_transcript_line = None
+                        if contact.opted_out:
+                            # Find the most recent call record with opt-out details
+                            from DB.db import CallRecord
+                            opt_out_call = session.exec(
+                                select(CallRecord)
+                                .where(CallRecord.contact_id == contact.id)
+                                .where(CallRecord.opt_out_triggered == True)
+                                .order_by(CallRecord.created_at.desc())
+                                .limit(1)
+                            ).first()
+                            if opt_out_call and opt_out_call.call_metadata:
+                                opt_out_reason = opt_out_call.call_metadata.get("opt_out_reason")
+                                opt_out_transcript_line = opt_out_call.call_metadata.get("opt_out_transcript_line")
                         
                         enriched_candidates.append({
                             # Basic contact information
                             "contact_id": contact.id,
                             "phone_number": contact.phone_number,
                             
-                            # Name fields (with smart fallback logic)
-                            "name": display_name,  # Best available name (stored or inferred)
+                            # Name fields (with smart fallback logic - SANITIZED)
+                            "name": display_name,  # Best available name (stored or inferred, sanitized)
+                            "inferred_name": inferred_name,  # Name inferred from email/extraction (sanitized)
+                            "stored_name": stored_name,  # Name stored in contact table (sanitized)
                             
                             # Email fields (with fallback logic)
                             "email": contact.email or candidate.get("extracted_email"),  # Best available email
@@ -13170,6 +13278,10 @@ async def get_outbound_call_candidates(
                             "last_call_at": candidate.get("last_call_at").isoformat() if candidate.get("last_call_at") else None,
                             "call_direction": candidate.get("call_direction", "inbound"),
                             "call_transcript": candidate.get("call_transcript"),  # Full transcript if available
+                            
+                            # Opt-out details (from most recent call if opted out)
+                            "opt_out_reason": opt_out_reason,
+                            "opt_out_transcript_line": opt_out_transcript_line,
                             
                             # Extracted intelligence from call transcripts (NEW - CRITICAL)
                             "extracted_region": candidate.get("extracted_region"),  # Region/state extracted

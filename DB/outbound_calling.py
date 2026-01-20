@@ -636,6 +636,78 @@ def cleanup_short_call_records(
     }
 
 
+def cleanup_bad_contact_names(
+    session: Session,
+    dry_run: bool = True
+) -> Dict[str, Any]:
+    """
+    Clean up existing contacts with bad names (verbs, filler words, bot names).
+    
+    Args:
+        session: Database session
+        dry_run: If True, only count contacts without updating
+    
+    Returns:
+        Statistics about cleanup operation
+    """
+    print(f"\n{'='*80}")
+    print(f"🧹 CLEANUP: Fixing bad contact names (verbs/filler words)")
+    print(f"{'='*80}")
+    
+    # Find all contacts with names
+    all_contacts = session.exec(select(Contact).where(Contact.name.isnot(None))).all()
+    
+    bad_contacts = []
+    for contact in all_contacts:
+        if contact.name and _is_bad_person_name(contact.name):
+            bad_contacts.append(contact)
+    
+    count = len(bad_contacts)
+    print(f"   Found {count} contacts with bad names")
+    
+    if count == 0:
+        print(f"   ✅ No bad contact names to clean up")
+        return {
+            "fixed": 0,
+            "dry_run": dry_run
+        }
+    
+    if dry_run:
+        print(f"   🔍 DRY RUN: Would fix {count} contact names")
+        for contact in bad_contacts[:10]:  # Show first 10 as examples
+            print(f"      - Contact {contact.id} | Phone: {contact.phone_number} | Bad name: '{contact.name}'")
+        return {
+            "would_fix": count,
+            "dry_run": True
+        }
+    
+    # Fix bad names by setting them to None
+    fixed_count = 0
+    for contact in bad_contacts:
+        try:
+            old_name = contact.name
+            contact.name = None  # Clear bad name
+            session.add(contact)
+            fixed_count += 1
+            if fixed_count % 100 == 0:
+                print(f"   📊 Progress: Fixed {fixed_count}/{count} contact names...")
+        except Exception as e:
+            print(f"   ⚠️  Error fixing contact {contact.id}: {e}")
+    
+    try:
+        session.commit()
+        print(f"   ✅ Successfully fixed {fixed_count} bad contact names")
+    except Exception as e:
+        session.rollback()
+        print(f"   ❌ Error committing fixes: {e}")
+        raise
+    
+    return {
+        "fixed": fixed_count,
+        "dry_run": False
+    }
+
+
 def _is_bad_person_name(name: Optional[str]) -> bool:
     """
     Centralized "bad name" detection.
@@ -1163,13 +1235,16 @@ DETAILED EXTRACTION RULES:
    - Extract FIRST NAME if full name given (e.g., "John Smith" → "John")
    - MUST be a real person name (2+ characters, not generic words or verbs)
    - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
-   - REJECT COMMON VERBS: "looking", "searching", "asking", "wanting", "trying", "calling", "needing", "seeking", "finding"
+   - REJECT COMMON VERBS: "looking", "searching", "asking", "wanting", "trying", "calling", "needing", "seeking", "finding", "providing", "following", "checking", "wondering", "thinking"
    - REJECT COMMON WORDS: "anyway", "preferably", "should", "would", "could", "please", "thanks", "thank"
-   - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech
+   - CRITICAL: NEVER extract verbs as names. If you see "Looking", "Providing", "Following", "Searching", "Asking" - these are VERBS, NOT NAMES. Return null.
+   - CRITICAL: If the word is a verb (action word) or filler word, it CANNOT be a name. Return null.
+   - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech ONLY if it's a real name
    - If customer confirms their name when AI asks, extract from context
    - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John", "rehan@gmail.com" → "Rehan")
    - IMPORTANT: If email exists, ALWAYS try to infer name from email username (capitalize first letter)
-   - CRITICAL: If the extracted "name" is a verb or common word (like "looking", "searching", "asking"), return null instead
+   - CRITICAL: Before returning a name, verify it's NOT a verb. Common verbs to reject: looking, providing, following, searching, asking, wanting, trying, calling, needing, seeking, finding, checking, wondering, thinking
+   - Return null if the extracted value is a verb, filler word, or bot name
    - Return null ONLY if no name mentioned AND cannot infer from email (even if email username seems unclear, try it)
 
 3. INQUIRY_PROPERTY (MEDIUM PRIORITY - EXTRACT ALL PROPERTIES):
@@ -1366,11 +1441,13 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         len(ai_customer_name) < 2
                     )
                     
-                    if not is_bot_name:
+                    # Use centralized bad name detection
+                    if not _is_bad_person_name(ai_customer_name):
                         inferred_name = ai_customer_name
                         print(f"   ✅ Extracted name: {inferred_name}")
                     else:
-                        print(f"   ❌ Rejected bot name: '{ai_customer_name}'")
+                        print(f"   ❌ Rejected bad name (verb/filler): '{ai_customer_name}'")
+                        inferred_name = None
                 
                 # Fallback to email inference if AI didn't find name but found email
                 # ALWAYS try to infer name from email - be aggressive
@@ -1417,10 +1494,8 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                                         "needing", "seeking", "finding", "checking", "wondering", "thinking",
                                         "preferably", "anyway", "should", "would", "could", "please"
                                     }
-                                    if (potential_name_lower not in bad_names and 
-                                        potential_name_lower not in common_verbs and
-                                        "riley" not in potential_name_lower and 
-                                        len(potential_name) >= 2):
+                                    # Use centralized bad name detection
+                                    if not _is_bad_person_name(potential_name) and len(potential_name) >= 2:
                                         # Take first name if full name
                                         first_name = potential_name.split()[0] if " " in potential_name else potential_name
                                         inferred_name = first_name[:1].upper() + first_name[1:].lower()
