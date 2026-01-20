@@ -1859,14 +1859,28 @@ def trigger_outbound_call(
         session = Session(engine)
         session_created = True
     
-    # Use default assistant if not provided
+    # Get outbound assistant ID from property manager if not provided
+    if not assistant_id and property_manager_id:
+        try:
+            pm = session.get(PropertyManager, property_manager_id)
+            if pm and pm.vapi_outbound_assistant_id:
+                assistant_id = pm.vapi_outbound_assistant_id
+                print(f"✅ Using outbound assistant ID from PropertyManager {property_manager_id}: {assistant_id}")
+            else:
+                print(f"⚠️  PropertyManager {property_manager_id} has no vapi_outbound_assistant_id configured")
+        except Exception as e:
+            print(f"⚠️  Error loading PropertyManager {property_manager_id}: {e}")
+    
+    # Fallback to environment variable if still not set
     if not assistant_id:
         assistant_id = VAPI_ASSISTANT_ID
+        if assistant_id:
+            print(f"⚠️  Using fallback VAPI_ASSISTANT_ID from environment (should use PM's outbound assistant ID)")
     
     if not assistant_id:
         return {
             "success": False,
-            "error": "No VAPI assistant ID configured",
+            "error": "No VAPI outbound assistant ID configured. Please set vapi_outbound_assistant_id for the PropertyManager or set VAPI_ASSISTANT_ID environment variable.",
             "contact_id": contact.id
         }
     

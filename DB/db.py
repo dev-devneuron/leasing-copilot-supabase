@@ -130,8 +130,9 @@ class PropertyManager(SQLModel, table=True):
         sa_column=Column(JSONB)
     )  # { defaultSlotLengthMins: 30, workingHours: { start: '09:00', end: '17:00' } }
     
-    # VAPI Assistant ID (for chat identification when phone number is not available)
-    vapi_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for chat requests
+    # VAPI Assistant IDs
+    vapi_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for inbound calls/chat requests
+    vapi_outbound_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for outbound calls
     
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
@@ -198,8 +199,9 @@ class Realtor(SQLModel, table=True):
         sa_column=Column(JSONB)
     )  # { defaultSlotLengthMins: 30, workingHours: { start: '09:00', end: '17:00' } }
     
-    # VAPI Assistant ID (for chat identification when phone number is not available)
-    vapi_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for chat requests
+    # VAPI Assistant IDs
+    vapi_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for inbound calls/chat requests
+    vapi_outbound_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for outbound calls
     
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
