@@ -1999,9 +1999,12 @@ def trigger_outbound_call(
         traceback.print_exc()
         # Continue without context if there's an error
     
-    # Prepare Vapi API request with correct structure
+    # Prepare Vapi API request with correct structure (following Vapi best practices)
     # Vapi expects: phoneNumber.twilioPhoneNumber, phoneNumber.twilioAccountSid, phoneNumber.twilioAuthToken
     # and customer.number (not phoneNumber.to)
+    # Best practice: Include customer.name if available for better personalization
+    customer_name = contact.name or (extracted_intel.get("inferred_name") if extracted_intel else None)
+    
     payload = {
         "assistantId": assistant_id,
         "phoneNumber": {
@@ -2010,7 +2013,7 @@ def trigger_outbound_call(
             "twilioAuthToken": TWILIO_AUTH_TOKEN
         },
         "customer": {
-            "number": contact.phone_number  # Recipient's phone number (TO)
+            "number": contact.phone_number,  # Recipient's phone number (TO)
         },
         "metadata": {
             "contactId": str(contact.id),
@@ -2019,11 +2022,35 @@ def trigger_outbound_call(
         }
     }
     
-    # Add context to metadata (Vapi doesn't allow assistant.messages when using assistantId)
-    # The assistant's system prompt should be configured to read from metadata fields
+    # Add customer name if available (best practice: include in customer object)
+    if customer_name:
+        payload["customer"]["name"] = customer_name
+    
+    # Add context to metadata (Vapi best practice: use metadata for context)
+    # The assistant's system prompt should be configured to read from metadata.callContext
+    # Alternative: Use assistantOverrides.variableValues for structured variables
     if context_message:
         payload["metadata"]["callContext"] = context_message
         print(f"📤 Added call context to metadata")
+    
+    # Also add structured variables via assistantOverrides for easier prompt reference
+    # This allows the assistant to use {{customerName}}, {{inquiryProperty}}, etc. in prompts
+    if extracted_intel:
+        variable_values = {}
+        if customer_name:
+            variable_values["customerName"] = customer_name
+        if extracted_intel.get("inquiry_property"):
+            variable_values["inquiryProperty"] = extracted_intel["inquiry_property"]
+        if extracted_intel.get("inquiry_purpose"):
+            variable_values["inquiryPurpose"] = extracted_intel["inquiry_purpose"]
+        if extracted_intel.get("region"):
+            variable_values["customerRegion"] = extracted_intel["region"]
+        
+        if variable_values:
+            payload["assistantOverrides"] = {
+                "variableValues": variable_values
+            }
+            print(f"📤 Added structured variables via assistantOverrides: {list(variable_values.keys())}")
     
     # Merge additional metadata (keep for backward compatibility)
     if metadata:
