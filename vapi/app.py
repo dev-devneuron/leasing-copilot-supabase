@@ -13632,11 +13632,14 @@ async def get_contacts(
         contacts = session.exec(query.offset(offset).limit(limit)).all()
         total = session.exec(select(func.count(Contact.id))).first()
         
+        # Import name sanitization helper
+        from DB.outbound_calling import _is_bad_person_name
+        
         return create_cors_json_response(content={
             "contacts": [{
                 "id": c.id,
                 "phone_number": c.phone_number,
-                "name": c.name,
+                "name": c.name if c.name and not _is_bad_person_name(c.name) else None,  # Sanitize bad names
                 "email": c.email,
                 "timezone": c.timezone,
                 "consent_status": c.consent_status,
