@@ -7268,11 +7268,34 @@ def _detect_opt_out(transcript: Optional[str], message: Dict[str, Any], payload:
     ]
     
     # Check transcript for opt-out keywords
+    # IMPORTANT: Only detect opt-out if USER says it, not if AI mentions it
     if transcript:
         transcript_lower = transcript.lower()
+        
+        # Split transcript into lines to identify user vs AI
+        lines = transcript.splitlines()
+        user_lines = []
+        
+        # Identify user lines (typically lines that don't start with "Bot:", "AI:", "Assistant:", etc.)
+        for line in lines:
+            line_lower = line.lower().strip()
+            # Skip lines that are clearly from the AI/bot
+            if any(prefix in line_lower for prefix in ["bot:", "ai:", "assistant:", "riley:", "agent:"]):
+                continue
+            # Skip lines that are clearly system messages
+            if line_lower.startswith("summary:") or line_lower.startswith("transcript:"):
+                continue
+            # If line doesn't have a clear prefix, assume it might be from user
+            # But be conservative - only check lines that look like user speech
+            if line_lower and not line_lower.startswith(("system:", "note:", "metadata:")):
+                user_lines.append(line_lower)
+        
+        # Only check USER lines for opt-out keywords (not AI lines)
+        user_text = " ".join(user_lines)
         for keyword in opt_out_keywords:
-            if keyword in transcript_lower:
-                print(f"🚫 Opt-out keyword detected in transcript: '{keyword}'")
+            if keyword in user_text:
+                print(f"🚫 Opt-out keyword detected in USER transcript: '{keyword}'")
+                print(f"   User text snippet: {user_text[:200]}...")
                 return True
     
     # Check for explicit opt-out in message/payload
@@ -13127,8 +13150,6 @@ async def get_outbound_call_candidates(
                             
                             # Name fields (with smart fallback logic)
                             "name": display_name,  # Best available name (stored or inferred)
-                            "inferred_name": candidate.get("inferred_name"),  # Name inferred from email/extraction
-                            "stored_name": contact.name,  # Name stored in contact table
                             
                             # Email fields (with fallback logic)
                             "email": contact.email or candidate.get("extracted_email"),  # Best available email
@@ -13572,6 +13593,59 @@ async def manually_opt_out_contact(
             "message": "Contact opted out successfully",
             "contact_id": contact_id,
             "phone_number": contact.phone_number
+        }, request=request)
+
+
+@app.options("/outbound-calls/contacts/{contact_id}/clear-opt-out")
+async def options_outbound_calls_clear_opt_out(request: Request):
+    """Handle CORS preflight for clear opt-out endpoint."""
+    cors_headers = get_cors_headers(request)
+    cors_headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    cors_headers["Access-Control-Max-Age"] = "3600"
+    return Response(status_code=200, headers=cors_headers)
+
+@app.post("/outbound-calls/contacts/{contact_id}/clear-opt-out")
+async def clear_contact_opt_out(
+    request: Request,
+    contact_id: int,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Clear opt-out status for a contact (for admin/PM use).
+    Use this if opt-out was detected incorrectly.
+    
+    Auth: Required (Admin/PM only)
+    """
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can clear opt-out status"
+        )
+    
+    with Session(engine) as session:
+        contact = session.get(Contact, contact_id)
+        if not contact:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        
+        # Clear opt-out status
+        contact.opted_out = False
+        contact.opt_out_timestamp = None
+        contact.opt_out_method = None
+        contact.opt_out_call_id = None
+        contact.updated_at = datetime.utcnow()
+        
+        session.add(contact)
+        session.commit()
+        session.refresh(contact)
+        
+        print(f"✅ Opt-out status cleared for contact {contact_id} ({contact.phone_number})")
+        
+        return create_cors_json_response(content={
+            "message": "Opt-out status cleared successfully",
+            "contact_id": contact_id,
+            "phone_number": contact.phone_number,
+            "opted_out": contact.opted_out
         }, request=request)
 
 
