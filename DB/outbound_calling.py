@@ -864,13 +864,15 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
             # Build PERFECTED prompt with enhanced extraction rules
             prompt = f"""You are an expert data extraction specialist. Extract ONLY customer information from a phone call transcript.
 
-⚠️ CRITICAL RULES:
+⚠️ CRITICAL RULES - BE AGGRESSIVE:
 1. The AI assistant is named "Riley" - IGNORE EVERYTHING Riley/Bot/Assistant says EXCEPT when Riley confirms customer info
 2. ONLY extract from CUSTOMER/USER statements (lines starting with "User:", "Customer:", or direct customer speech)
 3. EXCEPTION: If AI confirms customer email/name and customer says "yes" or "correct", extract from AI's confirmation
    Example: AI: "Your email is john@gmail.com, correct?" User: "Yes" → Extract "john@gmail.com"
-4. Be thorough - extract ALL available information, even if partially mentioned
+4. BE AGGRESSIVE - Extract ANY information that MIGHT be customer data, even if uncertain
 5. Normalize spoken formats (e.g., "at" = @, "dot" = .)
+6. IMPORTANT: If you see ANY pattern that COULD be an email or name, extract it. Better to extract than return null.
+7. Look for information in ALL parts of the transcript, not just explicit statements
 
 TRANSCRIPT FORMAT IDENTIFICATION:
 - "User:" or "Customer:" lines = CUSTOMER SPEECH (EXTRACT FROM THESE)
@@ -879,15 +881,17 @@ TRANSCRIPT FORMAT IDENTIFICATION:
 
 DETAILED EXTRACTION RULES:
 
-1. EMAIL (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
+1. EMAIL (CRITICAL PRIORITY - EXTRACT AGGRESSIVELY):
    - Extract ANY email mentioned: "my email is X", "email X", "X at Y dot com", "X@Y.com", "email address X"
    - Normalize spoken: "at" → @, "dot" → ., remove spaces
    - Accept partial emails if reconstructable (e.g., "rehan at gmail" → "rehan@gmail.com")
    - Look for email patterns even in indirect speech: "send to X", "contact at X", "reach me at X"
    - Check if AI assistant asks for email and customer provides it (even if not explicitly labeled)
    - If customer says "yes" or "correct" after AI confirms email, extract from AI's confirmation
-   - IMPORTANT: Be aggressive - if you see ANY email-like pattern, extract it. Better to extract than return null.
-   - Return null ONLY if absolutely no email mentioned anywhere in entire transcript AND no email-like patterns found
+   - Look for email in AI confirmations: "Your email is X", "I have your email as X", "Email: X"
+   - CRITICAL: If AI mentions an email in ANY context (even if customer didn't explicitly say it), extract it
+   - IMPORTANT: Be EXTREMELY aggressive - if you see ANY email-like pattern ANYWHERE, extract it
+   - Return null ONLY if absolutely no email mentioned anywhere AND no email-like patterns found AND no email in AI confirmations
 
 2. CUSTOMER_NAME (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
    - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X", "I go by X"
@@ -1001,7 +1005,7 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
             if json_data:
                 print(f"   📊 Extracted data: {json.dumps(json_data, indent=2)}")
                 
-                # Extract email from AI
+                # Extract email from AI - also check for email patterns in transcript if null
                 ai_email = json_data.get("email")
                 if ai_email:
                     ai_email = str(ai_email).strip().lower()
@@ -1011,6 +1015,40 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         print(f"   ✅ Extracted email: {email}")
                     else:
                         print(f"   ⚠️  Invalid email format: {ai_email}")
+                
+                # POST-PROCESSING: If Gemini returned null for email, try to find it in transcript
+                if not email:
+                    # Look for email patterns in the transcript
+                    email_patterns_in_transcript = re.findall(
+                        r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b',
+                        transcript_snippet,
+                        re.IGNORECASE
+                    )
+                    if email_patterns_in_transcript:
+                        # Use the first valid email found
+                        potential_email = email_patterns_in_transcript[0].lower().strip()
+                        if re.match(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", potential_email):
+                            email = potential_email
+                            print(f"   ✅ Found email in transcript post-processing: {email}")
+                    
+                    # Also look for spoken email patterns
+                    if not email:
+                        spoken_email_patterns = [
+                            r'(\w+)\s+at\s+(\w+)\s+dot\s+(\w+)',  # "john at gmail dot com"
+                            r'(\w+)\s+@\s+(\w+)\s+\.\s+(\w+)',  # "john @ gmail . com"
+                        ]
+                        for pattern in spoken_email_patterns:
+                            matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
+                            if matches:
+                                for match in matches:
+                                    if len(match) == 3:
+                                        potential_email = f"{match[0]}@{match[1]}.{match[2]}".lower()
+                                        if re.match(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", potential_email):
+                                            email = potential_email
+                                            print(f"   ✅ Found spoken email in transcript: {email}")
+                                            break
+                                if email:
+                                    break
                 
                 # Extract customer name from AI (check BOTH customer_name AND inferred_name fields)
                 # Try customer_name first, then inferred_name, then infer from email
@@ -1040,33 +1078,94 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         print(f"   ❌ Rejected bot name: '{ai_customer_name}'")
                 
                 # Fallback to email inference if AI didn't find name but found email
+                # ALWAYS try to infer name from email - be aggressive
                 if not inferred_name and email:
                     inferred_name = _infer_name_from_email(email)
                     if inferred_name:
                         print(f"   ✅ Inferred name from email: {inferred_name}")
+                    else:
+                        # Even if _infer_name_from_email returns None, try a more aggressive approach
+                        # Extract any letters from email username
+                        email_local = email.split("@")[0] if "@" in email else ""
+                        if email_local:
+                            # Try to extract meaningful name parts
+                            import re
+                            # Find all letter sequences
+                            letter_parts = re.findall(r"[a-zA-Z]+", email_local)
+                            if letter_parts:
+                                # Use the longest letter sequence as potential name
+                                longest_part = max(letter_parts, key=len)
+                                if len(longest_part) >= 2:
+                                    inferred_name = longest_part[:1].upper() + longest_part[1:].lower()
+                                    print(f"   ✅ Aggressively inferred name from email: {inferred_name} (from '{email_local}')")
                 
-                # Extract property (with STRICT validation)
+                # POST-PROCESSING: If Gemini returned null for name, try to find it in transcript
+                if not inferred_name:
+                    # Look for name patterns in the transcript
+                    name_patterns_in_transcript = [
+                        r'(?:my name is|I\'m|I am|this is|call me|name\'s|I go by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+                        r'(?:Hi|Hello),?\s+([A-Z][a-z]+)',
+                        r'Thank you,?\s+([A-Z][a-z]+)',
+                        r'Hello,?\s+([A-Z][a-z]+)',
+                    ]
+                    for pattern in name_patterns_in_transcript:
+                        matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
+                        if matches:
+                            for match in matches:
+                                potential_name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
+                                if potential_name:
+                                    potential_name_lower = potential_name.lower()
+                                    # Reject bot names
+                                    bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap"}
+                                    if potential_name_lower not in bad_names and "riley" not in potential_name_lower and len(potential_name) >= 2:
+                                        # Take first name if full name
+                                        first_name = potential_name.split()[0] if " " in potential_name else potential_name
+                                        inferred_name = first_name[:1].upper() + first_name[1:].lower()
+                                        print(f"   ✅ Found name in transcript post-processing: {inferred_name}")
+                                        break
+                            if inferred_name:
+                                break
+                
+                # Extract property (with SMART validation - very lenient)
                 ai_property = json_data.get("inquiry_property")
                 if ai_property:
                     ai_property = str(ai_property).strip()
-                    # STRICT validation - must be a real address
+                    # SMART validation - reject bot text but accept partial addresses
                     bot_patterns = [
-                        "searches", "visits", "booking", "general apartment inquiries",
-                        "apartment searches", "or general", "how can i assist", "visits booking",
-                        "apartment searches visits", "or general apartment", "apartment", "inquiries"
+                        "searches", "visits booking", "general apartment inquiries",
+                        "apartment searches visits", "how can i assist", "searches, visits",
+                        "apartment searches", "or general", "visits booking", "general inquiries",
+                        "apartment", "inquiries"  # Reject if it's just these words
                     ]
                     property_lower = ai_property.lower()
                     
-                    # Must contain a number AND not be bot text AND be substantial
-                    has_number = re.search(r"\d", ai_property)
+                    # Check if it's bot text
                     is_bot_text = any(pattern in property_lower for pattern in bot_patterns)
-                    is_substantial = len(ai_property) > 15  # Real addresses are longer
                     
-                    if has_number and not is_bot_text and is_substantial:
-                        inquiry_property = ai_property
-                        print(f"   ✅ Extracted property: {inquiry_property}")
+                    # Very lenient validation:
+                    # - Must not be bot text
+                    # - Must be at least 8 characters (very lenient)
+                    # - Should contain letters (not just numbers/punctuation)
+                    has_letters = re.search(r"[a-zA-Z]", ai_property)
+                    is_substantial = len(ai_property) >= 8  # Very lenient - just 8 chars
+                    
+                    # Also check if it looks like a real address (has street name, city, etc.)
+                    looks_like_address = (
+                        any(word in property_lower for word in ["road", "street", "st", "ave", "avenue", "drive", "dr", "lane", "ln", "way", "blvd", "boulevard"]) or
+                        any(word in property_lower for word in ["santa", "san", "sunnyvale", "california", "ca", "fremont", "palo", "mountain"]) or
+                        re.search(r"\d+", ai_property)  # Has a number (street number)
+                    )
+                    
+                    if not is_bot_text and is_substantial and has_letters:
+                        # Accept if it meets basic criteria OR looks like an address
+                        if looks_like_address or len(ai_property) >= 10:
+                            inquiry_property = ai_property
+                            print(f"   ✅ Extracted property: {inquiry_property}")
+                        else:
+                            print(f"   ⚠️  Property seems short but accepting: '{ai_property}'")
+                            inquiry_property = ai_property  # Accept anyway - be aggressive
                     else:
-                        print(f"   ❌ Rejected invalid property: '{ai_property}' (has_number={has_number}, is_bot={is_bot_text}, substantial={is_substantial})")
+                        print(f"   ❌ Rejected invalid property: '{ai_property}' (is_bot={is_bot_text}, substantial={is_substantial}, has_letters={bool(has_letters)})")
                 
                 # Extract purpose (with validation)
                 ai_purpose = json_data.get("inquiry_purpose")
@@ -1083,7 +1182,7 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                     else:
                         print(f"   ❌ Rejected bot purpose: '{ai_purpose}'")
                 
-                # Extract region (with validation)
+                # Extract region (with validation) - also try to extract from property if not found
                 ai_region = json_data.get("region")
                 if ai_region:
                     ai_region = str(ai_region).strip()
@@ -1094,6 +1193,28 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         print(f"   ✅ Extracted region: {region}")
                     else:
                         print(f"   ❌ Rejected invalid region: '{ai_region}'")
+                
+                # Fallback: Extract region from property address if not found
+                if not region and inquiry_property:
+                    # Look for city/state patterns in property address
+                    import re
+                    # Common patterns: "City, State", "City State", "City, ST"
+                    city_state_patterns = [
+                        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)",  # "Santa Clara, California"
+                        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+([A-Z][a-z]+)",  # "Santa Clara California"
+                        r",\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)$",  # ", California" at end
+                    ]
+                    for pattern in city_state_patterns:
+                        match = re.search(pattern, inquiry_property)
+                        if match:
+                            if len(match.groups()) == 2:
+                                # City and state
+                                region = f"{match.group(1)}, {match.group(2)}"
+                            else:
+                                # Just state
+                                region = match.group(1)
+                            print(f"   ✅ Extracted region from property address: {region}")
+                            break
                 
                 ai_success = True
                 print(f"\n✅ GEMINI AI EXTRACTION COMPLETE:")
@@ -1779,6 +1900,105 @@ def trigger_outbound_call(
             "contact_id": contact.id
         }
     
+    # Load extracted intelligence from latest call for this contact
+    # This provides context for personalized re-engagement
+    extracted_intel = None
+    context_message = None
+    
+    try:
+        # Get the most recent call record with extracted intelligence
+        latest_call = session.exec(
+            select(CallRecord)
+            .where(CallRecord.caller_number == contact.phone_number)
+            .where(CallRecord.extracted_intel.isnot(None))
+            .where(CallRecord.extraction_status == "completed")
+            .order_by(CallRecord.created_at.desc())
+        ).first()
+        
+        if latest_call and latest_call.extracted_intel:
+            extracted_intel = latest_call.extracted_intel
+            print(f"📋 Loaded extracted intelligence for re-engagement:")
+            print(f"   - Email: {extracted_intel.get('email')}")
+            print(f"   - Name: {extracted_intel.get('inferred_name')}")
+            print(f"   - Property: {extracted_intel.get('inquiry_property')}")
+            print(f"   - Purpose: {extracted_intel.get('inquiry_purpose')}")
+            print(f"   - Region: {extracted_intel.get('region')}")
+            
+            # Build context message for assistant.messages (RECOMMENDED METHOD)
+            # Format: Natural, conversational, no mention of "records", "database", "system"
+            # ⚠️ PRIVACY RULE: Do NOT include email in conversational context
+            # Email should ONLY be in metadata, not in assistant.messages
+            # ✅ Name CAN be included in conversational context (natural to use)
+            # Only include non-null fields to avoid confusing Vapi
+            context_parts = []
+            
+            # Add customer name if available (OK to include in context)
+            customer_name = extracted_intel.get("inferred_name") or contact.name
+            if customer_name:
+                context_parts.append(f"The customer's name is {customer_name}.")
+            
+            # Build a concise, non-repetitive context message
+            # Combine property and purpose into one natural sentence
+            property_addr = extracted_intel.get("inquiry_property")
+            purpose = extracted_intel.get("inquiry_purpose")
+            region = extracted_intel.get("region")
+            
+            # Build main context sentence (property + purpose combined)
+            if property_addr and purpose:
+                # Combine property and purpose naturally
+                if purpose == "booking a tour":
+                    context_parts.append(f"When they last reached out, they were interested in booking a tour for {property_addr}.")
+                elif purpose == "availability inquiry":
+                    context_parts.append(f"They previously asked about availability at {property_addr}.")
+                elif purpose == "pricing inquiry":
+                    context_parts.append(f"They previously inquired about pricing for {property_addr}.")
+                elif purpose == "viewing request":
+                    context_parts.append(f"They previously requested a viewing for {property_addr}.")
+                else:
+                    context_parts.append(f"They previously inquired about {purpose} for {property_addr}.")
+            elif property_addr:
+                # Only property, no purpose
+                context_parts.append(f"When they last reached out, they were asking about {property_addr}.")
+            elif purpose:
+                # Only purpose, no property
+                if purpose == "booking a tour":
+                    context_parts.append("They were previously interested in booking a tour.")
+                elif purpose == "availability inquiry":
+                    context_parts.append("They were previously asking about availability.")
+                elif purpose == "pricing inquiry":
+                    context_parts.append("They were previously asking about pricing.")
+                elif purpose == "viewing request":
+                    context_parts.append("They previously requested a viewing.")
+                else:
+                    context_parts.append(f"They were previously inquiring about {purpose}.")
+            
+            # Add region only if it's different from property location (avoid repetition)
+            if region and property_addr:
+                # Check if region is already mentioned in property address
+                region_in_property = region.lower() in property_addr.lower()
+                if not region_in_property:
+                    context_parts.append(f"They were looking in {region}.")
+            elif region:
+                # Only region, no property
+                context_parts.append(f"They were looking in {region}.")
+            
+            # Build the context message (only if we have useful data)
+            if context_parts:
+                context_message = " ".join(context_parts)
+                # Add instruction for natural usage
+                context_message += " Use this information naturally in conversation. Do not mention 'records', 'database', 'system', or 'logs'. Reference it casually, as if you remember the previous conversation."
+                print(f"✅ Built context message for assistant (email excluded for privacy, name included):")
+                print(f"   {context_message}")
+            else:
+                print(f"⚠️  No useful context to send (all fields are null)")
+        else:
+            print(f"ℹ️  No extracted intelligence found for this contact - proceeding without context")
+    except Exception as e:
+        print(f"⚠️  Error loading extracted intelligence: {e}")
+        import traceback
+        traceback.print_exc()
+        # Continue without context if there's an error
+    
     # Prepare Vapi API request with correct structure
     # Vapi expects: phoneNumber.twilioPhoneNumber, phoneNumber.twilioAccountSid, phoneNumber.twilioAuthToken
     # and customer.number (not phoneNumber.to)
@@ -1799,9 +2019,25 @@ def trigger_outbound_call(
         }
     }
     
-    # Merge additional metadata
+    # Add assistant.messages with context (RECOMMENDED METHOD)
+    # This lets Riley "remember" the last interaction without reading it aloud
+    if context_message:
+        payload["assistant"] = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"Context for this call: {context_message} Use this information naturally in conversation. Do not mention 'records', 'database', or 'system'. Reference it casually, as if you remember the previous conversation."
+                }
+            ]
+        }
+        print(f"📤 Added assistant.messages context to Vapi payload")
+    
+    # Merge additional metadata (keep for backward compatibility)
     if metadata:
         payload["metadata"].update(metadata)
+        # Filter out null values from metadata to avoid confusing Vapi
+        payload["metadata"] = {k: v for k, v in payload["metadata"].items() if v is not None}
+        print(f"📤 Merged additional metadata (filtered nulls): {list(payload['metadata'].keys())}")
     
     # Make API call to Vapi
     try:
@@ -1809,6 +2045,18 @@ def trigger_outbound_call(
             "Authorization": f"Bearer {VAPI_API_KEY}",
             "Content-Type": "application/json"
         }
+        
+        # Log the full payload being sent to Vapi (for debugging)
+        print(f"\n📤 SENDING PAYLOAD TO VAPI:")
+        print(f"   Assistant ID: {assistant_id}")
+        print(f"   From Number: {from_number}")
+        print(f"   To Number: {contact.phone_number}")
+        if payload.get("assistant", {}).get("messages"):
+            print(f"   ✅ Assistant messages context: {payload['assistant']['messages'][0]['content'][:200]}...")
+        else:
+            print(f"   ⚠️  No assistant.messages context (no extracted intelligence available)")
+        print(f"   Metadata keys: {list(payload.get('metadata', {}).keys())}")
+        print(f"   Full payload (metadata only): {json.dumps(payload.get('metadata', {}), indent=2)}")
         
         response = requests.post(
             f"{VAPI_BASE_URL}/call",

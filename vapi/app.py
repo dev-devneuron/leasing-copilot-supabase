@@ -13208,88 +13208,127 @@ async def trigger_single_outbound_call(
                             detail=f"Contact is not eligible for outbound call: {eligibility['reason']}"
                         )
                 
-                # Build re-engagement context from latest transcript and send to Vapi as metadata
-                last_transcript = None
+                # Load extracted intelligence from cached call records (MORE EFFICIENT)
+                # Use cached extracted_intel if available, otherwise extract from transcript
                 last_call_id = None
                 last_call_at = None
-                try:
-                    last_call = session.exec(
-                        select(CallRecord)
-                        .where(CallRecord.caller_number == contact.phone_number)
-                        .order_by(CallRecord.created_at.desc())
-                    ).first()
-                    if last_call:
-                        last_transcript = last_call.transcript
-                        last_call_id = last_call.call_id
-                        last_call_at = last_call.created_at.isoformat() if last_call.created_at else None
-                except Exception as e:
-                    print(f"⚠️  Could not load last call transcript: {e}")
-
                 extracted_intel = {}
                 call_summary = None
+                
                 try:
-                    if last_transcript and len(last_transcript.strip()) >= 50:
-                        print(f"📞 Extracting intel from last call transcript (length: {len(last_transcript)} chars)...")
-                        extracted_intel = extract_contact_intel_from_transcript(last_transcript)
-                        
-                        # Get call summary if available
+                    # Get the most recent call with cached extracted intelligence
+                    last_call_with_intel = session.exec(
+                        select(CallRecord)
+                        .where(CallRecord.caller_number == contact.phone_number)
+                        .where(CallRecord.extracted_intel.isnot(None))
+                        .where(CallRecord.extraction_status == "completed")
+                        .order_by(CallRecord.created_at.desc())
+                    ).first()
+                    
+                    if last_call_with_intel and last_call_with_intel.extracted_intel:
+                        # Use cached extraction (FAST - no need to re-extract)
+                        extracted_intel = last_call_with_intel.extracted_intel
                         call_summary = extracted_intel.get("call_summary")
+                        last_call_id = last_call_with_intel.call_id
+                        last_call_at = last_call_with_intel.created_at.isoformat() if last_call_with_intel.created_at else None
+                        print(f"✅ Using cached extracted intelligence from call {last_call_with_intel.call_id}")
+                        print(f"   📊 Cached intel: email={extracted_intel.get('email')}, name={extracted_intel.get('inferred_name')}, property={extracted_intel.get('inquiry_property')}, purpose={extracted_intel.get('inquiry_purpose')}")
+                    else:
+                        # Fallback: Get latest call and extract if no cache
+                        last_call = session.exec(
+                            select(CallRecord)
+                            .where(CallRecord.caller_number == contact.phone_number)
+                            .order_by(CallRecord.created_at.desc())
+                        ).first()
                         
-                        # persist email if found
-                        if extracted_intel.get("email") and not contact.email:
-                            contact.email = extracted_intel["email"]
-                            session.add(contact)
-                            session.commit()
-                            print(f"✅ Updated contact email: {contact.email}")
-                        
-                        # Update name if we found a better one
-                        inferred_name = extracted_intel.get("inferred_name")
-                        if inferred_name:
-                            bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
-                            if (not contact.name or 
-                                contact.name.lower() in bad_names or 
-                                "riley" in contact.name.lower()):
-                                if inferred_name.lower() not in bad_names and "riley" not in inferred_name.lower():
-                                    contact.name = inferred_name
-                                    session.add(contact)
-                                    session.commit()
-                                    print(f"✅ Updated contact name: {contact.name}")
-                        
-                        print(f"📊 Extracted intel: email={extracted_intel.get('email')}, name={extracted_intel.get('inferred_name')}, property={extracted_intel.get('inquiry_property')}, purpose={extracted_intel.get('inquiry_purpose')}")
+                        if last_call:
+                            last_call_id = last_call.call_id
+                            last_call_at = last_call.created_at.isoformat() if last_call.created_at else None
+                            
+                            if last_call.transcript and len(last_call.transcript.strip()) >= 50:
+                                print(f"📞 No cached intel - extracting from last call transcript (length: {len(last_call.transcript)} chars)...")
+                                extracted_intel = extract_contact_intel_from_transcript(last_call.transcript)
+                                call_summary = extracted_intel.get("call_summary")
+                                print(f"📊 Extracted intel: email={extracted_intel.get('email')}, name={extracted_intel.get('inferred_name')}, property={extracted_intel.get('inquiry_property')}, purpose={extracted_intel.get('inquiry_purpose')}")
+                            else:
+                                print(f"⚠️  Last call has no transcript or transcript too short")
+                        else:
+                            print(f"ℹ️  No previous calls found for this contact")
+                    
+                    # Update contact with extracted data if found
+                    if extracted_intel.get("email") and not contact.email:
+                        contact.email = extracted_intel["email"]
+                        session.add(contact)
+                        session.commit()
+                        print(f"✅ Updated contact email: {contact.email}")
+                    
+                    # Update name if we found a better one
+                    inferred_name = extracted_intel.get("inferred_name")
+                    if inferred_name:
+                        bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
+                        if (not contact.name or 
+                            contact.name.lower() in bad_names or 
+                            "riley" in contact.name.lower()):
+                            if inferred_name.lower() not in bad_names and "riley" not in inferred_name.lower():
+                                contact.name = inferred_name
+                                session.add(contact)
+                                session.commit()
+                                print(f"✅ Updated contact name: {contact.name}")
                 except Exception as e:
-                    print(f"⚠️  Failed to extract intel from transcript: {e}")
+                    print(f"⚠️  Failed to load/extract intel: {e}")
                     import traceback
                     traceback.print_exc()
 
                 # Build comprehensive re-engagement metadata for Vapi
-                # This gives Vapi AI assistant full context about the customer and their last interaction
+                # Filter out null values to avoid confusing Vapi
                 reengagement_metadata = {
                     "reengagementGoal": "Re-engage previously interested customers with AI-powered outreach.",
-                    "lastCallId": last_call_id,
-                    "lastCallAt": last_call_at,
-                    
-                    # Customer identification
-                    "customerName": (contact.name or extracted_intel.get("inferred_name") or "Customer"),
-                    "customerEmail": extracted_intel.get("email") or contact.email,
-                    "customerPhone": contact.phone_number,
-                    "customerRegion": extracted_intel.get("region"),
-                    
-                    # Last interaction details
-                    "lastInquiryProperty": extracted_intel.get("inquiry_property"),  # Property they inquired about
-                    "lastInquiryPurpose": extracted_intel.get("inquiry_purpose"),  # What they wanted (booking, pricing, etc.)
-                    "lastInquirySummary": extracted_intel.get("inquiry_summary"),  # Structured summary
-                    "lastCallSummary": call_summary,  # Full call summary from transcript if available
-                    
-                    # Additional context
-                    "callAttemptCount": contact.call_attempt_count,
-                    "lastCallOutcome": contact.last_call_outcome,
                 }
                 
-                print(f"📤 Sending re-engagement metadata to Vapi:")
-                print(f"   - Customer: {reengagement_metadata.get('customerName')} ({reengagement_metadata.get('customerEmail')})")
-                print(f"   - Last Property: {reengagement_metadata.get('lastInquiryProperty')}")
-                print(f"   - Last Purpose: {reengagement_metadata.get('lastInquiryPurpose')}")
-                print(f"   - Call Summary: {call_summary[:100] if call_summary else 'None'}...")
+                # Only add non-null fields
+                if last_call_id:
+                    reengagement_metadata["lastCallId"] = last_call_id
+                if last_call_at:
+                    reengagement_metadata["lastCallAt"] = last_call_at
+                
+                # Customer identification (only if available)
+                customer_name = contact.name or extracted_intel.get("inferred_name")
+                if customer_name:
+                    reengagement_metadata["customerName"] = customer_name
+                
+                customer_email = extracted_intel.get("email") or contact.email
+                if customer_email:
+                    reengagement_metadata["customerEmail"] = customer_email
+                
+                reengagement_metadata["customerPhone"] = contact.phone_number
+                
+                if extracted_intel.get("region"):
+                    reengagement_metadata["customerRegion"] = extracted_intel.get("region")
+                
+                # Last interaction details (only if available)
+                if extracted_intel.get("inquiry_property"):
+                    reengagement_metadata["lastInquiryProperty"] = extracted_intel.get("inquiry_property")
+                
+                if extracted_intel.get("inquiry_purpose"):
+                    reengagement_metadata["lastInquiryPurpose"] = extracted_intel.get("inquiry_purpose")
+                
+                if extracted_intel.get("inquiry_summary"):
+                    reengagement_metadata["lastInquirySummary"] = extracted_intel.get("inquiry_summary")
+                
+                if call_summary:
+                    reengagement_metadata["lastCallSummary"] = call_summary
+                
+                # Additional context
+                reengagement_metadata["callAttemptCount"] = contact.call_attempt_count
+                if contact.last_call_outcome:
+                    reengagement_metadata["lastCallOutcome"] = contact.last_call_outcome
+                
+                print(f"📤 Prepared re-engagement metadata for Vapi (filtered nulls):")
+                print(f"   - Customer: {reengagement_metadata.get('customerName', 'Unknown')} ({reengagement_metadata.get('customerEmail', 'No email')})")
+                print(f"   - Last Property: {reengagement_metadata.get('lastInquiryProperty', 'None')}")
+                print(f"   - Last Purpose: {reengagement_metadata.get('lastInquiryPurpose', 'None')}")
+                print(f"   - Region: {reengagement_metadata.get('customerRegion', 'None')}")
+                print(f"   - Summary: {reengagement_metadata.get('lastInquirySummary', 'None')}")
 
                 # Trigger call (will use PM's assigned Twilio number if from_number not provided)
                 try:
