@@ -8001,14 +8001,45 @@ async def vapi_webhook_hyphen(request: Request):
             
             # Create new record if still not found
             if not call_record:
+                # Determine call direction from metadata (for outbound calls)
+                call_direction = "inbound"  # Default to inbound
+                # Check payload metadata for callDirection
+                if isinstance(payload, dict):
+                    payload_metadata = payload.get("metadata", {})
+                    if isinstance(payload_metadata, dict) and payload_metadata.get("callDirection") == "outbound":
+                        call_direction = "outbound"
+                        print(f"   📞 Detected outbound call from payload metadata")
+                # Also check message metadata
+                if isinstance(message, dict):
+                    message_metadata = message.get("metadata", {})
+                    if isinstance(message_metadata, dict) and message_metadata.get("callDirection") == "outbound":
+                        call_direction = "outbound"
+                        print(f"   📞 Detected outbound call from message metadata")
+                
                 call_record = CallRecord(
                     id=uuid.uuid4(),
                     call_id=call_id,
                     realtor_number=realtor_number,
                     live_transcript_chunks=[],
-                    call_direction="inbound",  # Default to inbound
+                    call_direction=call_direction,
                 )
                 session.add(call_record)
+                print(f"   ✅ Created new call record with direction: {call_direction}")
+            else:
+                # Update call_direction if not set and we can detect it from metadata
+                if not call_record.call_direction or call_record.call_direction == "inbound":
+                    if isinstance(payload, dict):
+                        payload_metadata = payload.get("metadata", {})
+                        if isinstance(payload_metadata, dict) and payload_metadata.get("callDirection") == "outbound":
+                            call_record.call_direction = "outbound"
+                            updated = True
+                            print(f"   📞 Updated call_direction to outbound from payload metadata")
+                    if isinstance(message, dict):
+                        message_metadata = message.get("metadata", {})
+                        if isinstance(message_metadata, dict) and message_metadata.get("callDirection") == "outbound":
+                            call_record.call_direction = "outbound"
+                            updated = True
+                            print(f"   📞 Updated call_direction to outbound from message metadata")
             
             now = datetime.utcnow()
             updated = False  # Initialize updated flag
@@ -8078,11 +8109,17 @@ async def vapi_webhook_hyphen(request: Request):
             # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives.
             # IMPORTANT: This must NOT be gated behind the presence of `summary`,
             # otherwise calls with transcripts but no summary won't get extracted.
+            # Works for BOTH inbound and outbound calls.
             if full_transcript:
                 try:
                     from DB.outbound_calling import extract_and_store_intel_for_call_record
-                    print(f"🔍 Triggering real-time extraction for call {call_id}...")
-                    extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=False)
+                    print(f"🔍 Triggering real-time extraction for call {call_id} (direction: {call_record.call_direction})...")
+                    # Force re-extract if this is an outbound call and we have new transcript
+                    # This ensures outbound calls get the most recent data extracted
+                    force_re_extract = (call_record.call_direction == "outbound")
+                    if force_re_extract:
+                        print(f"   🔄 Force re-extracting for outbound call to get most recent data")
+                    extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=force_re_extract)
 
                     # Update contact if we found email/name
                     if call_record.contact_id:
@@ -8389,14 +8426,43 @@ async def vapi_webhook(request: Request):
             ).first()
             
             if not call_record:
+                # Determine call direction from metadata (for outbound calls)
+                call_direction = "inbound"  # Default to inbound
+                # Check payload metadata for callDirection
+                if isinstance(payload, dict):
+                    payload_metadata = payload.get("metadata", {})
+                    if isinstance(payload_metadata, dict) and payload_metadata.get("callDirection") == "outbound":
+                        call_direction = "outbound"
+                        print(f"   📞 Detected outbound call from payload metadata")
+                # Also check data metadata
+                if isinstance(data, dict):
+                    data_metadata = data.get("metadata", {})
+                    if isinstance(data_metadata, dict) and data_metadata.get("callDirection") == "outbound":
+                        call_direction = "outbound"
+                        print(f"   📞 Detected outbound call from data metadata")
+                
                 call_record = CallRecord(
                     id=uuid.uuid4(),
                     call_id=call_id,
                     realtor_number=realtor_number,
                     live_transcript_chunks=[],
-                    call_direction="inbound",  # Default to inbound for webhook events
+                    call_direction=call_direction,
                 )
                 session.add(call_record)
+                print(f"   ✅ Created new call record with direction: {call_direction}")
+            else:
+                # Update call_direction if not set and we can detect it from metadata
+                if not call_record.call_direction or call_record.call_direction == "inbound":
+                    if isinstance(payload, dict):
+                        payload_metadata = payload.get("metadata", {})
+                        if isinstance(payload_metadata, dict) and payload_metadata.get("callDirection") == "outbound":
+                            call_record.call_direction = "outbound"
+                            print(f"   📞 Updated call_direction to outbound from payload metadata")
+                    if isinstance(data, dict):
+                        data_metadata = data.get("metadata", {})
+                        if isinstance(data_metadata, dict) and data_metadata.get("callDirection") == "outbound":
+                            call_record.call_direction = "outbound"
+                            print(f"   📞 Updated call_direction to outbound from data metadata")
             
             now = datetime.utcnow()
             updated = False
@@ -8464,11 +8530,17 @@ async def vapi_webhook(request: Request):
                     print(f"⚠️  No summary found in call.ended event data")
                 
                 # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
+                # Works for BOTH inbound and outbound calls.
                 if final_transcript:
                     try:
                         from DB.outbound_calling import extract_and_store_intel_for_call_record
-                        print(f"🔍 Triggering real-time extraction for call {call_id}...")
-                        extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=False)
+                        print(f"🔍 Triggering real-time extraction for call {call_id} (direction: {call_record.call_direction})...")
+                        # Force re-extract if this is an outbound call and we have new transcript
+                        # This ensures outbound calls get the most recent data extracted
+                        force_re_extract = (call_record.call_direction == "outbound")
+                        if force_re_extract:
+                            print(f"   🔄 Force re-extracting for outbound call to get most recent data")
+                        extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=force_re_extract)
                         
                         # Update contact if we found email/name
                         if call_record.contact_id:
@@ -8746,9 +8818,11 @@ def get_call_records(
                     "realtor_number": cr.realtor_number,
                     "recording_url": cr.recording_url,
                     "transcript": cr.transcript,
+                    "summary": cr.call_metadata.get("summary") if cr.call_metadata else None,  # Extract summary from metadata
                     "call_duration": cr.call_duration,
                     "call_status": cr.call_status,
                     "caller_number": cr.caller_number,
+                    "call_direction": cr.call_direction,  # Include call direction
                     "created_at": cr.created_at.isoformat() if cr.created_at else None,
                     "updated_at": cr.updated_at.isoformat() if cr.updated_at else None,
                 }
@@ -8788,17 +8862,24 @@ def get_call_record_detail(
         if call_record.realtor_number not in accessible_numbers:
             raise HTTPException(status_code=403, detail="Access denied to this call record")
         
+        # Extract summary from metadata for easy access
+        summary = None
+        if call_record.call_metadata:
+            summary = call_record.call_metadata.get("summary")
+        
         return JSONResponse(content={
             "id": str(call_record.id),
             "call_id": call_record.call_id,
             "realtor_number": call_record.realtor_number,
             "recording_url": call_record.recording_url,
             "transcript": call_record.transcript,
+            "summary": summary,  # Explicitly include summary (extracted from metadata)
             "live_transcript_chunks": call_record.live_transcript_chunks or [],
             "call_duration": call_record.call_duration,
             "call_status": call_record.call_status,
             "caller_number": call_record.caller_number,
-            "metadata": call_record.call_metadata,
+            "call_direction": call_record.call_direction,  # Include call direction
+            "metadata": call_record.call_metadata,  # Full metadata still available
             "created_at": call_record.created_at.isoformat() if call_record.created_at else None,
             "updated_at": call_record.updated_at.isoformat() if call_record.updated_at else None,
         })
