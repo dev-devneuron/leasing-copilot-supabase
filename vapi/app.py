@@ -8025,35 +8025,6 @@ async def vapi_webhook_hyphen(request: Request):
                 call_record.call_metadata["summary"] = summary
                 call_record.call_metadata["summary_source"] = "vapi_end_of_call_report"
                 updated = True
-                
-                # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
-                try:
-                    from DB.outbound_calling import extract_and_store_intel_for_call_record
-                    print(f"🔍 Triggering real-time extraction for call {call_id}...")
-                    extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=False)
-                    
-                    # Update contact if we found email/name
-                    if call_record.contact_id:
-                        contact = session.get(Contact, call_record.contact_id)
-                        if contact:
-                            if extracted_intel.get("email") and not contact.email:
-                                contact.email = extracted_intel["email"]
-                                session.add(contact)
-                                if extracted_intel.get("inferred_name"):
-                                    from DB.outbound_calling import _is_bad_person_name
-                                    proposed = extracted_intel["inferred_name"]
-                                    if not _is_bad_person_name(proposed):
-                                        if _is_bad_person_name(contact.name):
-                                            contact.name = proposed
-                                            session.add(contact)
-                            try:
-                                session.commit()
-                                print(f"✅ Updated contact from real-time extraction")
-                            except:
-                                session.rollback()
-                except Exception as e:
-                    print(f"⚠️  Real-time extraction failed (non-critical): {e}")
-                    # Don't fail webhook if extraction fails
             
             # Store call status and other metadata
             call_record.call_status = message.get("status") or payload.get("status", "ended")
@@ -8080,6 +8051,37 @@ async def vapi_webhook_hyphen(request: Request):
                     session.commit()
                     session.refresh(call_record)
                 return {"status": "ok", "call_id": call_id, "message": "Call discarded (too short)"}
+
+            # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives.
+            # IMPORTANT: This must NOT be gated behind the presence of `summary`,
+            # otherwise calls with transcripts but no summary won't get extracted.
+            if full_transcript:
+                try:
+                    from DB.outbound_calling import extract_and_store_intel_for_call_record
+                    print(f"🔍 Triggering real-time extraction for call {call_id}...")
+                    extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=False)
+
+                    # Update contact if we found email/name
+                    if call_record.contact_id:
+                        contact = session.get(Contact, call_record.contact_id)
+                        if contact:
+                            if extracted_intel.get("email") and not contact.email:
+                                contact.email = extracted_intel["email"]
+                                session.add(contact)
+                            if extracted_intel.get("inferred_name"):
+                                from DB.outbound_calling import _is_bad_person_name
+                                proposed = extracted_intel["inferred_name"]
+                                if not _is_bad_person_name(proposed) and _is_bad_person_name(contact.name):
+                                    contact.name = proposed
+                                    session.add(contact)
+                            try:
+                                session.commit()
+                                print(f"✅ Updated contact from real-time extraction")
+                            except:
+                                session.rollback()
+                except Exception as e:
+                    print(f"⚠️  Real-time extraction failed (non-critical): {e}")
+                    # Don't fail webhook if extraction fails
             
             # Extract duration from message timestamp if available
             timestamp = message.get("timestamp")

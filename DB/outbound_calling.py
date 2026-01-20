@@ -1559,6 +1559,14 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         print(f"   ✅ Extracted purpose: {inquiry_purpose}")
                     else:
                         print(f"   ❌ Rejected bot purpose: '{ai_purpose}'")
+
+                # Fallback purpose: if Gemini returns "general information" but the user is clearly searching,
+                # normalize to a more useful purpose.
+                if (not inquiry_purpose) or (isinstance(inquiry_purpose, str) and inquiry_purpose.strip().lower() == "general information"):
+                    t = transcript_snippet.lower()
+                    if ("apart" in t and ("looking for" in t or "search" in t or "find" in t or "availability" in t or "beds" in t or "baths" in t or "$" in t or "dollars" in t)):
+                        inquiry_purpose = "availability inquiry"
+                        print(f"   ✅ Fallback purpose inferred from transcript: {inquiry_purpose}")
                 
                 # Extract region (with validation) - also try to extract from property if not found
                 ai_region = json_data.get("region")
@@ -1571,6 +1579,15 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         print(f"   ✅ Extracted region: {region}")
                     else:
                         print(f"   ❌ Rejected invalid region: '{ai_region}'")
+
+                # Fallback property extraction: grab the strongest "located at ..." address if Gemini missed it.
+                if not inquiry_property:
+                    m = re.search(r"(?i)\b(?:it's\s+)?located at\s+(.+?)(?:\.\s|\.?$|\n)", transcript_snippet)
+                    if m:
+                        candidate_addr = m.group(1).strip()
+                        if candidate_addr and len(candidate_addr) >= 8:
+                            inquiry_property = candidate_addr
+                            print(f"   ✅ Fallback property extracted from transcript: {inquiry_property}")
                 
                 # Fallback: Extract region from property address if not found
                 if not region and inquiry_property:
@@ -1593,10 +1610,28 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                                 region = match.group(1)
                             print(f"   ✅ Extracted region from property address: {region}")
                             break
+
+                # Fallback region: if user said city/state but we still have none, try to build "City, State"
+                if not region:
+                    city = None
+                    state = None
+                    m_city = re.search(r"(?i)\bapart(?:ment)?s?\s+in\s+([A-Z][a-z]+)\b", transcript_snippet)
+                    if m_city:
+                        city = m_city.group(1).strip()
+                    m_state = re.search(r"(?m)^User:\s*([A-Z][a-z]{2,})\s*\.?\s*$", transcript_snippet)
+                    if m_state:
+                        state = m_state.group(1).strip()
+                    if city and state:
+                        region = f"{city}, {state}"
+                        print(f"   ✅ Fallback region built from user lines: {region}")
+                    elif state:
+                        region = state
+                        print(f"   ✅ Fallback region from user line: {region}")
                 
                 # Final sanity check on inferred_name before we mark success
-                if _is_bad_person_name(inferred_name):
-                    print(f"   ❌ Rejecting bad inferred_name at finalization: {inferred_name}")
+                # This is CRITICAL - reject any bad names that slipped through
+                if inferred_name and _is_bad_person_name(inferred_name):
+                    print(f"   ❌ REJECTING bad inferred_name at finalization: '{inferred_name}' (this is a verb/filler word, not a name)")
                     inferred_name = None
 
                 ai_success = True
