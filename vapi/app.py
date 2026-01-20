@@ -8130,6 +8130,28 @@ async def vapi_webhook_hyphen(request: Request):
                                 if api_transcript:
                                     call_record.transcript = api_transcript
                                     updated = True
+                            
+                            # Also fetch summary from API if not in webhook
+                            if not call_record.call_metadata or not call_record.call_metadata.get("summary"):
+                                api_summary = None
+                                # Try analysis.summary first
+                                api_analysis = call_details.get("analysis", {})
+                                if isinstance(api_analysis, dict):
+                                    api_summary = api_analysis.get("summary") or api_analysis.get("summaryText")
+                                
+                                # Fallback to direct summary field
+                                if not api_summary:
+                                    api_summary = call_details.get("summary") or call_details.get("summaryText")
+                                
+                                if api_summary:
+                                    api_summary = str(api_summary).strip()
+                                    if api_summary:
+                                        print(f"📋 Fetched summary from Vapi API for call {call_id}: {len(api_summary)} chars")
+                                        if call_record.call_metadata is None:
+                                            call_record.call_metadata = {}
+                                        call_record.call_metadata["summary"] = api_summary
+                                        call_record.call_metadata["summary_source"] = "vapi_api"
+                                        updated = True
                             # Update duration if missing
                             if not call_record.call_duration:
                                 api_duration = (
@@ -8382,8 +8404,44 @@ async def vapi_webhook(request: Request):
                     call_record.transcript = final_transcript
                     call_record.updated_at = now
                     updated = True
+                
+                # Extract and store summary if available
+                # Check multiple locations: data.analysis.summary, data.summary, payload.analysis.summary
+                summary = None
+                if isinstance(data, dict):
+                    # Try data.analysis.summary first (most common location)
+                    analysis = data.get("analysis", {})
+                    if isinstance(analysis, dict):
+                        summary = analysis.get("summary") or analysis.get("summaryText")
                     
-                    # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
+                    # Fallback to data.summary
+                    if not summary:
+                        summary = data.get("summary") or data.get("summaryText")
+                
+                # Also check payload for summary
+                if not summary and isinstance(payload, dict):
+                    payload_analysis = payload.get("analysis", {})
+                    if isinstance(payload_analysis, dict):
+                        summary = payload_analysis.get("summary") or payload_analysis.get("summaryText")
+                    if not summary:
+                        summary = payload.get("summary") or payload.get("summaryText")
+                
+                if summary:
+                    summary = str(summary).strip()
+                    if summary:
+                        print(f"📋 Storing summary for call {call_id}: {len(summary)} chars")
+                        if call_record.call_metadata is None:
+                            call_record.call_metadata = {}
+                        call_record.call_metadata["summary"] = summary
+                        call_record.call_metadata["summary_source"] = "vapi_call_ended_event"
+                        updated = True
+                    else:
+                        print(f"⚠️  Summary found but empty after stripping")
+                else:
+                    print(f"⚠️  No summary found in call.ended event data")
+                
+                # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
+                if final_transcript:
                     try:
                         from DB.outbound_calling import extract_and_store_intel_for_call_record
                         print(f"🔍 Triggering real-time extraction for call {call_id}...")
@@ -8458,14 +8516,82 @@ async def vapi_webhook(request: Request):
                     except Exception as e:
                         print(f"⚠️  Error updating Contact.last_call_outcome: {e}")
                 
-                # Fetch recording URL from VAPI API (recordings are NOT in webhooks)
-                if not call_record.recording_url:
-                    print(f"🎙️  Fetching recording URL for call {call_id} from VAPI API...")
+                # Fetch missing data from VAPI API if not in webhook
+                # This includes recording URL, transcript, and summary
+                if not call_record.recording_url or (not call_record.call_metadata or not call_record.call_metadata.get("summary")):
+                    print(f"🎙️  Fetching call details from VAPI API for call {call_id}...")
+                    try:
+                        call_details = _fetch_call_details_from_vapi(call_id)
+                        if call_details:
+                            # Fetch recording URL if missing
+                            if not call_record.recording_url:
+                                recording_url = call_details.get("recordingUrl") or call_details.get("recording_url")
+                                if recording_url:
+                                    call_record.recording_url = recording_url
+                                    updated = True
+                            
+                            # Fetch summary if missing
+                            if not call_record.call_metadata or not call_record.call_metadata.get("summary"):
+                                api_summary = None
+                                # Try analysis.summary first
+                                api_analysis = call_details.get("analysis", {})
+                                if isinstance(api_analysis, dict):
+                                    api_summary = api_analysis.get("summary") or api_analysis.get("summaryText")
+                                
+                                # Fallback to direct summary field
+                                if not api_summary:
+                                    api_summary = call_details.get("summary") or call_details.get("summaryText")
+                                
+                                if api_summary:
+                                    api_summary = str(api_summary).strip()
+                                    if api_summary:
+                                        print(f"📋 Fetched summary from Vapi API for call {call_id}: {len(api_summary)} chars")
+                                        if call_record.call_metadata is None:
+                                            call_record.call_metadata = {}
+                                        call_record.call_metadata["summary"] = api_summary
+                                        call_record.call_metadata["summary_source"] = "vapi_api"
+                                        updated = True
+                            
+                            # Also update transcript if missing
+                            if not call_record.transcript:
+                                api_transcript = call_details.get("transcript")
+                                if api_transcript:
+                                    call_record.transcript = api_transcript
+                                    updated = True
+                    except Exception as e:
+                        print(f"⚠️  Error fetching call details from Vapi API: {e}")
+                
+                # Legacy: Fetch recording URL and summary from VAPI API if still missing
+                # This is now handled above, but keeping for backward compatibility
+                if not call_record.recording_url or (not call_record.call_metadata or not call_record.call_metadata.get("summary")):
+                    if not call_record.recording_url:
+                        print(f"🎙️  Fetching recording URL for call {call_id} from VAPI API...")
+                    if not call_record.call_metadata or not call_record.call_metadata.get("summary"):
+                        print(f"📋 Fetching summary for call {call_id} from VAPI API...")
                     call_details = _fetch_call_details_from_vapi(call_id)
                     if call_details:
-                        recording_url = call_details.get("recordingUrl") or call_details.get("recording")
-                        if recording_url:
-                            call_record.recording_url = recording_url
+                        # Fetch recording URL if missing
+                        if not call_record.recording_url:
+                            recording_url = call_details.get("recordingUrl") or call_details.get("recording")
+                            if recording_url:
+                                call_record.recording_url = recording_url
+                        
+                        # Fetch summary if missing
+                        if not call_record.call_metadata or not call_record.call_metadata.get("summary"):
+                            api_summary = None
+                            api_analysis = call_details.get("analysis", {})
+                            if isinstance(api_analysis, dict):
+                                api_summary = api_analysis.get("summary") or api_analysis.get("summaryText")
+                            if not api_summary:
+                                api_summary = call_details.get("summary") or call_details.get("summaryText")
+                            if api_summary:
+                                api_summary = str(api_summary).strip()
+                                if api_summary:
+                                    print(f"📋 Fetched summary from Vapi API: {len(api_summary)} chars")
+                                    if call_record.call_metadata is None:
+                                        call_record.call_metadata = {}
+                                    call_record.call_metadata["summary"] = api_summary
+                                    call_record.call_metadata["summary_source"] = "vapi_api"
                             print(f"✅ Recording URL fetched: {recording_url}")
                             updated = True
                         # Also update transcript if it wasn't in webhook

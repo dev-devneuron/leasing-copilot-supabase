@@ -716,7 +716,11 @@ def _is_bad_person_name(name: Optional[str]) -> bool:
     if not name:
         return True
     s = str(name).strip()
-    if len(s) < 2:
+    # Reject ultra-short tokens like "So", "Ok" etc.
+    # We'll allow 1–2 character names ONLY when they come from strong patterns
+    # (e.g., inferred from email like "Li" < li@..., or explicit "my name is X"),
+    # but in generic context they are almost always filler/discourse markers.
+    if len(s) < 3:
         return True
     lower = s.lower().strip()
 
@@ -729,7 +733,11 @@ def _is_bad_person_name(name: Optional[str]) -> bool:
         "needing", "seeking", "finding", "checking", "wondering", "thinking",
         "providing", "following",
     }
-    common_words = {"anyway", "preferably", "should", "would", "could", "please", "thanks", "thank"}
+    # Common discourse markers / filler words that Gemini sometimes proposes as names
+    common_words = {
+        "anyway", "preferably", "should", "would", "could", "please",
+        "thanks", "thank", "so", "yeah", "yep", "nope", "uh", "um", "well",
+    }
 
     if lower in bad_names or lower in common_verbs or lower in common_words:
         return True
@@ -1236,9 +1244,9 @@ DETAILED EXTRACTION RULES:
    - MUST be a real person name (2+ characters, not generic words or verbs)
    - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
    - REJECT COMMON VERBS: "looking", "searching", "asking", "wanting", "trying", "calling", "needing", "seeking", "finding", "providing", "following", "checking", "wondering", "thinking"
-   - REJECT COMMON WORDS: "anyway", "preferably", "should", "would", "could", "please", "thanks", "thank"
+   - REJECT COMMON WORDS / FILLERS: "anyway", "preferably", "should", "would", "could", "please", "thanks", "thank", "so", "yeah", "yep", "nope", "uh", "um", "well"
    - CRITICAL: NEVER extract verbs as names. If you see "Looking", "Providing", "Following", "Searching", "Asking" - these are VERBS, NOT NAMES. Return null.
-   - CRITICAL: If the word is a verb (action word) or filler word, it CANNOT be a name. Return null.
+   - CRITICAL: If the word is a verb (action word) or filler/discourse word ("so", "yeah", "uh", etc.), it CANNOT be a name. Return null.
    - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech ONLY if it's a real name
    - If customer confirms their name when AI asks, extract from context
    - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John", "rehan@gmail.com" → "Rehan")
