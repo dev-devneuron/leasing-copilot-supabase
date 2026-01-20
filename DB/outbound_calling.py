@@ -10,7 +10,7 @@ This module implements a backend-controlled outbound calling system that:
 Key Principle: Backend decides who to call, Vapi only executes.
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set, Union
 from datetime import datetime, timedelta
 import pytz
 import uuid
@@ -27,6 +27,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import threading
+from queue import Queue
 
 VAPI_BASE_URL = "https://api.vapi.ai"
 VAPI_API_KEY = os.getenv("VAPI_API_KEY")
@@ -1241,6 +1242,139 @@ def extract_and_store_intel_for_call_record(
         }
 
 
+# ============================================================================
+# ASYNC EXTRACTION QUEUE (Latency Optimization)
+# ============================================================================
+
+_extraction_queue: "Queue[str]" = Queue()
+_extraction_worker_started: bool = False
+_extraction_in_flight: Set[str] = set()
+_extraction_lock: Lock = Lock()
+
+
+def _run_extraction_job(call_record_id: Union[str]) -> None:
+    """
+    Run extraction for a single call record.
+    This is executed in a background worker thread.
+    """
+    try:
+        with Session(engine) as session:
+            call_record = session.get(CallRecord, call_record_id)
+            if not call_record:
+                print(f"   ⚠️  Extraction job: CallRecord {call_record_id} not found")
+                return
+
+            # Only extract for calls we have decided to keep:
+            # - Has non-empty transcript
+            # - Not too short (duration > 60s if duration known)
+            if not call_record.transcript or not str(call_record.transcript).strip():
+                print(f"   ⏭️  Extraction job: Call {call_record.call_id} has no usable transcript, skipping")
+                return
+
+            if call_record.call_duration is not None and call_record.call_duration <= 60:
+                print(
+                    f"   ⏭️  Extraction job: Call {call_record.call_id} duration "
+                    f"{call_record.call_duration}s <= 60s, skipping"
+                )
+                return
+
+            # Decide whether to force re-extract:
+            # - Outbound calls: we want the freshest data → force_re_extract=True
+            # - Inbound calls: respect existing cache/attempt logic
+            force_re_extract = (call_record.call_direction == "outbound")
+
+            print(
+                f"   🚀 Extraction job starting for call {call_record.call_id} "
+                f"(direction={call_record.call_direction}, force_re_extract={force_re_extract})"
+            )
+            extracted_intel = extract_and_store_intel_for_call_record(
+                call_record, session, force_re_extract=force_re_extract
+            )
+
+            # Update contact if we found useful intel
+            if call_record.contact_id and extracted_intel:
+                try:
+                    contact = session.get(Contact, call_record.contact_id)
+                    if contact:
+                        updated_contact = False
+
+                        # Update email if contact has none
+                        if extracted_intel.get("email") and not contact.email:
+                            contact.email = extracted_intel["email"]
+                            updated_contact = True
+
+                        # Update name if inferred_name is good and existing name is bad
+                        inferred_name = extracted_intel.get("inferred_name")
+                        if inferred_name:
+                            from DB.outbound_calling import _is_bad_person_name  # type: ignore
+
+                            proposed = inferred_name
+                            # Only overwrite if existing name is bad and proposed is good
+                            if not _is_bad_person_name(proposed) and (
+                                not contact.name or _is_bad_person_name(contact.name)
+                            ):
+                                contact.name = proposed
+                                updated_contact = True
+
+                        if updated_contact:
+                            session.add(contact)
+                            session.commit()
+                            print(
+                                f"   ✅ Extraction job: Updated contact {contact.id} "
+                                f"from extracted intel (call_id={call_record.call_id})"
+                            )
+                except Exception as e:
+                    session.rollback()
+                    print(f"   ⚠️  Extraction job: Failed updating contact from intel: {e}")
+
+    except Exception as e:
+        print(f"   ❌ Extraction job failed for CallRecord {call_record_id}: {e}")
+
+
+def _extraction_worker_loop() -> None:
+    """
+    Background worker loop that processes extraction jobs from the queue.
+    """
+    print("🚀 Extraction worker started")
+    while True:
+        call_record_id = _extraction_queue.get()
+        try:
+            _run_extraction_job(call_record_id)
+        finally:
+            with _extraction_lock:
+                _extraction_in_flight.discard(str(call_record_id))
+            _extraction_queue.task_done()
+
+
+def _ensure_extraction_worker_started() -> None:
+    """
+    Ensure the background extraction worker thread is started once.
+    """
+    global _extraction_worker_started
+    with _extraction_lock:
+        if not _extraction_worker_started:
+            worker = threading.Thread(target=_extraction_worker_loop, daemon=True)
+            worker.start()
+            _extraction_worker_started = True
+
+
+def enqueue_extraction_job(call_record_id: Union[str]) -> None:
+    """
+    Enqueue an extraction job for a given CallRecord ID.
+
+    - Safe to call from webhooks or background tasks.
+    - Deduplicates jobs so the same call isn't processed multiple times concurrently.
+    """
+    _ensure_extraction_worker_started()
+    with _extraction_lock:
+        key = str(call_record_id)
+        if key in _extraction_in_flight:
+            # Already queued or running
+            return
+        _extraction_in_flight.add(key)
+        _extraction_queue.put(key)
+
+
 def trigger_background_extraction(property_manager_id: Optional[int] = None):
     """
     Background task to extract intel from all pending call records.
@@ -1283,51 +1417,14 @@ def trigger_background_extraction(property_manager_id: Optional[int] = None):
             print(f"   ✅ No pending extractions")
             return
         
-        # Process in parallel (max 5 workers to avoid overwhelming Gemini API)
-        completed = 0
-        failed = 0
-        lock = Lock()  # Thread-safe counter
+        # Instead of running extraction synchronously here (which adds latency),
+        # enqueue jobs for the async extraction worker.
+        enqueued = 0
+        for cr in pending_calls:
+            enqueue_extraction_job(str(cr.id))
+            enqueued += 1
         
-        def extract_one(call_record_id):
-            """Extract intel for a single call record (thread-safe)."""
-            try:
-                with Session(engine) as call_session:
-                    # Get the call record in this session
-                    call_record = call_session.get(CallRecord, call_record_id)
-                    if call_record:
-                        extract_and_store_intel_for_call_record(
-                            call_record, call_session, force_re_extract=False
-                        )
-                        with lock:
-                            completed += 1
-                        return True
-                    else:
-                        with lock:
-                            failed += 1
-                        return False
-            except Exception as e:
-                with lock:
-                    failed += 1
-                print(f"   ⚠️  Extraction failed for call record {call_record_id}: {e}")
-                return False
-        
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(extract_one, call_record.id) for call_record in pending_calls]
-            
-            processed = 0
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                    processed += 1
-                    if processed % 10 == 0:
-                        with lock:
-                            current_completed = completed
-                            current_failed = failed
-                        print(f"   📊 Progress: {processed}/{len(pending_calls)} calls processed ({current_completed} succeeded, {current_failed} failed)...")
-                except Exception as e:
-                    print(f"   ⚠️  Future error: {e}")
-        
-        print(f"   ✅ Background extraction completed: {completed} succeeded, {failed} failed out of {len(pending_calls)} total")
+        print(f"   ✅ Background extraction: enqueued {enqueued} jobs for async worker")
     
     print(f"{'='*80}\n")
 

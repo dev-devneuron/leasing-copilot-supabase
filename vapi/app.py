@@ -8106,42 +8106,18 @@ async def vapi_webhook_hyphen(request: Request):
                     session.refresh(call_record)
                 return {"status": "ok", "call_id": call_id, "message": "Call discarded (too short)"}
 
-            # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives.
+            # REAL-TIME EXTRACTION: Extract intel asynchronously when transcript arrives.
             # IMPORTANT: This must NOT be gated behind the presence of `summary`,
             # otherwise calls with transcripts but no summary won't get extracted.
             # Works for BOTH inbound and outbound calls.
             if full_transcript:
                 try:
-                    from DB.outbound_calling import extract_and_store_intel_for_call_record
-                    print(f"🔍 Triggering real-time extraction for call {call_id} (direction: {call_record.call_direction})...")
-                    # Force re-extract if this is an outbound call and we have new transcript
-                    # This ensures outbound calls get the most recent data extracted
-                    force_re_extract = (call_record.call_direction == "outbound")
-                    if force_re_extract:
-                        print(f"   🔄 Force re-extracting for outbound call to get most recent data")
-                    extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=force_re_extract)
-
-                    # Update contact if we found email/name
-                    if call_record.contact_id:
-                        contact = session.get(Contact, call_record.contact_id)
-                        if contact:
-                            if extracted_intel.get("email") and not contact.email:
-                                contact.email = extracted_intel["email"]
-                                session.add(contact)
-                            if extracted_intel.get("inferred_name"):
-                                from DB.outbound_calling import _is_bad_person_name
-                                proposed = extracted_intel["inferred_name"]
-                                if not _is_bad_person_name(proposed) and _is_bad_person_name(contact.name):
-                                    contact.name = proposed
-                                    session.add(contact)
-                            try:
-                                session.commit()
-                                print(f"✅ Updated contact from real-time extraction")
-                            except:
-                                session.rollback()
+                    from DB.outbound_calling import enqueue_extraction_job
+                    print(f"🔍 Enqueuing async extraction job for call {call_id} (direction: {call_record.call_direction})...")
+                    enqueue_extraction_job(str(call_record.id))
                 except Exception as e:
-                    print(f"⚠️  Real-time extraction failed (non-critical): {e}")
-                    # Don't fail webhook if extraction fails
+                    print(f"⚠️  Failed to enqueue extraction job (non-critical): {e}")
+                    # Don't fail webhook if enqueue fails
             
             # Extract duration from message timestamp if available
             timestamp = message.get("timestamp")
@@ -8529,42 +8505,16 @@ async def vapi_webhook(request: Request):
                 else:
                     print(f"⚠️  No summary found in call.ended event data")
                 
-                # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
+                # REAL-TIME EXTRACTION: Extract intel asynchronously when transcript arrives
                 # Works for BOTH inbound and outbound calls.
                 if final_transcript:
                     try:
-                        from DB.outbound_calling import extract_and_store_intel_for_call_record
-                        print(f"🔍 Triggering real-time extraction for call {call_id} (direction: {call_record.call_direction})...")
-                        # Force re-extract if this is an outbound call and we have new transcript
-                        # This ensures outbound calls get the most recent data extracted
-                        force_re_extract = (call_record.call_direction == "outbound")
-                        if force_re_extract:
-                            print(f"   🔄 Force re-extracting for outbound call to get most recent data")
-                        extracted_intel = extract_and_store_intel_for_call_record(call_record, session, force_re_extract=force_re_extract)
-                        
-                        # Update contact if we found email/name
-                        if call_record.contact_id:
-                            contact = session.get(Contact, call_record.contact_id)
-                            if contact:
-                                if extracted_intel.get("email") and not contact.email:
-                                    contact.email = extracted_intel["email"]
-                                    session.add(contact)
-                                if extracted_intel.get("inferred_name"):
-                                    # Avoid poisoning contact.name with verbs like "Looking"/"Following"/"Providing"
-                                    from DB.outbound_calling import _is_bad_person_name
-                                    proposed = extracted_intel["inferred_name"]
-                                    if not _is_bad_person_name(proposed):
-                                        if _is_bad_person_name(contact.name):
-                                            contact.name = proposed
-                                            session.add(contact)
-                                try:
-                                    session.commit()
-                                    print(f"✅ Updated contact from real-time extraction")
-                                except:
-                                    session.rollback()
+                        from DB.outbound_calling import enqueue_extraction_job
+                        print(f"🔍 Enqueuing async extraction job for call {call_id} (direction: {call_record.call_direction})...")
+                        enqueue_extraction_job(str(call_record.id))
                     except Exception as e:
-                        print(f"⚠️  Real-time extraction failed (non-critical): {e}")
-                        # Don't fail webhook if extraction fails
+                        print(f"⚠️  Failed to enqueue extraction job (non-critical): {e}")
+                        # Don't fail webhook if enqueue fails
                 
                 # Store call status and duration
                 call_record.call_status = "ended"
