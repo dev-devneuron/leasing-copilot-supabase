@@ -7751,13 +7751,13 @@ async def vapi_webhook_hyphen(request: Request):
         else:
             print(f"⚠️  No analysis found in message object")
         
-        # Combine transcript and summary
-        if transcript and summary:
-            full_transcript = f"{transcript}\n\n---\n\nSummary: {summary}"
-        elif transcript:
+        # IMPORTANT:
+        # Store *only* the conversational transcript in CallRecord.transcript.
+        # Store the summary separately (call_metadata["summary"]).
+        #
+        # This prevents Gemini extraction from being polluted by summary text.
+        if transcript:
             full_transcript = transcript
-        elif summary:
-            full_transcript = f"Summary: {summary}"
         else:
             full_transcript = None
         
@@ -7857,10 +7857,18 @@ async def vapi_webhook_hyphen(request: Request):
                 except Exception as e:
                     print(f"⚠️  Error creating contact for caller: {e}")
             
-            # Store transcript from end-of-call-report
+            # Store transcript from end-of-call-report (conversation only)
             if full_transcript:
                 print(f"📄 Storing transcript for call {call_id}: {len(full_transcript)} chars")
                 call_record.transcript = full_transcript
+                updated = True
+
+            # Store summary separately (do NOT append to transcript)
+            if summary:
+                if call_record.call_metadata is None:
+                    call_record.call_metadata = {}
+                call_record.call_metadata["summary"] = summary
+                call_record.call_metadata["summary_source"] = "vapi_end_of_call_report"
                 updated = True
                 
                 # REAL-TIME EXTRACTION: Extract intel immediately when transcript arrives
@@ -13214,68 +13222,42 @@ async def trigger_single_outbound_call(
                 last_call_at = None
                 extracted_intel = {}
                 call_summary = None
-                
                 try:
-                    # Get the most recent call with cached extracted intelligence
-                    last_call_with_intel = session.exec(
-                        select(CallRecord)
-                        .where(CallRecord.caller_number == contact.phone_number)
-                        .where(CallRecord.extracted_intel.isnot(None))
-                        .where(CallRecord.extraction_status == "completed")
-                        .order_by(CallRecord.created_at.desc())
-                    ).first()
-                    
-                    if last_call_with_intel and last_call_with_intel.extracted_intel:
-                        # Use cached extraction (FAST - no need to re-extract)
-                        extracted_intel = last_call_with_intel.extracted_intel
-                        call_summary = extracted_intel.get("call_summary")
-                        last_call_id = last_call_with_intel.call_id
-                        last_call_at = last_call_with_intel.created_at.isoformat() if last_call_with_intel.created_at else None
-                        print(f"✅ Using cached extracted intelligence from call {last_call_with_intel.call_id}")
-                        print(f"   📊 Cached intel: email={extracted_intel.get('email')}, name={extracted_intel.get('inferred_name')}, property={extracted_intel.get('inquiry_property')}, purpose={extracted_intel.get('inquiry_purpose')}")
-                    else:
-                        # Fallback: Get latest call and extract if no cache
-                        last_call = session.exec(
-                            select(CallRecord)
-                            .where(CallRecord.caller_number == contact.phone_number)
-                            .order_by(CallRecord.created_at.desc())
-                        ).first()
-                        
-                        if last_call:
-                            last_call_id = last_call.call_id
-                            last_call_at = last_call.created_at.isoformat() if last_call.created_at else None
-                            
-                            if last_call.transcript and len(last_call.transcript.strip()) >= 50:
-                                print(f"📞 No cached intel - extracting from last call transcript (length: {len(last_call.transcript)} chars)...")
-                                extracted_intel = extract_contact_intel_from_transcript(last_call.transcript)
-                                call_summary = extracted_intel.get("call_summary")
-                                print(f"📊 Extracted intel: email={extracted_intel.get('email')}, name={extracted_intel.get('inferred_name')}, property={extracted_intel.get('inquiry_property')}, purpose={extracted_intel.get('inquiry_purpose')}")
-                            else:
-                                print(f"⚠️  Last call has no transcript or transcript too short")
-                        else:
-                            print(f"ℹ️  No previous calls found for this contact")
-                    
+                    # BEST-RECENT STRATEGY:
+                    # Use MOST RECENT call first; backfill missing fields from older calls.
+                    from DB.outbound_calling import get_best_recent_intel_for_phone
+                    extracted_intel = get_best_recent_intel_for_phone(
+                        session=session,
+                        phone=contact.phone_number,
+                        max_calls=10,
+                        force_re_extract=False,
+                    ) or {}
+                    call_summary = extracted_intel.get("call_summary")
+                    print(
+                        f"📊 Best-recent intel: email={extracted_intel.get('email')}, "
+                        f"name={extracted_intel.get('inferred_name')}, "
+                        f"property={extracted_intel.get('inquiry_property')}, "
+                        f"purpose={extracted_intel.get('inquiry_purpose')}"
+                    )
+
                     # Update contact with extracted data if found
                     if extracted_intel.get("email") and not contact.email:
                         contact.email = extracted_intel["email"]
                         session.add(contact)
                         session.commit()
                         print(f"✅ Updated contact email: {contact.email}")
-                    
-                    # Update name if we found a better one
+
                     inferred_name = extracted_intel.get("inferred_name")
                     if inferred_name:
                         bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
-                        if (not contact.name or 
-                            contact.name.lower() in bad_names or 
-                            "riley" in contact.name.lower()):
+                        if (not contact.name or contact.name.lower() in bad_names or "riley" in contact.name.lower()):
                             if inferred_name.lower() not in bad_names and "riley" not in inferred_name.lower():
                                 contact.name = inferred_name
                                 session.add(contact)
                                 session.commit()
                                 print(f"✅ Updated contact name: {contact.name}")
                 except Exception as e:
-                    print(f"⚠️  Failed to load/extract intel: {e}")
+                    print(f"⚠️  Failed to load best-recent intel: {e}")
                     import traceback
                     traceback.print_exc()
 

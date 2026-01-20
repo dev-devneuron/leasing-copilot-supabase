@@ -450,6 +450,32 @@ def _split_transcript(transcript: str) -> Dict[str, str]:
     }
 
 
+def _strip_appended_summary(transcript: str) -> str:
+    """
+    Legacy cleanup: older stored transcripts may have had a summary appended like:
+      <conversation>
+      ---
+      Summary: ...
+
+    We want Gemini extraction to see only the conversation, not the summary.
+    """
+    if not transcript:
+        return transcript
+    s = transcript
+    # Common marker used by our webhook code historically
+    marker = "\n\n---\n\nSummary:"
+    if marker in s:
+        return s.split(marker, 1)[0].strip()
+    # Fallback marker
+    marker2 = "\n\nSummary:"
+    if marker2 in s and s.strip().lower().startswith("summary:") is False:
+        # Only strip if it's appended after some conversation text
+        left, right = s.split(marker2, 1)
+        if left.strip():
+            return left.strip()
+    return s
+
+
 def _normalize_spoken_email(raw: str) -> Optional[str]:
     """
     Best-effort normalization for transcripts like:
@@ -519,6 +545,59 @@ def _infer_name_from_email(email: str) -> Optional[str]:
 # ============================================================================
 # REAL-TIME EXTRACTION: Extract and cache intel when transcripts arrive
 # ============================================================================
+
+def get_best_recent_intel_for_phone(
+    session: Session,
+    phone: str,
+    max_calls: int = 10,
+    force_re_extract: bool = False,
+) -> Dict[str, Optional[str]]:
+    """
+    Best-recent context strategy:
+    - Start from the MOST RECENT call (highest priority).
+    - If a field is missing in the most recent call, backfill it from the next most recent call, etc.
+    - Always uses transcripts (not summaries). If an older transcript had a summary appended, we strip it during extraction.
+    - Keeps per-call caching in CallRecord.extracted_intel up to date.
+    """
+    merged: Dict[str, Optional[str]] = {
+        "email": None,
+        "inferred_name": None,
+        "region": None,
+        "inquiry_property": None,
+        "inquiry_purpose": None,
+        "inquiry_summary": None,
+        "call_summary": None,
+    }
+
+    recent_calls = session.exec(
+        select(CallRecord)
+        .where(CallRecord.caller_number == phone)
+        .where(CallRecord.transcript.isnot(None))
+        .order_by(CallRecord.created_at.desc())
+        .limit(max_calls)
+    ).all()
+
+    # Iterate newest -> oldest, fill missing fields only
+    for call in recent_calls:
+        intel: Optional[Dict[str, Any]] = None
+        if call.extracted_intel and call.extraction_status == "completed" and not force_re_extract:
+            intel = call.extracted_intel
+        else:
+            intel = extract_and_store_intel_for_call_record(call, session, force_re_extract=force_re_extract)
+
+        if not isinstance(intel, dict):
+            continue
+
+        for k in ["email", "inferred_name", "region", "inquiry_property", "inquiry_purpose", "inquiry_summary", "call_summary"]:
+            if merged.get(k) is None and intel.get(k):
+                merged[k] = intel.get(k)
+
+        # Early exit if we have everything we care about
+        if all(merged.get(k) is not None for k in ["inferred_name", "region", "inquiry_property", "inquiry_purpose"]):
+            # Email is optional; don't require it for early exit
+            pass
+
+    return merged
 
 def extract_and_store_intel_for_call_record(
     call_record: CallRecord,
@@ -770,6 +849,8 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
             "call_summary": None,
         }
 
+    # Ensure Gemini sees conversation only (strip any appended summary)
+    transcript = _strip_appended_summary(transcript)
     parts = _split_transcript(transcript)
     user_text = parts["user"] or parts["all"]
     all_text = parts["all"]
@@ -1497,176 +1578,15 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                     print(f"      - Current name: {contact.name}")
                     print(f"      - Current email: {contact.email}")
                 
-                # MULTI-CALL FALLBACK: Check multiple recent calls if last call has no data
-                extracted_info = {
-                    "email": None,
-                    "inferred_name": None,
-                    "region": None,
-                    "inquiry_property": None,
-                    "inquiry_purpose": None,
-                    "inquiry_summary": None,
-                    "call_summary": None,
-                }
-                
-                # Get recent calls for this phone number (up to 10 most recent to find email/name)
-                print(f"   🔍 Searching for recent calls with transcripts for {phone}...")
-                recent_calls = candidate_session.exec(
-                    select(CallRecord)
-                    .where(CallRecord.caller_number == phone)
-                    .where(CallRecord.transcript.isnot(None))
-                    .order_by(CallRecord.created_at.desc())
-                    .limit(10)  # Increased from 5 to 10 to find email/name in older calls
-                ).all()
-                
-                print(f"   📊 Found {len(recent_calls)} recent call(s) with transcripts")
-                for idx, call in enumerate(recent_calls, 1):
-                    transcript_len = len(call.transcript) if call.transcript else 0
-                    has_cache = call.extracted_intel is not None
-                    cache_status = call.extraction_status
-                    print(f"      {idx}. Call {call.call_id[:8]}... | Transcript: {transcript_len} chars | Cache: {has_cache} ({cache_status})")
-                
-                # Try each recent call until we find one with extractable data
-                # PRIORITY: Email and name are more important than inquiry_purpose
-                # Continue searching if we only found inquiry_purpose but no email/name
-                for recent_call in recent_calls:
-                    # Use cached extraction if available
-                    if recent_call.extracted_intel and recent_call.extraction_status == "completed":
-                        cached_intel = recent_call.extracted_intel
-                        # Check if cached intel has high-priority data (email or name)
-                        has_priority_data = (
-                            cached_intel.get("email") or
-                            cached_intel.get("inferred_name")
-                        )
-                        # Check if cached intel has any useful data
-                        has_any_data = (
-                            has_priority_data or
-                            cached_intel.get("inquiry_property") or
-                            cached_intel.get("inquiry_purpose")
-                        )
-                        
-                        if has_priority_data:
-                            # Found email or name - this is high priority, use it
-                            print(f"   ✅ Using cached extraction from call {recent_call.call_id} for {phone} (has email/name)")
-                            extracted_info = cached_intel
-                            call_info["call_id"] = recent_call.call_id
-                            call_info["call_at"] = recent_call.created_at
-                            break
-                        elif has_any_data and not extracted_info.get("email") and not extracted_info.get("inferred_name"):
-                            # Found inquiry_purpose but no email/name yet - store it but keep searching
-                            # Also try re-extracting this call if it has a transcript (might have been cached with old prompt)
-                            print(f"   📝 Found inquiry context in call {recent_call.call_id} for {phone}, but no email/name - continuing search...")
-                            # ALWAYS merge data - keep existing if better, otherwise use new
-                            print(f"   💾 Merging inquiry context from cached call...")
-                            if cached_intel.get("inquiry_property") and not extracted_info.get("inquiry_property"):
-                                extracted_info["inquiry_property"] = cached_intel.get("inquiry_property")
-                            if cached_intel.get("inquiry_purpose") and not extracted_info.get("inquiry_purpose"):
-                                extracted_info["inquiry_purpose"] = cached_intel.get("inquiry_purpose")
-                            if cached_intel.get("region") and not extracted_info.get("region"):
-                                extracted_info["region"] = cached_intel.get("region")
-                            if cached_intel.get("call_summary") and not extracted_info.get("call_summary"):
-                                extracted_info["call_summary"] = cached_intel.get("call_summary")
-                            # Update call info if this is the first call with data
-                            if not call_info.get("call_id"):
-                                call_info["call_id"] = recent_call.call_id
-                                call_info["call_at"] = recent_call.created_at
-                            
-                            # Try re-extracting this call if it has a transcript (might find email/name with better prompt)
-                            if recent_call.transcript and len(recent_call.transcript.strip()) >= 50:
-                                try:
-                                    print(f"   🔄 Re-extracting call {recent_call.call_id} to look for email/name...")
-                                    temp_extracted = extract_and_store_intel_for_call_record(
-                                        recent_call, candidate_session, force_re_extract=True
-                                    )
-                                    if temp_extracted.get("email") or temp_extracted.get("inferred_name"):
-                                        print(f"   ✅ Found email/name after re-extraction!")
-                                        extracted_info.update({
-                                            "email": temp_extracted.get("email"),
-                                            "inferred_name": temp_extracted.get("inferred_name"),
-                                            "region": temp_extracted.get("region") or extracted_info.get("region"),
-                                        })
-                                        break  # Found what we need, stop searching
-                                except Exception as e:
-                                    print(f"   ⚠️  Re-extraction failed: {e}")
-                            
-                            continue  # Keep searching for email/name
-                    
-                    # If no cache or cache is empty, extract now
-                    if recent_call.transcript and len(recent_call.transcript.strip()) >= 50:
-                        print(f"      🔍 No cache - extracting from transcript now...")
-                        try:
-                            # Extract intel (will use cache if available)
-                            temp_extracted = extract_and_store_intel_for_call_record(
-                                recent_call, candidate_session, force_re_extract=False
-                            )
-                            
-                            print(f"      📊 Extraction results:")
-                            print(f"         - email: {temp_extracted.get('email')}")
-                            print(f"         - inferred_name: {temp_extracted.get('inferred_name')}")
-                            print(f"         - inquiry_property: {temp_extracted.get('inquiry_property')}")
-                            print(f"         - inquiry_purpose: {temp_extracted.get('inquiry_purpose')}")
-                            print(f"         - region: {temp_extracted.get('region')}")
-                            
-                            # Check if we got high-priority data (email or name)
-                            has_priority_data = (
-                                temp_extracted.get("email") or
-                                temp_extracted.get("inferred_name")
-                            )
-                            # Check if we got any useful data
-                            has_any_data = (
-                                has_priority_data or
-                                temp_extracted.get("inquiry_property") or
-                                temp_extracted.get("inquiry_purpose")
-                            )
-                            
-                            print(f"      🔍 Analysis:")
-                            print(f"         - Has priority data (email/name): {has_priority_data}")
-                            print(f"         - Has any data: {has_any_data}")
-                            print(f"         - Current extracted_info has email/name: {bool(extracted_info.get('email') or extracted_info.get('inferred_name'))}")
-                            
-                            if has_priority_data:
-                                # Found email or name - this is high priority, use it
-                                print(f"      ✅ PRIORITY DATA FOUND! Using extraction (has email/name)")
-                                print(f"      🎯 Stopping search - we have what we need")
-                                extracted_info = temp_extracted
-                                call_info["call_id"] = recent_call.call_id
-                                call_info["call_at"] = recent_call.created_at
-                                break
-                            elif has_any_data and not extracted_info.get("email") and not extracted_info.get("inferred_name"):
-                                # Found inquiry_purpose but no email/name yet - store it but keep searching
-                                print(f"      📝 Found inquiry context but NO email/name - storing and continuing search...")
-                                # ALWAYS merge data - keep existing if better, otherwise use new
-                                print(f"      💾 Merging inquiry context from this call...")
-                                if temp_extracted.get("inquiry_property") and not extracted_info.get("inquiry_property"):
-                                    extracted_info["inquiry_property"] = temp_extracted.get("inquiry_property")
-                                if temp_extracted.get("inquiry_purpose") and not extracted_info.get("inquiry_purpose"):
-                                    extracted_info["inquiry_purpose"] = temp_extracted.get("inquiry_purpose")
-                                if temp_extracted.get("region") and not extracted_info.get("region"):
-                                    extracted_info["region"] = temp_extracted.get("region")
-                                if temp_extracted.get("call_summary") and not extracted_info.get("call_summary"):
-                                    extracted_info["call_summary"] = temp_extracted.get("call_summary")
-                                # Update call info if this is the first call with data
-                                if not call_info.get("call_id"):
-                                    call_info["call_id"] = recent_call.call_id
-                                    call_info["call_at"] = recent_call.created_at
-                                print(f"      ✅ Merged inquiry context, continuing to next call...")
-                                print(f"      ➡️  MOVING TO NEXT CALL TRANSCRIPT - searching for email/name...")
-                                continue  # Keep searching for email/name
-                            else:
-                                print(f"      ⚠️  No extractable data in this call transcript")
-                                print(f"      📋 Extraction returned all null values:")
-                                print(f"         - email: {temp_extracted.get('email')}")
-                                print(f"         - inferred_name: {temp_extracted.get('inferred_name')}")
-                                print(f"         - inquiry_property: {temp_extracted.get('inquiry_property')}")
-                                print(f"         - inquiry_purpose: {temp_extracted.get('inquiry_purpose')}")
-                                print(f"      ➡️  MOVING TO NEXT CALL TRANSCRIPT for {phone}...")
-                        except Exception as e:
-                            print(f"      ❌ Error extracting from call {recent_call.call_id}: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            continue
-                    else:
-                        transcript_len = len(recent_call.transcript) if recent_call.transcript else 0
-                        print(f"      ⏭️  Skipping - transcript too short ({transcript_len} chars, need 50+)")
+                # BEST-RECENT STRATEGY:
+                # Use the MOST RECENT call first; if fields are missing, backfill from older calls.
+                print(f"   🔍 Building best-recent extracted context for {phone} (most recent call first)...")
+                extracted_info = get_best_recent_intel_for_phone(
+                    session=candidate_session,
+                    phone=phone,
+                    max_calls=10,
+                    force_re_extract=False,
+                )
                 
                 # Print final extracted_info summary
                 # Rebuild inquiry_summary with final combined data
