@@ -7884,13 +7884,13 @@ async def vapi_webhook_hyphen(request: Request):
                             if extracted_intel.get("email") and not contact.email:
                                 contact.email = extracted_intel["email"]
                                 session.add(contact)
-                            if extracted_intel.get("inferred_name"):
-                                bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
-                                name_lower = extracted_intel["inferred_name"].lower().strip()
-                                if name_lower not in bad_names and "riley" not in name_lower:
-                                    if not contact.name or contact.name.lower() in bad_names:
-                                        contact.name = extracted_intel["inferred_name"]
-                                        session.add(contact)
+                                if extracted_intel.get("inferred_name"):
+                                    from DB.outbound_calling import _is_bad_person_name
+                                    proposed = extracted_intel["inferred_name"]
+                                    if not _is_bad_person_name(proposed):
+                                        if _is_bad_person_name(contact.name):
+                                            contact.name = proposed
+                                            session.add(contact)
                             try:
                                 session.commit()
                                 print(f"✅ Updated contact from real-time extraction")
@@ -8217,11 +8217,12 @@ async def vapi_webhook(request: Request):
                                     contact.email = extracted_intel["email"]
                                     session.add(contact)
                                 if extracted_intel.get("inferred_name"):
-                                    bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking"}
-                                    name_lower = extracted_intel["inferred_name"].lower().strip()
-                                    if name_lower not in bad_names and "riley" not in name_lower:
-                                        if not contact.name or contact.name.lower() in bad_names:
-                                            contact.name = extracted_intel["inferred_name"]
+                                    # Avoid poisoning contact.name with verbs like "Looking"/"Following"/"Providing"
+                                    from DB.outbound_calling import _is_bad_person_name
+                                    proposed = extracted_intel["inferred_name"]
+                                    if not _is_bad_person_name(proposed):
+                                        if _is_bad_person_name(contact.name):
+                                            contact.name = proposed
                                             session.add(contact)
                                 try:
                                     session.commit()

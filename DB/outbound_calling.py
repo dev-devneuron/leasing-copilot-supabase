@@ -542,6 +542,36 @@ def _infer_name_from_email(email: str) -> Optional[str]:
     return first[:1].upper() + first[1:].lower()
 
 
+def _is_bad_person_name(name: Optional[str]) -> bool:
+    """
+    Centralized "bad name" detection.
+    Fixes cases like 'Looking' / 'Following' / 'Providing' being treated as real names.
+    """
+    if not name:
+        return True
+    s = str(name).strip()
+    if len(s) < 2:
+        return True
+    lower = s.lower().strip()
+
+    bad_names = {
+        "riley", "assistant", "bot", "ai", "lease", "leasap", "speaking",
+        "this is", "hi", "hello", "hey", "yes", "no", "okay", "ok", "riley speaking",
+    }
+    common_verbs = {
+        "looking", "searching", "asking", "wanting", "trying", "calling",
+        "needing", "seeking", "finding", "checking", "wondering", "thinking",
+        "providing", "following",
+    }
+    common_words = {"anyway", "preferably", "should", "would", "could", "please", "thanks", "thank"}
+
+    if lower in bad_names or lower in common_verbs or lower in common_words:
+        return True
+    if "riley" in lower:
+        return True
+    return False
+
+
 # ============================================================================
 # REAL-TIME EXTRACTION: Extract and cache intel when transcripts arrive
 # ============================================================================
@@ -1588,23 +1618,23 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                     force_re_extract=False,
                 )
                 
-                # Print final extracted_info summary
-                # Rebuild inquiry_summary with final combined data
-                if not extracted_info.get("inquiry_summary"):
-                    summary_parts = []
-                    if extracted_info.get("inquiry_purpose"):
-                        summary_parts.append(f"Purpose: {extracted_info['inquiry_purpose']}")
-                    if extracted_info.get("inquiry_property"):
-                        summary_parts.append(f"Property: {extracted_info['inquiry_property']}")
-                    if extracted_info.get("inferred_name"):
-                        summary_parts.append(f"Name: {extracted_info['inferred_name']}")
-                    if extracted_info.get("email"):
-                        summary_parts.append(f"Email: {extracted_info['email']}")
-                    if extracted_info.get("region"):
-                        summary_parts.append(f"Region: {extracted_info['region']}")
-                    if summary_parts:
-                        extracted_info["inquiry_summary"] = " | ".join(summary_parts)
-                        print(f"   ✅ Rebuilt inquiry_summary from combined data: {extracted_info['inquiry_summary']}")
+                # ALWAYS rebuild inquiry_summary from the final merged data.
+                # Otherwise you can end up with stale partial summaries like "Purpose: booking a tour"
+                # even after we backfill email/name from an older call.
+                summary_parts = []
+                if extracted_info.get("inquiry_purpose"):
+                    summary_parts.append(f"Purpose: {extracted_info['inquiry_purpose']}")
+                if extracted_info.get("inquiry_property"):
+                    summary_parts.append(f"Property: {extracted_info['inquiry_property']}")
+                if extracted_info.get("inferred_name"):
+                    summary_parts.append(f"Name: {extracted_info['inferred_name']}")
+                if extracted_info.get("email"):
+                    summary_parts.append(f"Email: {extracted_info['email']}")
+                if extracted_info.get("region"):
+                    summary_parts.append(f"Region: {extracted_info['region']}")
+                extracted_info["inquiry_summary"] = " | ".join(summary_parts) if summary_parts else None
+                if extracted_info["inquiry_summary"]:
+                    print(f"   ✅ Rebuilt inquiry_summary from merged data: {extracted_info['inquiry_summary']}")
                 
                 print(f"\n   📋 FINAL EXTRACTED INFO SUMMARY:")
                 print(f"      - email: {extracted_info.get('email')}")
@@ -1633,18 +1663,18 @@ def identify_follow_up_candidates(session: Session, limit: int = 100) -> List[Di
                         print(f"      ⏭️  Skipping email update - contact already has email: {contact.email}")
                     
                     if extracted_info.get("inferred_name"):
-                        bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", "this is", "hi", "hello", "riley speaking"}
-                        name_lower = extracted_info["inferred_name"].lower().strip()
-                        if name_lower not in bad_names and "riley" not in name_lower:
-                            if not contact.name or contact.name.lower() in bad_names:
-                                print(f"      ✅ Updating contact.name: {contact.name} → {extracted_info['inferred_name']}")
-                                contact.name = extracted_info["inferred_name"]
+                        proposed = extracted_info["inferred_name"]
+                        if not _is_bad_person_name(proposed):
+                            # Update if current name missing OR current name is also bad (e.g., "Looking")
+                            if _is_bad_person_name(contact.name):
+                                print(f"      ✅ Updating contact.name: {contact.name} → {proposed}")
+                                contact.name = proposed
                                 candidate_session.add(contact)
                                 updated = True
                             else:
                                 print(f"      ⏭️  Skipping name update - contact already has good name: {contact.name}")
                         else:
-                            print(f"      ⏭️  Skipping name update - inferred name is bad: {extracted_info['inferred_name']}")
+                            print(f"      ⏭️  Skipping name update - inferred name is bad: {proposed}")
                     
                     if updated:
                         try:
