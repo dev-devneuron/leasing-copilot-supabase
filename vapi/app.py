@@ -7471,7 +7471,7 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
 @app.post("/admin/cleanup-short-calls")
 def cleanup_short_calls(
     dry_run: bool = True,
-    min_duration_seconds: int = 80,
+    min_duration_seconds: int = 90,
     current_user: Dict[str, Any] = Depends(get_current_user_data)
 ):
     """
@@ -7479,7 +7479,7 @@ def cleanup_short_calls(
     
     Args:
         dry_run: If True, only count records without deleting (default: True for safety)
-        min_duration_seconds: Minimum duration to keep (default: 80 = 1 minute 20 seconds)
+        min_duration_seconds: Minimum duration to keep (default: 90 = 1 minute 30 seconds)
     
     Returns:
         Statistics about cleanup operation

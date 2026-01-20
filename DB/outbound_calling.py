@@ -567,7 +567,7 @@ def should_keep_call_record(call_record: CallRecord, min_duration_seconds: int =
 
 def cleanup_short_call_records(
     session: Session,
-    min_duration_seconds: int = 80,
+    min_duration_seconds: int = 90,
     dry_run: bool = False
 ) -> Dict[str, Any]:
     """
@@ -575,7 +575,7 @@ def cleanup_short_call_records(
     
     Args:
         session: Database session
-        min_duration_seconds: Minimum duration to keep (default: 80 = 1 minute 20 seconds)
+        min_duration_seconds: Minimum duration to keep (default: 90 = 1 minute 30 seconds)
         dry_run: If True, only count records without deleting
     
     Returns:

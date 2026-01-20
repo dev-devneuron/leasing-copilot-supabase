@@ -9,7 +9,7 @@ The system now automatically filters out short call records (< 1 minute) to redu
 ## 🎯 Requirements
 
 1. **New calls going forward**: Only keep call records with duration **> 60 seconds (1 minute)**
-2. **Existing calls cleanup**: Remove call records with duration **<= 80 seconds (1 minute 20 seconds)**
+2. **Existing calls cleanup**: Remove call records with duration **<= 90 seconds (1 minute 30 seconds)**
 
 ---
 
@@ -55,10 +55,10 @@ When building candidate lists:
 **Example Request:**
 ```bash
 # Dry run (safe - just counts)
-POST /admin/cleanup-short-calls?dry_run=true&min_duration_seconds=80
+POST /admin/cleanup-short-calls?dry_run=true&min_duration_seconds=90
 
 # Actual cleanup (deletes records)
-POST /admin/cleanup-short-calls?dry_run=false&min_duration_seconds=80
+POST /admin/cleanup-short-calls?dry_run=false&min_duration_seconds=90
 ```
 
 **Response:**
@@ -79,7 +79,7 @@ POST /admin/cleanup-short-calls?dry_run=false&min_duration_seconds=80
 ### Step 1: Run Dry Run First
 
 ```bash
-POST /admin/cleanup-short-calls?dry_run=true&min_duration_seconds=80
+POST /admin/cleanup-short-calls?dry_run=true&min_duration_seconds=90
 ```
 
 This will:
@@ -96,11 +96,11 @@ Check the response to see:
 ### Step 3: Run Actual Cleanup
 
 ```bash
-POST /admin/cleanup-short-calls?dry_run=false&min_duration_seconds=80
+POST /admin/cleanup-short-calls?dry_run=false&min_duration_seconds=90
 ```
 
 This will:
-- Delete all call records with `call_duration <= 80 seconds`
+- Delete all call records with `call_duration <= 90 seconds`
 - Return count of deleted records
 - Commit changes to database
 
@@ -110,8 +110,8 @@ This will:
 
 1. **Duration Thresholds:**
    - **New calls**: Discarded if `<= 60 seconds` (1 minute)
-   - **Existing cleanup**: Deleted if `<= 80 seconds` (1 minute 20 seconds)
-   - The 20-second buffer for existing cleanup ensures we don't accidentally delete calls that are right at the 1-minute mark
+   - **Existing cleanup**: Deleted if `<= 90 seconds` (1 minute 30 seconds)
+   - The 30-second buffer for existing cleanup ensures we don't accidentally delete calls that are right at the 1-minute mark
 
 2. **Call Records Still Created:**
    - Short calls are still **created in the database** (for tracking/audit)
@@ -132,11 +132,11 @@ This will:
 
 The cleanup removes call records where:
 - `call_duration IS NOT NULL`
-- `call_duration <= 80` (seconds)
+- `call_duration <= 90` (seconds)
 
 **Records NOT deleted:**
 - Calls with `call_duration IS NULL` (duration not set yet - might be in progress)
-- Calls with `call_duration > 80` seconds
+- Calls with `call_duration > 90` seconds
 
 ---
 
