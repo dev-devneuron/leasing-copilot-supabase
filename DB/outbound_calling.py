@@ -896,28 +896,40 @@ DETAILED EXTRACTION RULES:
 2. CUSTOMER_NAME (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
    - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X", "I go by X"
    - Extract FIRST NAME if full name given (e.g., "John Smith" → "John")
-   - MUST be a real person name (2+ characters, not generic words)
+   - MUST be a real person name (2+ characters, not generic words or verbs)
    - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
+   - REJECT COMMON VERBS: "looking", "searching", "asking", "wanting", "trying", "calling", "needing", "seeking", "finding"
+   - REJECT COMMON WORDS: "anyway", "preferably", "should", "would", "could", "please", "thanks", "thank"
    - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech
    - If customer confirms their name when AI asks, extract from context
    - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John", "rehan@gmail.com" → "Rehan")
    - IMPORTANT: If email exists, ALWAYS try to infer name from email username (capitalize first letter)
+   - CRITICAL: If the extracted "name" is a verb or common word (like "looking", "searching", "asking"), return null instead
    - Return null ONLY if no name mentioned AND cannot infer from email (even if email username seems unclear, try it)
 
-3. INQUIRY_PROPERTY (MEDIUM PRIORITY):
+3. INQUIRY_PROPERTY (MEDIUM PRIORITY - EXTRACT ALL PROPERTIES):
    - Extract ANY property address mentioned, even if partial
+   - CRITICAL: Extract ALL properties mentioned in the conversation (user may ask about multiple properties)
    - Look for: street numbers + street names, apartment numbers, building names
-   - Examples: "188 Alexandra Road", "123 Main St", "Apartment 5B at 456 Oak Ave"
+   - Examples: "188 Alexandra Road", "123 Main St", "Apartment 5B at 456 Oak Ave", "475 Browngreens, Sunnyvale, California"
    - Include city/state if mentioned together (e.g., "188 Alexandra Road, Santa Clara, California")
-   - REJECT: Generic phrases like "apartment searches", "visits booking", "general inquiries"
-   - Return null ONLY if no specific address mentioned
+   - IMPORTANT: Extract properties mentioned by BOTH user AND AI assistant
+   - If AI assistant says "I found an apartment at [address]" or "Located at [address]", extract that address
+   - If multiple properties are mentioned, extract the FIRST one (or combine them with " | " separator)
+   - Look for patterns: "located at X", "found at X", "apartment at X", "property at X", "address X", "X with Y beds"
+   - REJECT: Generic phrases like "apartment searches", "visits booking", "general inquiries", "property in California" (too vague)
+   - ACCEPT: Specific addresses even if partial (e.g., "475 Browngreens, Sunnyvale" is acceptable)
+   - Return null ONLY if no specific address mentioned anywhere in the conversation
 
-4. INQUIRY_PURPOSE (MEDIUM PRIORITY):
+4. INQUIRY_PURPOSE (MEDIUM PRIORITY - BE SPECIFIC):
    - Extract customer's intent from their statements
-   - Options: "booking a tour", "availability inquiry", "pricing inquiry", "maintenance request", "general information", "viewing request", "application inquiry"
-   - Look for keywords: "book", "tour", "visit", "view", "available", "price", "rent", "cost", "maintenance", "repair"
+   - Options: "booking a tour", "availability inquiry", "pricing inquiry", "maintenance request", "general information", "viewing request", "application inquiry", "searching for apartments"
+   - Look for keywords: "book", "tour", "visit", "view", "available", "price", "rent", "cost", "maintenance", "repair", "search", "looking for", "find"
+   - IMPORTANT: If user says "I'm looking for apartments" or "searching for apartments" or "want to find apartments", use "availability inquiry" or "searching for apartments" (NOT "general information")
+   - If user specifies preferences (beds, baths, budget, location), it's likely "availability inquiry" or "searching for apartments"
    - Infer from context if not explicitly stated
    - REJECT: Bot greeting phrases, generic "how can I help"
+   - AVOID: "general information" unless truly no specific intent can be determined
    - Return null ONLY if intent completely unclear
 
 5. REGION (LOW PRIORITY):
@@ -952,6 +964,16 @@ EXAMPLES:
 
 - AI: "Thank you, Rehan. Your email is rehan@gmail.com, correct?" Customer: "Yes"
   → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inferred_name": "Rehan", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
+
+- Customer: "I'm looking for apartments in California" AI: "I found an apartment at 475 Browngreens, Sunnyvale, California"
+  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": "475 Browngreens, Sunnyvale, California", "inquiry_purpose": "availability inquiry", "region": "California"}}
+
+- Customer: "I wanted to ask about property in California. I'm looking for 4 or less than 5 bedrooms" AI: "I found an apartment at 475 Browngreens, Sunnyvale, California"
+  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": "475 Browngreens, Sunnyvale, California", "inquiry_purpose": "availability inquiry", "region": "California"}}
+
+- Customer: "I'm looking for apartments" (no name, no property mentioned yet)
+  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": null, "inquiry_purpose": "availability inquiry", "region": null}}
+  NOTE: "looking" is a VERB, NOT a name - return null for customer_name
 
 - Only bot speaks: "Riley speaking, how can I help?"
   → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": null, "inquiry_purpose": null, "region": null}}
@@ -1055,17 +1077,25 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                 ai_customer_name = json_data.get("customer_name") or json_data.get("inferred_name")
                 if ai_customer_name:
                     ai_customer_name = str(ai_customer_name).strip()
-                    # AGGRESSIVE bot name filtering
+                    # AGGRESSIVE bot name and verb filtering
                     bad_names = {
                         "riley", "assistant", "bot", "ai", "lease", "leasap", "speaking", 
                         "this is", "hi", "hello", "hey", "yes", "no", "okay", "ok",
                         "riley speaking", "this is riley", "i'm riley", "my name is riley"
                     }
+                    # Common verbs that should NOT be extracted as names
+                    common_verbs = {
+                        "looking", "searching", "asking", "wanting", "trying", "calling", 
+                        "needing", "seeking", "finding", "checking", "wondering", "thinking",
+                        "preferably", "anyway", "should", "would", "could", "please", 
+                        "thanks", "thank", "thanks", "appreciate"
+                    }
                     name_lower = ai_customer_name.lower().strip()
                     
-                    # Check if it's a bot name
+                    # Check if it's a bot name or a verb
                     is_bot_name = (
                         name_lower in bad_names or 
+                        name_lower in common_verbs or
                         "riley" in name_lower or 
                         name_lower.startswith("riley") or
                         len(ai_customer_name) < 2
@@ -1115,9 +1145,17 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                                 potential_name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
                                 if potential_name:
                                     potential_name_lower = potential_name.lower()
-                                    # Reject bot names
+                                    # Reject bot names and common verbs
                                     bad_names = {"riley", "assistant", "bot", "ai", "lease", "leasap"}
-                                    if potential_name_lower not in bad_names and "riley" not in potential_name_lower and len(potential_name) >= 2:
+                                    common_verbs = {
+                                        "looking", "searching", "asking", "wanting", "trying", "calling",
+                                        "needing", "seeking", "finding", "checking", "wondering", "thinking",
+                                        "preferably", "anyway", "should", "would", "could", "please"
+                                    }
+                                    if (potential_name_lower not in bad_names and 
+                                        potential_name_lower not in common_verbs and
+                                        "riley" not in potential_name_lower and 
+                                        len(potential_name) >= 2):
                                         # Take first name if full name
                                         first_name = potential_name.split()[0] if " " in potential_name else potential_name
                                         inferred_name = first_name[:1].upper() + first_name[1:].lower()
