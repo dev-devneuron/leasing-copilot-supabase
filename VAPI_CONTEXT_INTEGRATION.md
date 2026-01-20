@@ -40,25 +40,18 @@ Reference it casually, as if you remember the previous conversation."
 - No privacy risk when used naturally
 
 ### Step 3: Add to Vapi Payload
-Adds context to `assistant.messages` (RECOMMENDED METHOD):
+Adds context to `metadata.callContext` (Vapi doesn't allow `assistant.messages` when using `assistantId`):
 
 ```json
 {
   "assistantId": "assistant_123",
   "phoneNumber": { ... },
   "customer": { "number": "+15404497896" },
-  "assistant": {
-    "messages": [
-      {
-        "role": "system",
-        "content": "Context for this call: The customer's name is Yashan. Their email is kj373@gmail.com. When they last reached out, they were asking about 891 Bullock Ford, Santa Clara, California. They were interested in booking a tour. Use this information naturally in conversation. Do not mention 'records', 'database', 'system', or 'logs'. Reference it casually, as if you remember the previous conversation."
-      }
-    ]
-  },
   "metadata": {
     "contactId": "5",
     "campaign": "no_booking_followup",
     "callDirection": "outbound",
+    "callContext": "The customer's name is Yashan. When they last reached out, they were interested in booking a tour for 891 Bullock Ford, Santa Clara, California. Use this information naturally in conversation. Do not mention 'records', 'database', 'system', or 'logs'. Reference it casually, as if you remember the previous conversation.",
     "customerName": "Yashan",
     "customerEmail": "kj373@gmail.com",
     "lastInquiryProperty": "891 Bullock Ford, Santa Clara, California",
@@ -67,6 +60,8 @@ Adds context to `assistant.messages` (RECOMMENDED METHOD):
   }
 }
 ```
+
+**Important**: Your Vapi assistant's system prompt should be configured to read from `metadata.callContext` to access this context during the call.
 
 ---
 
@@ -94,7 +89,7 @@ Adds context to `assistant.messages` (RECOMMENDED METHOD):
 ## 🎯 Guidelines Followed
 
 ### ✅ DO (What We Do)
-- ✅ Use `assistant.messages` for context (RECOMMENDED METHOD)
+- ✅ Use `metadata.callContext` for context (Vapi doesn't allow `assistant.messages` with `assistantId`)
 - ✅ Filter out null values
 - ✅ Use natural, conversational phrasing
 - ✅ Include customer name in context (natural to use)
@@ -102,6 +97,7 @@ Adds context to `assistant.messages` (RECOMMENDED METHOD):
 - ✅ Only include region if different from property address
 - ✅ Keep context concise and non-repetitive
 - ✅ Store email in metadata only (not in conversational context)
+- ✅ Configure assistant system prompt to read from `metadata.callContext`
 
 ### ❌ DON'T (What We Avoid)
 - ❌ **Never include email in conversational context** (privacy risk)
@@ -220,4 +216,19 @@ If context seems unclear or user is confused:
 
 ---
 
-**The system is now fully integrated with Vapi using the recommended `assistant.messages` approach!** 🎉
+## ⚙️ Vapi Assistant Configuration Required
+
+**IMPORTANT**: Your Vapi assistant's system prompt must be configured to read from `metadata.callContext` to access the re-engagement context.
+
+Example system prompt addition:
+```
+{% if metadata.callContext %}
+Context for this call: {{ metadata.callContext }}
+{% endif %}
+```
+
+Or in your assistant configuration, reference `metadata.callContext` in the system prompt so Riley can access the context naturally during the call.
+
+---
+
+**The system is now fully integrated with Vapi using `metadata.callContext`!** 🎉

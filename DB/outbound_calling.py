@@ -2019,18 +2019,11 @@ def trigger_outbound_call(
         }
     }
     
-    # Add assistant.messages with context (RECOMMENDED METHOD)
-    # This lets Riley "remember" the last interaction without reading it aloud
+    # Add context to metadata (Vapi doesn't allow assistant.messages when using assistantId)
+    # The assistant's system prompt should be configured to read from metadata fields
     if context_message:
-        payload["assistant"] = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": f"Context for this call: {context_message} Use this information naturally in conversation. Do not mention 'records', 'database', or 'system'. Reference it casually, as if you remember the previous conversation."
-                }
-            ]
-        }
-        print(f"📤 Added assistant.messages context to Vapi payload")
+        payload["metadata"]["callContext"] = context_message
+        print(f"📤 Added call context to metadata")
     
     # Merge additional metadata (keep for backward compatibility)
     if metadata:
@@ -2051,10 +2044,10 @@ def trigger_outbound_call(
         print(f"   Assistant ID: {assistant_id}")
         print(f"   From Number: {from_number}")
         print(f"   To Number: {contact.phone_number}")
-        if payload.get("assistant", {}).get("messages"):
-            print(f"   ✅ Assistant messages context: {payload['assistant']['messages'][0]['content'][:200]}...")
+        if payload.get("metadata", {}).get("callContext"):
+            print(f"   ✅ Call context in metadata: {payload['metadata']['callContext'][:200]}...")
         else:
-            print(f"   ⚠️  No assistant.messages context (no extracted intelligence available)")
+            print(f"   ⚠️  No call context (no extracted intelligence available)")
         print(f"   Metadata keys: {list(payload.get('metadata', {}).keys())}")
         print(f"   Full payload (metadata only): {json.dumps(payload.get('metadata', {}), indent=2)}")
         
