@@ -21,6 +21,7 @@ from .db import Contact, CallRecord, PropertyTourBooking, PropertyManager, Purch
 from .user_lookup import normalize_phone_number
 from .vertex_ai_client import get_vertex_ai_client
 import os
+import re
 import requests
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -481,6 +482,222 @@ def _strip_appended_summary(transcript: str) -> str:
     marker = "\n\n---\n\nSummary:"
     if marker in s:
         return s.split(marker, 1)[0].strip()
+    return s
+
+
+# ============================================================================
+# 3-LAYER EXTRACTION SYSTEM (Token Optimization)
+# ============================================================================
+
+def _preprocess_transcript_layer1(transcript: str) -> str:
+    """
+    Layer 1: Deterministic Pre-Processor (NO AI)
+    
+    Goal: Remove everything AI must never see, keep only relevant lines.
+    
+    Removes:
+    - Logs, timestamps, debug info
+    - System messages
+    - AI disclaimers
+    
+    Keeps:
+    - User: lines
+    - AI lines that ask for info
+    - AI lines that confirm info
+    """
+    if not transcript:
+        return ""
+    
+    lines = transcript.splitlines()
+    cleaned_lines = []
+    
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        
+        # Remove debug/log lines
+        if any(marker in line_stripped.lower() for marker in [
+            "[debug]", "[log]", "[info]", "[warning]", "[error]",
+            "timestamp:", "duration:", "call_id:", "metadata:"
+        ]):
+            continue
+        
+        # Remove system messages
+        if line_stripped.lower().startswith(("system:", "note:", "metadata:")):
+            continue
+        
+        # Keep user lines
+        if line_stripped.lower().startswith(("user:", "customer:")):
+            cleaned_lines.append(line_stripped)
+            continue
+        
+        # Keep AI lines that ask for info, confirm info, OR mention properties/addresses
+        if line_stripped.lower().startswith(("bot:", "assistant:", "ai:")):
+            line_lower = line_stripped.lower()
+            # Keep if AI asks for info
+            if any(keyword in line_lower for keyword in [
+                "what's your", "could you provide", "may i have", "can you share",
+                "your name", "your email", "your phone", "your contact",
+                "what area", "what city", "what location", "what property",
+                "your email is", "your name is", "correct?", "right?"
+            ]):
+                cleaned_lines.append(line_stripped)
+            # Keep if AI confirms something
+            elif any(keyword in line_lower for keyword in [
+                "your email is", "your name is", "i have your", "confirmed",
+                "is that correct", "is that right"
+            ]):
+                cleaned_lines.append(line_stripped)
+            # Keep if AI mentions properties/addresses (critical for property extraction)
+            elif any(keyword in line_lower for keyword in [
+                "found an apartment", "located at", "property at", "address", 
+                "apartment at", "i found", "there's an", "available at",
+                "street", "road", "avenue", "drive", "boulevard", "lane"
+            ]):
+                cleaned_lines.append(line_stripped)
+            # Otherwise skip generic AI chatter
+            continue
+        
+        # Keep other lines that might contain info (fallback)
+        cleaned_lines.append(line_stripped)
+    
+    return "\n".join(cleaned_lines)
+
+
+def _condense_transcript_layer2(transcript: str, max_length: int = 2000) -> str:
+    """
+    Layer 2: Transcript Condenser (Rule-based)
+    
+    For long calls: Extract only info-relevant turns.
+    
+    Strategy:
+    - Keep lines where AI asks for info (name, email, phone, location, property, budget, tour)
+    - Keep user responses within next 1-2 turns
+    - Keep AI confirmations and user "yes/correct" responses
+    
+    Returns condensed transcript (typically 300-800 chars for long calls).
+    """
+    if not transcript:
+        return ""
+    
+    # If already short, return as-is
+    if len(transcript) <= max_length:
+        return transcript
+    
+    lines = transcript.splitlines()
+    relevant_lines = []
+    
+    # Keywords that indicate info-relevant content
+    info_keywords = [
+        "name", "email", "phone", "contact",
+        "area", "city", "location", "property", "address",
+        "budget", "price", "rent", "cost",
+        "tour", "visit", "schedule", "booking", "appointment"
+    ]
+    
+    # Track context: if AI just asked for info, keep next user response
+    ai_asked_for_info = False
+    keep_next_n_lines = 0
+    
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        
+        line_lower = line_stripped.lower()
+        
+        # Check if this line is info-relevant
+        is_info_relevant = any(keyword in line_lower for keyword in info_keywords)
+        
+        # AI asks for info
+        if line_lower.startswith(("bot:", "assistant:", "ai:")) and is_info_relevant:
+            relevant_lines.append(line_stripped)
+            ai_asked_for_info = True
+            keep_next_n_lines = 2  # Keep next 2 lines (user response)
+            continue
+        
+        # User responds after AI asked
+        if keep_next_n_lines > 0:
+            relevant_lines.append(line_stripped)
+            keep_next_n_lines -= 1
+            continue
+        
+        # AI confirms something OR mentions properties/addresses
+        if line_lower.startswith(("bot:", "assistant:", "ai:")):
+            # AI confirms info
+            if any(phrase in line_lower for phrase in [
+                "your email is", "your name is", "i have your", "correct?", "right?"
+            ]):
+                relevant_lines.append(line_stripped)
+                keep_next_n_lines = 1  # Keep next line (user confirmation)
+                continue
+            # AI mentions properties/addresses (critical for extraction)
+            elif any(keyword in line_lower for keyword in [
+                "found an apartment", "located at", "property at", "address",
+                "apartment at", "i found", "there's an", "available at",
+                "street", "road", "avenue", "drive", "boulevard", "lane"
+            ]):
+                relevant_lines.append(line_stripped)
+                continue
+        
+        # User provides info directly
+        if line_lower.startswith(("user:", "customer:")) and is_info_relevant:
+            relevant_lines.append(line_stripped)
+            continue
+        
+        # User confirms ("yes", "correct", "that's right")
+        if line_lower.startswith(("user:", "customer:")) and any(
+            word in line_lower for word in ["yes", "correct", "right", "that's", "exactly"]
+        ):
+            relevant_lines.append(line_stripped)
+            continue
+    
+    condensed = "\n".join(relevant_lines)
+    
+    # If still too long, truncate but keep structure
+    if len(condensed) > max_length:
+        # Keep first part (usually most important)
+        condensed = condensed[:max_length].rsplit("\n", 1)[0] + "\n..."
+    
+    return condensed
+
+
+def _build_minimal_gemini_prompt(condensed_transcript: str) -> str:
+    """
+    Layer 3: Minimal Gemini Prompt
+    
+    Only essential rules and schema - no examples, no verbose instructions.
+    Reduces token usage by ~70%.
+    """
+    return f"""Extract customer information from this phone call transcript.
+
+RULES:
+1. For email/name: Only extract what USER provided or explicitly confirmed.
+2. For property: Extract addresses mentioned by AI (e.g., "I found an apartment at 123 Main St") - user doesn't need to confirm.
+3. For purpose: Extract from user's statements (e.g., "looking for apartments", "want to book a tour").
+4. For region: Extract city/state from user mentions or property addresses.
+5. Never extract names from greetings or filler words ("so", "yeah", "ok").
+6. Reject verbs as names: "looking", "providing", "following", "searching".
+7. If a value is not clearly present, return null.
+8. Output valid JSON only.
+
+OUTPUT SCHEMA:
+{{
+  "email": string | null,
+  "customer_name": string | null,
+  "inferred_name": string | null,
+  "inquiry_property": string | null,
+  "inquiry_purpose": string | null,
+  "region": string | null
+}}
+
+TRANSCRIPT:
+<<<
+{condensed_transcript}
+>>>
+
+Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
     # Fallback marker
     marker2 = "\n\nSummary:"
     if marker2 in s and s.strip().lower().startswith("summary:") is False:
@@ -1161,206 +1378,26 @@ def extract_contact_intel_from_transcript(transcript: Optional[str]) -> Dict[str
         if ai_client and ai_client.is_available():
             print(f"✅ Gemini AI client is available - proceeding with extraction")
             
-            # Use full transcript (up to 8000 chars for Gemini 1.5-flash)
-            transcript_snippet = transcript[:8000] if len(transcript) > 8000 else transcript
-            print(f"Using transcript snippet: {len(transcript_snippet)} chars")
+            # ========================================================================
+            # 3-LAYER EXTRACTION SYSTEM (Token Optimization)
+            # ========================================================================
             
-            # Log transcript analysis
-            print(f"\n📄 TRANSCRIPT ANALYSIS:")
-            print(f"   Full transcript length: {len(transcript)} chars")
-            print(f"   Snippet length (sent to Gemini): {len(transcript_snippet)} chars")
-            print(f"   Transcript truncated: {len(transcript) > 8000}")
+            # Layer 1: Pre-processor - Remove logs, debug, system messages
+            preprocessed = _preprocess_transcript_layer1(transcript)
+            print(f"📄 Layer 1 (Pre-processor): {len(transcript)} → {len(preprocessed)} chars ({100*(1-len(preprocessed)/max(len(transcript),1)):.1f}% reduction)")
             
-            # Analyze transcript content
-            user_lines = [line for line in transcript_snippet.split('\n') if line.strip().startswith(('User:', 'Customer:'))]
-            bot_lines = [line for line in transcript_snippet.split('\n') if line.strip().startswith(('Bot:', 'Assistant:', 'AI:')) or 'Riley' in line]
+            # Layer 2: Condenser - Extract only info-relevant turns (for long calls)
+            condensed = _condense_transcript_layer2(preprocessed, max_length=2000)
+            print(f"📄 Layer 2 (Condenser): {len(preprocessed)} → {len(condensed)} chars ({100*(1-len(condensed)/max(len(preprocessed),1)):.1f}% reduction)")
             
-            print(f"   User/Customer lines found: {len(user_lines)}")
-            print(f"   Bot/Assistant lines found: {len(bot_lines)}")
+            # Layer 3: Minimal prompt - Only essential rules and schema
+            prompt = _build_minimal_gemini_prompt(condensed)
             
-            if user_lines:
-                print(f"   Sample user lines (first 3):")
-                for i, line in enumerate(user_lines[:3], 1):
-                    print(f"      {i}. {line[:100]}..." if len(line) > 100 else f"      {i}. {line}")
-            
-            # Check for email patterns in transcript
-            email_patterns = [
-                r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',  # Standard email
-                r'\b\w+\s+at\s+\w+\s+dot\s+\w+\b',  # Spoken email
-                r'\b\w+\s+@\s+\w+\s+\.\s+\w+\b',  # Spoken with @
-            ]
-            found_email_patterns = []
-            for pattern in email_patterns:
-                matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
-                if matches:
-                    found_email_patterns.extend(matches)
-            
-            if found_email_patterns:
-                print(f"   ⚠️  Potential email patterns found in transcript: {found_email_patterns[:5]}")
-            else:
-                print(f"   ℹ️  No obvious email patterns detected in transcript")
-            
-            # Check for name patterns
-            name_patterns = [
-                r'\b(?:my name is|I\'m|I am|this is|call me|name\'s)\s+([A-Z][a-z]+)\b',
-                r'\b(?:Hi|Hello),?\s+([A-Z][a-z]+)\b',
-            ]
-            found_name_patterns = []
-            for pattern in name_patterns:
-                matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
-                if matches:
-                    found_name_patterns.extend([m for m in matches if m.lower() not in ['riley', 'assistant', 'bot', 'ai']])
-            
-            if found_name_patterns:
-                print(f"   ⚠️  Potential name patterns found: {found_name_patterns[:5]}")
-            else:
-                print(f"   ℹ️  No obvious name patterns detected")
-            
-            print(f"\n   📋 FULL ORIGINAL TRANSCRIPT BEING SENT TO GEMINI:")
-            print(f"   {'='*80}")
-            print(f"   {transcript_snippet}")
-            print(f"   {'='*80}")
-            
-            # Build PERFECTED prompt with enhanced extraction rules
-            prompt = f"""You are an expert data extraction specialist. Extract ONLY customer information from a phone call transcript.
-
-⚠️ CRITICAL RULES - BE AGGRESSIVE AND INTELLIGENT:
-1. The AI assistant is named "Riley" - IGNORE EVERYTHING Riley/Bot/Assistant says EXCEPT when Riley confirms customer info
-2. ANALYZE THE ENTIRE CONVERSATION - Don't just look at isolated statements. Understand context and flow.
-3. USER ALWAYS PROVIDES INFO WHEN AI EXPLICITLY ASKS:
-   - When AI asks "What's your name?" and user responds, extract that name
-   - When AI asks "What's your email?" and user responds, extract that email
-   - When AI asks "Could you provide your email?" and user says "Yes, it's X", extract X
-   - When AI confirms info and user says "yes", "correct", "that's right", extract from AI's confirmation
-4. CONTEXT-AWARE EXTRACTION:
-   - If AI asks a question and user answers in the next line, connect them
-   - Example: AI: "What's your name?" User: "John" → Extract "John"
-   - Example: AI: "Could you provide your email?" User: "Yeah, it's john@gmail.com" → Extract "john@gmail.com"
-5. BE AGGRESSIVE - Extract ANY information that MIGHT be customer data, even if uncertain
-6. Normalize spoken formats (e.g., "at" = @, "dot" = .)
-7. IMPORTANT: If you see ANY pattern that COULD be an email or name, extract it. Better to extract than return null.
-8. Look for information in ALL parts of the transcript, not just explicit statements
-9. UNDERSTAND CONVERSATION FLOW - Track question-answer pairs throughout the entire transcript
-
-TRANSCRIPT FORMAT IDENTIFICATION:
-- "User:" or "Customer:" lines = CUSTOMER SPEECH (EXTRACT FROM THESE)
-- "Bot:", "Assistant:", "AI:", or lines containing "Riley" = AI ASSISTANT (IGNORE COMPLETELY)
-- If format unclear, identify customer speech by context (questions, requests, personal info)
-
-DETAILED EXTRACTION RULES:
-
-1. EMAIL (CRITICAL PRIORITY - EXTRACT AGGRESSIVELY):
-   - Extract ANY email mentioned: "my email is X", "email X", "X at Y dot com", "X@Y.com", "email address X"
-   - Normalize spoken: "at" → @, "dot" → ., remove spaces
-   - Accept partial emails if reconstructable (e.g., "rehan at gmail" → "rehan@gmail.com")
-   - Look for email patterns even in indirect speech: "send to X", "contact at X", "reach me at X"
-   - Check if AI assistant asks for email and customer provides it (even if not explicitly labeled)
-   - If customer says "yes" or "correct" after AI confirms email, extract from AI's confirmation
-   - Look for email in AI confirmations: "Your email is X", "I have your email as X", "Email: X"
-   - CRITICAL: If AI mentions an email in ANY context (even if customer didn't explicitly say it), extract it
-   - IMPORTANT: Be EXTREMELY aggressive - if you see ANY email-like pattern ANYWHERE, extract it
-   - Return null ONLY if absolutely no email mentioned anywhere AND no email-like patterns found AND no email in AI confirmations
-
-2. CUSTOMER_NAME (CRITICAL PRIORITY - EXTRACT IF POSSIBLE):
-   - ANALYZE THE ENTIRE CONVERSATION - Track question-answer pairs
-   - When AI asks "What's your name?" / "Could you provide your name?" / "May I have your name?" and user responds, extract that response
-   - Look for: "my name is X", "I'm X", "this is X", "call me X", "I am X", "name's X", "I go by X"
-   - Extract FIRST NAME if full name given (e.g., "John Smith" → "John")
-   - MUST be a real person name (3+ characters, not generic words or verbs)
-   - REJECT: "Riley", "assistant", "bot", "AI", "speaking", "this is", "hi", "hello", "yes", "no"
-   - REJECT COMMON VERBS: "looking", "searching", "asking", "wanting", "trying", "calling", "needing", "seeking", "finding", "providing", "following", "checking", "wondering", "thinking"
-   - REJECT COMMON WORDS / FILLERS: "anyway", "preferably", "should", "would", "could", "please", "thanks", "thank", "so", "yeah", "yep", "nope", "uh", "um", "well"
-   - CRITICAL: NEVER extract verbs as names. If you see "Looking", "Providing", "Following", "Searching", "Asking", "So" - these are VERBS/FILLERS, NOT NAMES. Return null.
-   - CRITICAL: If the word is a verb (action word) or filler/discourse word ("so", "yeah", "uh", etc.), it CANNOT be a name. Return null.
-   - CRITICAL: Single words like "So", "Ok", "Yeah" are discourse markers, NOT names. They are responses to questions, not name declarations.
-   - CONTEXT-AWARE: If AI asks "What's your name?" and user says "So" or "Yeah", that's NOT a name - it's a filler response. Look for the actual name later in the conversation.
-   - If AI assistant says "Thank you, [Name]" or "Hi [Name]", extract the name from AI's speech ONLY if it's a real name (3+ chars, not a verb/filler)
-   - If customer confirms their name when AI asks, extract from the actual name provided, not from filler words
-   - If name unclear but email found, infer from email username if reasonable (e.g., "john@gmail.com" → "John", "rehan@gmail.com" → "Rehan")
-   - IMPORTANT: If email exists, ALWAYS try to infer name from email username (capitalize first letter)
-   - CRITICAL: Before returning a name, verify it's NOT a verb or filler. Common rejections: looking, providing, following, searching, asking, so, yeah, ok, uh, um
-   - Return null if the extracted value is a verb, filler word, or bot name
-   - Return null ONLY if no name mentioned AND cannot infer from email (even if email username seems unclear, try it)
-
-3. INQUIRY_PROPERTY (MEDIUM PRIORITY - EXTRACT ALL PROPERTIES):
-   - Extract ANY property address mentioned, even if partial
-   - CRITICAL: Extract ALL properties mentioned in the conversation (user may ask about multiple properties)
-   - Look for: street numbers + street names, apartment numbers, building names
-   - Examples: "188 Alexandra Road", "123 Main St", "Apartment 5B at 456 Oak Ave", "475 Browngreens, Sunnyvale, California"
-   - Include city/state if mentioned together (e.g., "188 Alexandra Road, Santa Clara, California")
-   - IMPORTANT: Extract properties mentioned by BOTH user AND AI assistant
-   - If AI assistant says "I found an apartment at [address]" or "Located at [address]", extract that address
-   - If multiple properties are mentioned, extract the FIRST one (or combine them with " | " separator)
-   - Look for patterns: "located at X", "found at X", "apartment at X", "property at X", "address X", "X with Y beds"
-   - REJECT: Generic phrases like "apartment searches", "visits booking", "general inquiries", "property in California" (too vague)
-   - ACCEPT: Specific addresses even if partial (e.g., "475 Browngreens, Sunnyvale" is acceptable)
-   - Return null ONLY if no specific address mentioned anywhere in the conversation
-
-4. INQUIRY_PURPOSE (MEDIUM PRIORITY - BE SPECIFIC):
-   - Extract customer's intent from their statements
-   - Options: "booking a tour", "availability inquiry", "pricing inquiry", "maintenance request", "general information", "viewing request", "application inquiry", "searching for apartments"
-   - Look for keywords: "book", "tour", "visit", "view", "available", "price", "rent", "cost", "maintenance", "repair", "search", "looking for", "find"
-   - IMPORTANT: If user says "I'm looking for apartments" or "searching for apartments" or "want to find apartments", use "availability inquiry" or "searching for apartments" (NOT "general information")
-   - If user specifies preferences (beds, baths, budget, location), it's likely "availability inquiry" or "searching for apartments"
-   - Infer from context if not explicitly stated
-   - REJECT: Bot greeting phrases, generic "how can I help"
-   - AVOID: "general information" unless truly no specific intent can be determined
-   - Return null ONLY if intent completely unclear
-
-5. REGION (LOW PRIORITY):
-   - Extract state, city, or city+state if mentioned
-   - Examples: "California", "Santa Clara", "Santa Clara, California", "CA", "San Francisco"
-   - Look in property address or separate mentions (e.g., "I want apartments in Sunnyvale" → "Sunnyvale")
-   - Extract from context: "in [City]", "at [City]", "[City] area", "[State] apartments"
-   - IMPORTANT: Extract region even if mentioned separately from property address
-   - Return null ONLY if no city, state, or region mentioned anywhere
-
-OUTPUT FORMAT (STRICT JSON):
-{{
-  "email": "customer@email.com" or null,
-  "customer_name": "ActualCustomerName" or null,
-  "inferred_name": "ActualCustomerName" or null,
-  "inquiry_property": "123 Street Address, City, State" or null,
-  "inquiry_purpose": "booking a tour" or null,
-  "region": "California" or null
-}}
-
-NOTE: Both "customer_name" and "inferred_name" should contain the same value (the customer's name).
-
-EXAMPLES:
-- Customer: "Hi, I'm Rehan, my email is rehan@gmail.com, I want to book a tour for 188 Alexandra Road, Santa Clara"
-  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inferred_name": "Rehan", "inquiry_property": "188 Alexandra Road, Santa Clara", "inquiry_purpose": "booking a tour", "region": "Santa Clara"}}
-
-- Customer: "Yeah, my name is John and email is john at gmail dot com"
-  → {{"email": "john@gmail.com", "customer_name": "John", "inferred_name": "John", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
-
-- AI: "Could you provide your email?" Customer: "Yes, it's john@gmail.com"
-  → {{"email": "john@gmail.com", "customer_name": null, "inferred_name": "John", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
-
-- AI: "Thank you, Rehan. Your email is rehan@gmail.com, correct?" Customer: "Yes"
-  → {{"email": "rehan@gmail.com", "customer_name": "Rehan", "inferred_name": "Rehan", "inquiry_property": null, "inquiry_purpose": null, "region": null}}
-
-- Customer: "I'm looking for apartments in California" AI: "I found an apartment at 475 Browngreens, Sunnyvale, California"
-  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": "475 Browngreens, Sunnyvale, California", "inquiry_purpose": "availability inquiry", "region": "California"}}
-
-- Customer: "I wanted to ask about property in California. I'm looking for 4 or less than 5 bedrooms" AI: "I found an apartment at 475 Browngreens, Sunnyvale, California"
-  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": "475 Browngreens, Sunnyvale, California", "inquiry_purpose": "availability inquiry", "region": "California"}}
-
-- Customer: "I'm looking for apartments" (no name, no property mentioned yet)
-  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": null, "inquiry_purpose": "availability inquiry", "region": null}}
-  NOTE: "looking" is a VERB, NOT a name - return null for customer_name
-
-- Only bot speaks: "Riley speaking, how can I help?"
-  → {{"email": null, "customer_name": null, "inferred_name": null, "inquiry_property": null, "inquiry_purpose": null, "region": null}}
-
-TRANSCRIPT TO ANALYZE:
-{transcript_snippet}
-
-Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
-            
-            print(f"\n📤 SENDING PROMPT TO GEMINI:")
-            print(f"   Prompt length: {len(prompt)} chars")
-            print(f"   Prompt preview (first 1000 chars):\n{prompt[:1000]}\n...")
+            print(f"\n📤 SENDING OPTIMIZED PROMPT TO GEMINI:")
+            print(f"   Original transcript: {len(transcript)} chars")
+            print(f"   Final prompt: {len(prompt)} chars")
+            print(f"   Token reduction: ~{100*(1-len(prompt)/max(len(transcript)*2,1)):.0f}%")
+            print(f"   Condensed transcript preview (first 500 chars):\n{condensed[:500]}\n...")
             
             try:
                 resp = ai_client.generate_content(prompt).strip()
@@ -1413,12 +1450,13 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                     else:
                         print(f"   ⚠️  Invalid email format: {ai_email}")
                 
-                # POST-PROCESSING: If Gemini returned null for email, try to find it in transcript
+                # POST-PROCESSING: If Gemini returned null for email, try to find it in FULL transcript
+                # Use full transcript (not condensed) for post-processing to ensure we don't miss anything
                 if not email:
-                    # Look for email patterns in the transcript
+                    # Look for email patterns in the FULL transcript
                     email_patterns_in_transcript = re.findall(
                         r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b',
-                        transcript_snippet,
+                        transcript,  # Use full transcript, not condensed
                         re.IGNORECASE
                     )
                     if email_patterns_in_transcript:
@@ -1435,7 +1473,7 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                             r'(\w+)\s+@\s+(\w+)\s+\.\s+(\w+)',  # "john @ gmail . com"
                         ]
                         for pattern in spoken_email_patterns:
-                            matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
+                            matches = re.findall(pattern, transcript, re.IGNORECASE)  # Use full transcript
                             if matches:
                                 for match in matches:
                                     if len(match) == 3:
@@ -1506,9 +1544,10 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                                     inferred_name = longest_part[:1].upper() + longest_part[1:].lower()
                                     print(f"   ✅ Aggressively inferred name from email: {inferred_name} (from '{email_local}')")
                 
-                # POST-PROCESSING: If Gemini returned null for name, try to find it in transcript
+                # POST-PROCESSING: If Gemini returned null for name, try to find it in FULL transcript
+                # Use full transcript (not condensed) for post-processing to ensure we don't miss anything
                 if not inferred_name:
-                    # Look for name patterns in the transcript
+                    # Look for name patterns in the FULL transcript
                     name_patterns_in_transcript = [
                         r'(?:my name is|I\'m|I am|this is|call me|name\'s|I go by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
                         r'(?:Hi|Hello),?\s+([A-Z][a-z]+)',
@@ -1516,7 +1555,7 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         r'Hello,?\s+([A-Z][a-z]+)',
                     ]
                     for pattern in name_patterns_in_transcript:
-                        matches = re.findall(pattern, transcript_snippet, re.IGNORECASE)
+                        matches = re.findall(pattern, transcript, re.IGNORECASE)  # Use full transcript
                         if matches:
                             for match in matches:
                                 potential_name = match.strip() if isinstance(match, str) else match[0].strip() if match else None
@@ -1597,8 +1636,9 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
 
                 # Fallback purpose: if Gemini returns "general information" but the user is clearly searching,
                 # normalize to a more useful purpose.
+                # Use full transcript (not condensed) for fallback extraction
                 if (not inquiry_purpose) or (isinstance(inquiry_purpose, str) and inquiry_purpose.strip().lower() == "general information"):
-                    t = transcript_snippet.lower()
+                    t = transcript.lower()  # Use full transcript
                     if ("apart" in t and ("looking for" in t or "search" in t or "find" in t or "availability" in t or "beds" in t or "baths" in t or "$" in t or "dollars" in t)):
                         inquiry_purpose = "availability inquiry"
                         print(f"   ✅ Fallback purpose inferred from transcript: {inquiry_purpose}")
@@ -1616,8 +1656,9 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                         print(f"   ❌ Rejected invalid region: '{ai_region}'")
 
                 # Fallback property extraction: grab the strongest "located at ..." address if Gemini missed it.
+                # Use full transcript (not condensed) for fallback extraction
                 if not inquiry_property:
-                    m = re.search(r"(?i)\b(?:it's\s+)?located at\s+(.+?)(?:\.\s|\.?$|\n)", transcript_snippet)
+                    m = re.search(r"(?i)\b(?:it's\s+)?located at\s+(.+?)(?:\.\s|\.?$|\n)", transcript)  # Use full transcript
                     if m:
                         candidate_addr = m.group(1).strip()
                         if candidate_addr and len(candidate_addr) >= 8:
@@ -1650,10 +1691,11 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                 if not region:
                     city = None
                     state = None
-                    m_city = re.search(r"(?i)\bapart(?:ment)?s?\s+in\s+([A-Z][a-z]+)\b", transcript_snippet)
+                    # Use full transcript (not condensed) for region extraction
+                    m_city = re.search(r"(?i)\bapart(?:ment)?s?\s+in\s+([A-Z][a-z]+)\b", transcript)  # Use full transcript
                     if m_city:
                         city = m_city.group(1).strip()
-                    m_state = re.search(r"(?m)^User:\s*([A-Z][a-z]{2,})\s*\.?\s*$", transcript_snippet)
+                    m_state = re.search(r"(?m)^User:\s*([A-Z][a-z]{2,})\s*\.?\s*$", transcript)  # Use full transcript
                     if m_state:
                         state = m_state.group(1).strip()
                     if city and state:
