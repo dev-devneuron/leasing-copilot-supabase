@@ -214,6 +214,21 @@ def _is_retry_allowed(contact: Contact) -> bool:
     
     Returns True if retry is allowed, False otherwise.
     """
+    # If opt-out has been cleared for this contact, do NOT block on a historical
+    # 'opt_out' value stored in last_call_outcome.
+    #
+    # This can happen if:
+    # - Vapi/webhook previously marked the call as opt-out
+    # - An admin later cleared opt-out via the API
+    #
+    # In that case, treat last_call_outcome as if it were not 'opt_out'.
+    if not getattr(contact, "opted_out", False) and getattr(contact, "last_call_outcome", None) == "opt_out":
+        print(
+            f"ℹ️  Ignoring historical 'opt_out' outcome for contact {contact.id} "
+            f"because opted_out=False (opt-out was cleared). Allowing retry."
+        )
+        return True
+    
     if not contact.last_call_outcome:
         # No outcome recorded - allow retry (backward compatibility)
         return True

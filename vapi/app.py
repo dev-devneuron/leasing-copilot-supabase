@@ -13393,7 +13393,14 @@ async def get_outbound_call_candidates(
                             "call_attempt_count": contact.call_attempt_count,
                             
                             # Call history
-                            "last_call_outcome": getattr(contact, "last_call_outcome", None),
+                            # If opt-out was cleared (opted_out=False) but last_call_outcome is still
+                            # 'opt_out' from historical data, do NOT surface that to the UI.
+                            # This keeps the UI consistent with the cleared status.
+                            "last_call_outcome": (
+                                None
+                                if not contact.opted_out and getattr(contact, "last_call_outcome", None) == "opt_out"
+                                else getattr(contact, "last_call_outcome", None)
+                            ),
                             "last_called_at": contact.last_called_at.isoformat() if contact.last_called_at else None,
                             "last_booking_at": contact.last_booking_at.isoformat() if getattr(contact, "last_booking_at", None) else None,
                             "last_call_id": candidate.get("last_call_id"),
@@ -13870,6 +13877,14 @@ async def clear_contact_opt_out(
         contact.opt_out_timestamp = None
         contact.opt_out_method = None
         contact.opt_out_call_id = None
+        # Also clear last_call_outcome if it was set to 'opt_out' so that
+        # UI and eligibility logic no longer treat the last call as blocking.
+        try:
+            if getattr(contact, "last_call_outcome", None) == "opt_out":
+                contact.last_call_outcome = None
+        except Exception as e:
+            # Do not fail the request if this field is missing for some reason
+            print(f"⚠️  Failed to clear last_call_outcome for contact {contact_id}: {e}")
         contact.updated_at = datetime.utcnow()
         
         session.add(contact)
