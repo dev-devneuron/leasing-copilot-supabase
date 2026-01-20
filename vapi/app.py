@@ -2509,15 +2509,27 @@ def _update_vapi_caches(
     phone_number_id: Optional[str] = None,
 ):
     """Keep caches in sync for downstream data isolation helpers."""
-    if call_id and phone_number:
+    # Ensure phone_number is a string (not a dict) - defensive fix for outbound calls
+    if phone_number and isinstance(phone_number, dict):
+        phone_number = (
+            phone_number.get("number") or
+            phone_number.get("phoneNumber") or
+            phone_number.get("twilioPhoneNumber") or
+            phone_number.get("twilio_phone_number")
+        )
+        if not phone_number:
+            print(f"⚠️  phone_number is dict but no number field found, skipping cache update")
+            return
+    
+    if call_id and phone_number and isinstance(phone_number, str):
         _call_phone_cache[call_id] = phone_number
         # Keep cache size reasonable (last 1000 calls)
         if len(_call_phone_cache) > 1000:
             oldest_key = next(iter(_call_phone_cache))
             del _call_phone_cache[oldest_key]
         print(f"✅ Stored mapping: call_id={call_id} -> phone_number={phone_number}")
-
-    if phone_number_id and phone_number:
+    
+    if phone_number_id and phone_number and isinstance(phone_number, str):
         _phone_id_cache[phone_number_id] = phone_number
         _phone_to_id_cache[phone_number] = phone_number_id
         print(f"✅ Stored phone_number_id mapping: {phone_number_id} <-> {phone_number}")
@@ -7926,13 +7938,30 @@ async def vapi_webhook_hyphen(request: Request):
             if phone_number_id:
                 phone_number_obj = payload.get("phoneNumber") or message.get("phoneNumber")
                 if isinstance(phone_number_obj, dict):
-                    realtor_number = phone_number_obj.get("number") or phone_number_obj.get("phoneNumber")
+                    # For outbound calls, phone number might be in twilioPhoneNumber field
+                    realtor_number = (
+                        phone_number_obj.get("number") or
+                        phone_number_obj.get("phoneNumber") or
+                        phone_number_obj.get("twilioPhoneNumber") or
+                        phone_number_obj.get("twilio_phone_number")
+                    )
                 elif isinstance(phone_number_obj, str):
                     realtor_number = phone_number_obj
                 else:
                     realtor_number = _fetch_phone_number_from_vapi(phone_number_id)
         
-        realtor_number = _normalize_bot_number(realtor_number) if realtor_number else "unknown"
+        # Ensure realtor_number is a string (not a dict) before normalizing
+        if isinstance(realtor_number, dict):
+            # Extract phone number from dict if it's still a dict
+            realtor_number = (
+                realtor_number.get("number") or
+                realtor_number.get("phoneNumber") or
+                realtor_number.get("twilioPhoneNumber") or
+                realtor_number.get("twilio_phone_number") or
+                "unknown"
+            )
+        
+        realtor_number = _normalize_bot_number(realtor_number) if realtor_number and isinstance(realtor_number, str) else "unknown"
         _update_vapi_caches(call_id, None if realtor_number == "unknown" else realtor_number, phone_number_id)
         
         # If we don't have call_id, try to find recent call by phone number and timestamp

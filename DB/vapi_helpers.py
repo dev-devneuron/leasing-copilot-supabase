@@ -38,8 +38,28 @@ def get_phone_number_from_vapi_call(call_id: Optional[str] = None) -> Optional[s
             # Try to get phone number directly from call data first
             phone_number = call_data.get("phoneNumber") or call_data.get("phone_number")
             if phone_number:
-                print(f"   ✅ Found phone number directly in call data: {phone_number}")
-                return phone_number
+                # Handle case where phoneNumber is a dict (outbound calls return full object)
+                if isinstance(phone_number, dict):
+                    # Extract the actual phone number string from the object
+                    phone_number = (
+                        phone_number.get("number") or
+                        phone_number.get("phoneNumber") or
+                        phone_number.get("twilioPhoneNumber") or
+                        phone_number.get("twilio_phone_number")
+                    )
+                    if phone_number:
+                        print(f"   ✅ Extracted phone number from phoneNumber object: {phone_number}")
+                    else:
+                        print(f"   ⚠️  phoneNumber is a dict but no number field found: {phone_number}")
+                        phone_number = None
+                elif isinstance(phone_number, str):
+                    print(f"   ✅ Found phone number directly in call data: {phone_number}")
+                else:
+                    print(f"   ⚠️  phoneNumber is unexpected type: {type(phone_number)}")
+                    phone_number = None
+                
+                if phone_number:
+                    return phone_number
             
             # Fallback: Get phone number via phoneNumberId
             phone_number_id = call_data.get("phoneNumberId") or call_data.get("phone_number_id")
@@ -362,10 +382,33 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
         # First check cache
         if call_id_from_header in _call_phone_cache:
             cached_number = _call_phone_cache[call_id_from_header]
-            print(f"   ✅ Found phone number from cached call ID: {cached_number}")
-            user_info = get_user_from_phone_number(cached_number)
-            if user_info:
-                return user_info
+            
+            # Handle case where cache contains a dict (from outbound calls)
+            if isinstance(cached_number, dict):
+                # Extract the actual phone number string from the dict
+                cached_number = (
+                    cached_number.get("number") or
+                    cached_number.get("phoneNumber") or
+                    cached_number.get("twilioPhoneNumber") or
+                    cached_number.get("twilio_phone_number")
+                )
+                if cached_number:
+                    print(f"   ✅ Extracted phone number from cached call ID (was dict): {cached_number}")
+                    # Update cache with string value for future use
+                    _call_phone_cache[call_id_from_header] = cached_number
+                else:
+                    print(f"   ⚠️  Cached value is dict but no number field found: {cached_number}")
+                    cached_number = None
+            elif isinstance(cached_number, str):
+                print(f"   ✅ Found phone number from cached call ID: {cached_number}")
+            else:
+                print(f"   ⚠️  Cached value is unexpected type: {type(cached_number)}")
+                cached_number = None
+            
+            if cached_number:
+                user_info = get_user_from_phone_number(cached_number)
+                if user_info:
+                    return user_info
         
         # Fallback: Fetch from Vapi API
         print(f"   📞 Call ID not in cache, fetching phone number from Vapi API...")
@@ -698,8 +741,21 @@ def identify_user_from_vapi_request(request_body: Dict[str, Any], request_header
     )
     
     if phone_number:
-        print(f"   📞 Found phone number in request: {phone_number}")
-        return get_user_from_phone_number(phone_number)
+        # Handle case where phone_number is a dict (outbound calls)
+        if isinstance(phone_number, dict):
+            phone_number = (
+                phone_number.get("number") or
+                phone_number.get("phoneNumber") or
+                phone_number.get("twilioPhoneNumber") or
+                phone_number.get("twilio_phone_number")
+            )
+            if not phone_number:
+                print(f"   ⚠️  phone_number is dict but no number field found")
+                phone_number = None
+        
+        if phone_number and isinstance(phone_number, str):
+            print(f"   📞 Found phone number in request: {phone_number}")
+            return get_user_from_phone_number(phone_number)
     
     # Method 3: From call ID (check body, headers, and cache)
     # Try multiple locations in the request body

@@ -663,6 +663,32 @@ def _condense_transcript_layer2(transcript: str, max_length: int = 2000) -> str:
     return condensed
 
 
+def _is_valid_value(value: Any) -> bool:
+    """
+    Check if a value is valid (not null, not "N/A", not empty).
+    Used to filter out invalid values before sending to Vapi.
+    
+    Args:
+        value: Value to check
+        
+    Returns:
+        True if value is valid (should be sent to Vapi), False otherwise
+    """
+    if value is None:
+        return False
+    
+    if isinstance(value, str):
+        # Remove whitespace and check
+        stripped = value.strip()
+        if not stripped:
+            return False
+        # Check for common "empty" indicators
+        if stripped.lower() in ["n/a", "na", "none", "null", "undefined", ""]:
+            return False
+    
+    return True
+
+
 def _build_minimal_gemini_prompt(condensed_transcript: str) -> str:
     """
     Layer 3: Minimal Gemini Prompt
@@ -2281,15 +2307,25 @@ def trigger_outbound_call(
             context_parts = []
             
             # Add customer name if available (OK to include in context)
+            # Filter out null/N/A/empty values
             customer_name = extracted_intel.get("inferred_name") or contact.name
-            if customer_name:
+            if _is_valid_value(customer_name):
                 context_parts.append(f"The customer's name is {customer_name}.")
             
             # Build a concise, non-repetitive context message
             # Combine property and purpose into one natural sentence
+            # Filter out null/N/A/empty values
             property_addr = extracted_intel.get("inquiry_property")
+            if not _is_valid_value(property_addr):
+                property_addr = None
+            
             purpose = extracted_intel.get("inquiry_purpose")
+            if not _is_valid_value(purpose):
+                purpose = None
+            
             region = extracted_intel.get("region")
+            if not _is_valid_value(region):
+                region = None
             
             # Build main context sentence (property + purpose combined)
             if property_addr and purpose:
@@ -2371,41 +2407,59 @@ def trigger_outbound_call(
     }
     
     # Add customer name if available (best practice: include in customer object)
-    if customer_name:
+    # Filter out null/N/A/empty values
+    if _is_valid_value(customer_name):
         payload["customer"]["name"] = customer_name
     
     # Add context to metadata (Vapi best practice: use metadata for context)
     # The assistant's system prompt should be configured to read from metadata.callContext
     # Alternative: Use assistantOverrides.variableValues for structured variables
-    if context_message:
+    # Filter out null/N/A/empty values
+    if _is_valid_value(context_message):
         payload["metadata"]["callContext"] = context_message
         print(f"📤 Added call context to metadata")
     
     # Also add structured variables via assistantOverrides for easier prompt reference
     # This allows the assistant to use {{customerName}}, {{inquiryProperty}}, etc. in prompts
+    # Filter out null/N/A/empty values - only send valid data
     if extracted_intel:
         variable_values = {}
-        if customer_name:
-            variable_values["customerName"] = customer_name
-        if extracted_intel.get("inquiry_property"):
-            variable_values["inquiryProperty"] = extracted_intel["inquiry_property"]
-        if extracted_intel.get("inquiry_purpose"):
-            variable_values["inquiryPurpose"] = extracted_intel["inquiry_purpose"]
-        if extracted_intel.get("region"):
-            variable_values["customerRegion"] = extracted_intel["region"]
         
+        # Only add valid (non-null, non-empty, non-"N/A") values
+        if _is_valid_value(customer_name):
+            variable_values["customerName"] = customer_name
+        
+        inquiry_property = extracted_intel.get("inquiry_property")
+        if _is_valid_value(inquiry_property):
+            variable_values["inquiryProperty"] = inquiry_property
+        
+        inquiry_purpose = extracted_intel.get("inquiry_purpose")
+        if _is_valid_value(inquiry_purpose):
+            variable_values["inquiryPurpose"] = inquiry_purpose
+        
+        customer_region = extracted_intel.get("region")
+        if _is_valid_value(customer_region):
+            variable_values["customerRegion"] = customer_region
+        
+        # Only add assistantOverrides if we have at least one valid variable
         if variable_values:
             payload["assistantOverrides"] = {
                 "variableValues": variable_values
             }
             print(f"📤 Added structured variables via assistantOverrides: {list(variable_values.keys())}")
+        else:
+            print(f"⚠️  No valid variables to add (all values were null/empty/N/A)")
     
     # Merge additional metadata (keep for backward compatibility)
+    # Filter out null/N/A/empty values from metadata to avoid confusing Vapi
     if metadata:
         payload["metadata"].update(metadata)
-        # Filter out null values from metadata to avoid confusing Vapi
-        payload["metadata"] = {k: v for k, v in payload["metadata"].items() if v is not None}
-        print(f"📤 Merged additional metadata (filtered nulls): {list(payload['metadata'].keys())}")
+        # Filter out null, "N/A", empty strings, etc.
+        payload["metadata"] = {
+            k: v for k, v in payload["metadata"].items() 
+            if _is_valid_value(v)
+        }
+        print(f"📤 Merged additional metadata (filtered nulls/N/A/empty): {list(payload['metadata'].keys())}")
     
     # Make API call to Vapi
     try:
