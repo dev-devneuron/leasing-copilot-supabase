@@ -7468,6 +7468,54 @@ def _import_call_from_vapi_data(call_data: dict, session: Session) -> Optional[C
     return call_record
 
 
+@app.post("/admin/cleanup-short-calls")
+def cleanup_short_calls(
+    dry_run: bool = True,
+    min_duration_seconds: int = 80,
+    current_user: Dict[str, Any] = Depends(get_current_user_data)
+):
+    """
+    Admin endpoint to clean up existing call records that are too short.
+    
+    Args:
+        dry_run: If True, only count records without deleting (default: True for safety)
+        min_duration_seconds: Minimum duration to keep (default: 80 = 1 minute 20 seconds)
+    
+    Returns:
+        Statistics about cleanup operation
+    """
+    # Validate user type (admin/PM only)
+    user_type = current_user.get("user_type")
+    if user_type not in ["property_manager"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only property managers can run cleanup operations"
+        )
+    
+    try:
+        from DB.outbound_calling import cleanup_short_call_records
+        
+        with Session(engine) as session:
+            result = cleanup_short_call_records(
+                session=session,
+                min_duration_seconds=min_duration_seconds,
+                dry_run=dry_run
+            )
+            
+            return JSONResponse(content={
+                "message": "Cleanup completed" if not dry_run else "Dry run completed",
+                "result": result
+            })
+    except Exception as e:
+        print(f"❌ Error during cleanup: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cleanup failed: {str(e)}"
+        )
+
+
 @app.post("/admin/import-vapi-calls")
 def import_vapi_calls(
     limit: Optional[int] = 100,
@@ -7908,6 +7956,24 @@ async def vapi_webhook_hyphen(request: Request):
                     call_record.call_metadata = {}
                 call_record.call_metadata["duration_source"] = "webhook_payload"
             
+            # CLEANUP: Discard short calls (< 1 minute) - don't store transcript or extract intel
+            if call_record.call_duration is not None and call_record.call_duration <= 60:
+                print(f"   ⏭️  Discarding short call {call_id} (duration: {call_record.call_duration}s <= 60s)")
+                # Clear transcript and extracted intel if already set
+                if call_record.transcript:
+                    call_record.transcript = None
+                if call_record.extracted_intel:
+                    call_record.extracted_intel = None
+                call_record.extraction_status = "skipped"
+                call_record.call_metadata = call_record.call_metadata or {}
+                call_record.call_metadata["discarded_reason"] = "call_too_short"
+                updated = True
+                # Still commit the record (for tracking) but mark it as discarded
+                if updated:
+                    session.commit()
+                    session.refresh(call_record)
+                return {"status": "ok", "call_id": call_id, "message": "Call discarded (too short)"}
+            
             # Extract duration from message timestamp if available
             timestamp = message.get("timestamp")
             if timestamp:
@@ -8240,6 +8306,19 @@ async def vapi_webhook(request: Request):
                     call_record.caller_number = _normalize_bot_number(caller_number_raw)
                 call_record.updated_at = now
                 updated = True
+                
+                # CLEANUP: Discard short calls (< 1 minute) - clear transcript and extracted intel
+                if call_record.call_duration is not None and call_record.call_duration <= 60:
+                    print(f"   ⏭️  Discarding short call {call_id} (duration: {call_record.call_duration}s <= 60s)")
+                    if call_record.transcript:
+                        call_record.transcript = None
+                    if call_record.extracted_intel:
+                        call_record.extracted_intel = None
+                    call_record.extraction_status = "skipped"
+                    if call_record.call_metadata is None:
+                        call_record.call_metadata = {}
+                    call_record.call_metadata["discarded_reason"] = "call_too_short"
+                    updated = True
                 
                 # Update Contact.last_call_outcome for outbound calls
                 if call_record.call_direction == "outbound" and call_record.contact_id:

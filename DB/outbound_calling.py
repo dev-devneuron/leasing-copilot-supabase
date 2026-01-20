@@ -542,6 +542,100 @@ def _infer_name_from_email(email: str) -> Optional[str]:
     return first[:1].upper() + first[1:].lower()
 
 
+# ============================================================================
+# CALL RECORD CLEANUP: Filter short calls
+# ============================================================================
+
+def should_keep_call_record(call_record: CallRecord, min_duration_seconds: int = 60) -> bool:
+    """
+    Determine if a call record should be kept based on duration.
+    
+    Args:
+        call_record: CallRecord to check
+        min_duration_seconds: Minimum duration in seconds (default: 60 = 1 minute)
+    
+    Returns:
+        True if call should be kept, False if it should be discarded
+    """
+    if not call_record.call_duration:
+        # If duration is not set yet, we can't determine - keep it for now
+        # Duration will be set later in webhook processing
+        return True
+    
+    return call_record.call_duration > min_duration_seconds
+
+
+def cleanup_short_call_records(
+    session: Session,
+    min_duration_seconds: int = 80,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """
+    Clean up existing call records that are too short.
+    
+    Args:
+        session: Database session
+        min_duration_seconds: Minimum duration to keep (default: 80 = 1 minute 20 seconds)
+        dry_run: If True, only count records without deleting
+    
+    Returns:
+        Statistics about cleanup operation
+    """
+    print(f"\n{'='*80}")
+    print(f"🧹 CLEANUP: Removing call records with duration <= {min_duration_seconds} seconds")
+    print(f"{'='*80}")
+    
+    # Find all call records with duration <= threshold
+    short_calls = session.exec(
+        select(CallRecord)
+        .where(CallRecord.call_duration.isnot(None))
+        .where(CallRecord.call_duration <= min_duration_seconds)
+    ).all()
+    
+    count = len(short_calls)
+    print(f"   Found {count} call records to delete (duration <= {min_duration_seconds}s)")
+    
+    if count == 0:
+        print(f"   ✅ No short call records to clean up")
+        return {
+            "deleted": 0,
+            "dry_run": dry_run
+        }
+    
+    if dry_run:
+        print(f"   🔍 DRY RUN: Would delete {count} call records")
+        for call in short_calls[:10]:  # Show first 10 as examples
+            print(f"      - Call {call.call_id[:8]}... | Duration: {call.call_duration}s | Created: {call.created_at}")
+        return {
+            "would_delete": count,
+            "dry_run": True
+        }
+    
+    # Delete short call records
+    deleted_count = 0
+    for call in short_calls:
+        try:
+            session.delete(call)
+            deleted_count += 1
+            if deleted_count % 100 == 0:
+                print(f"   📊 Progress: Deleted {deleted_count}/{count} call records...")
+        except Exception as e:
+            print(f"   ⚠️  Error deleting call {call.call_id}: {e}")
+    
+    try:
+        session.commit()
+        print(f"   ✅ Successfully deleted {deleted_count} short call records")
+    except Exception as e:
+        session.rollback()
+        print(f"   ❌ Error committing deletions: {e}")
+        raise
+    
+    return {
+        "deleted": deleted_count,
+        "dry_run": False
+    }
+
+
 def _is_bad_person_name(name: Optional[str]) -> bool:
     """
     Centralized "bad name" detection.
@@ -599,10 +693,17 @@ def get_best_recent_intel_for_phone(
         "call_summary": None,
     }
 
+    # Get recent calls, excluding short calls (< 1 minute) and those without transcripts
     recent_calls = session.exec(
         select(CallRecord)
         .where(CallRecord.caller_number == phone)
         .where(CallRecord.transcript.isnot(None))
+        .where(
+            or_(
+                CallRecord.call_duration.is_(None),  # Duration not set yet (keep for now)
+                CallRecord.call_duration > 60  # Only calls longer than 1 minute
+            )
+        )
         .order_by(CallRecord.created_at.desc())
         .limit(max_calls)
     ).all()
@@ -619,8 +720,14 @@ def get_best_recent_intel_for_phone(
             continue
 
         for k in ["email", "inferred_name", "region", "inquiry_property", "inquiry_purpose", "inquiry_summary", "call_summary"]:
-            if merged.get(k) is None and intel.get(k):
-                merged[k] = intel.get(k)
+            v = intel.get(k)
+            if v is None:
+                continue
+            # Never propagate obviously bad names like 'Looking', 'Following', 'Providing'
+            if k == "inferred_name" and _is_bad_person_name(v):
+                continue
+            if merged.get(k) is None:
+                merged[k] = v
 
         # Early exit if we have everything we care about
         if all(merged.get(k) is not None for k in ["inferred_name", "region", "inquiry_property", "inquiry_purpose"]):
@@ -656,6 +763,53 @@ def extract_and_store_intel_for_call_record(
     if call_record.transcript:
         print(f"   Transcript length: {len(call_record.transcript)} chars")
     print(f"{'='*80}")
+    
+    # Optionally limit number of extraction attempts per transcript
+    # so we don't hammer Gemini forever on a bad/empty call.
+    if call_record.call_metadata is None:
+        call_record.call_metadata = {}
+    attempts = int(call_record.call_metadata.get("extraction_attempts", 0) or 0)
+    if not force_re_extract and call_record.extraction_status in ("failed", "skipped") and attempts >= 3:
+        print(f"   ⏭️  Max extraction attempts reached ({attempts}) for call {call_record.call_id} - not retrying")
+        return {
+            "email": None,
+            "inferred_name": None,
+            "region": None,
+            "inquiry_property": None,
+            "inquiry_purpose": None,
+            "inquiry_summary": None,
+            "call_summary": None,
+        }
+    # Increment attempts before we try
+    call_record.call_metadata["extraction_attempts"] = attempts + 1
+    session.add(call_record)
+    try:
+        session.commit()
+    except:
+        session.rollback()
+
+    # Skip if call is too short (< 1 minute) - don't extract from short calls
+    if call_record.call_duration is not None and call_record.call_duration <= 60:
+        print(f"   ⏭️  Skipping - call too short ({call_record.call_duration}s <= 60s)")
+        if call_record.extraction_status != "skipped":
+            call_record.extraction_status = "skipped"
+            call_record.extracted_intel = None
+            if call_record.transcript:
+                call_record.transcript = None  # Clear transcript for short calls
+            session.add(call_record)
+            try:
+                session.commit()
+            except:
+                session.rollback()
+        return {
+            "email": None,
+            "inferred_name": None,
+            "region": None,
+            "inquiry_property": None,
+            "inquiry_purpose": None,
+            "inquiry_summary": None,
+            "call_summary": None,
+        }
     
     # Skip if no transcript
     if not call_record.transcript or len(call_record.transcript.strip()) < 50:
@@ -1365,6 +1519,11 @@ Return ONLY valid JSON, no markdown, no code blocks, no explanations:"""
                             print(f"   ✅ Extracted region from property address: {region}")
                             break
                 
+                # Final sanity check on inferred_name before we mark success
+                if _is_bad_person_name(inferred_name):
+                    print(f"   ❌ Rejecting bad inferred_name at finalization: {inferred_name}")
+                    inferred_name = None
+
                 ai_success = True
                 print(f"\n✅ GEMINI AI EXTRACTION COMPLETE:")
                 print(f"   - Email: {email or 'None'}")
