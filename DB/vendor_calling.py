@@ -62,10 +62,52 @@ def create_vendor_call_queue(
         return existing_queue
     
     # Match vendors to request (automatically excludes opted-out vendors)
+    print(f"🔍 [VENDOR CALLING] Matching vendors for maintenance request {maintenance_request.maintenance_request_id}")
+    print(f"   Property ID: {maintenance_request.property_id}")
+    print(f"   Category: {maintenance_request.category}")
+    print(f"   Priority: {maintenance_request.priority}")
+    
     matched_vendors = match_vendors_to_maintenance_request(maintenance_request, session)
     
     if not matched_vendors:
-        raise ValueError("No vendors found for this maintenance request")
+        # More lenient fallback: try to find ANY vendor for this property
+        print(f"⚠️  [VENDOR CALLING] No vendors matched, trying fallback: ANY vendor for property {maintenance_request.property_id}")
+        from .db import PropertyVendor, Vendor
+        fallback_query = (
+            select(PropertyVendor, Vendor)
+            .join(Vendor, PropertyVendor.vendor_id == Vendor.vendor_id)
+            .where(PropertyVendor.property_id == maintenance_request.property_id)
+            .where(PropertyVendor.is_active == True)
+            .where(Vendor.is_active == True)
+            .where(Vendor.opted_out == False)
+            .order_by(PropertyVendor.priority.asc())
+        )
+        fallback_results = session.exec(fallback_query).all()
+        
+        print(f"   Fallback query found {len(fallback_results)} vendor(s)")
+        
+        if fallback_results:
+            matched_vendors = []
+            for property_vendor, vendor in fallback_results:
+                matched_vendors.append({
+                    "vendor_id": vendor.vendor_id,
+                    "vendor": vendor,
+                    "property_vendor": property_vendor,
+                    "priority": property_vendor.priority,
+                    "name": vendor.name,
+                    "phone_number": vendor.phone_number,
+                    "backup_phone": vendor.backup_phone,
+                    "email": vendor.email,
+                    "emergency_available": vendor.emergency_available,
+                    "operating_hours_start": vendor.operating_hours_start,
+                    "operating_hours_end": vendor.operating_hours_end,
+                    "timezone": vendor.timezone,
+                    "notes": vendor.notes,
+                })
+            print(f"✅ [VENDOR CALLING] Using {len(matched_vendors)} vendor(s) from fallback query")
+        else:
+            print(f"❌ [VENDOR CALLING] No vendors found even with fallback query")
+            raise ValueError(f"No vendors found for maintenance request {maintenance_request.maintenance_request_id} (property_id: {maintenance_request.property_id})")
     
     # Double-check: Filter out any opted-out vendors (safety check)
     matched_vendors = [v for v in matched_vendors if not v["vendor"].opted_out]

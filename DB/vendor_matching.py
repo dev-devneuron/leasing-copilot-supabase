@@ -137,6 +137,8 @@ def get_vendors_for_property(
     Returns:
         List of vendor dictionaries with priority, sorted by priority (ascending)
     """
+    print(f"🔍 [VENDOR MATCHING] get_vendors_for_property: property_id={property_id}, service_type={service_type}, emergency_only={emergency_only}, include_inactive={include_inactive}")
+    
     # Build query
     query = (
         select(PropertyVendor, Vendor)
@@ -159,6 +161,19 @@ def get_vendors_for_property(
     query = query.order_by(PropertyVendor.priority.asc())
     
     results = session.exec(query).all()
+    
+    print(f"   Query returned {len(results)} result(s)")
+    
+    # Debug: Check what vendors exist for this property (any service type)
+    debug_query = (
+        select(PropertyVendor, Vendor)
+        .join(Vendor, PropertyVendor.vendor_id == Vendor.vendor_id)
+        .where(PropertyVendor.property_id == property_id)
+    )
+    all_property_vendors = session.exec(debug_query).all()
+    print(f"   DEBUG: Total vendors linked to property {property_id}: {len(all_property_vendors)}")
+    for pv, v in all_property_vendors:
+        print(f"      - Vendor {v.vendor_id} ({v.name}): service_type={pv.service_type}, is_active={pv.is_active}, vendor.is_active={v.is_active}, opted_out={v.opted_out}, emergency_available={v.emergency_available}")
     
     vendors = []
     for property_vendor, vendor in results:
@@ -209,6 +224,10 @@ def match_vendors_to_maintenance_request(
     print(f"   Category: {maintenance_request.category}")
     print(f"   Priority: {maintenance_request.priority}")
     
+    # Check if emergency
+    is_emergency = maintenance_request.priority.lower() == "urgent"
+    print(f"   Emergency: {is_emergency}")
+    
     # Map category to service type
     service_type = map_category_to_service_type(
         maintenance_request.category,
@@ -216,19 +235,49 @@ def match_vendors_to_maintenance_request(
     )
     print(f"   Mapped service type: {service_type}")
     
-    # Check if emergency
-    is_emergency = maintenance_request.priority.lower() == "urgent"
-    print(f"   Emergency: {is_emergency}")
+    # If urgent mapped to "emergency" but no vendors found, try mapping without priority
+    original_service_type = service_type
+    if is_emergency and service_type == "emergency":
+        # Try the actual category first
+        category_service_type = map_category_to_service_type(
+            maintenance_request.category,
+            "normal"  # Don't use urgent priority for mapping
+        )
+        if category_service_type != "emergency":
+            print(f"   Also trying category-based service type: {category_service_type}")
+            vendors = get_vendors_for_property(
+                property_id=maintenance_request.property_id,
+                service_type=category_service_type,
+                session=session,
+                emergency_only=False,  # More lenient
+                include_inactive=False
+            )
+            if vendors:
+                print(f"   Found {len(vendors)} vendor(s) for category-based service type '{category_service_type}'")
+                service_type = category_service_type  # Use this instead
     
-    # Get vendors for property
-    vendors = get_vendors_for_property(
-        property_id=maintenance_request.property_id,
-        service_type=service_type,
-        session=session,
-        emergency_only=is_emergency,
-        include_inactive=False
-    )
-    print(f"   Found {len(vendors)} vendor(s) for service type '{service_type}'")
+    # If still no vendors, try the original service type
+    if not vendors:
+        vendors = get_vendors_for_property(
+            property_id=maintenance_request.property_id,
+            service_type=original_service_type,
+            session=session,
+            emergency_only=is_emergency,
+            include_inactive=False
+        )
+        print(f"   Found {len(vendors)} vendor(s) for service type '{original_service_type}' (emergency_only={is_emergency})")
+        
+        # If emergency request but no emergency vendors found, try without emergency filter
+        if is_emergency and not vendors:
+            print(f"⚠️  [VENDOR MATCHING] No emergency vendors found, trying without emergency filter")
+            vendors = get_vendors_for_property(
+                property_id=maintenance_request.property_id,
+                service_type=original_service_type,
+                session=session,
+                emergency_only=False,  # More lenient: allow non-emergency vendors
+                include_inactive=False
+            )
+            print(f"   Found {len(vendors)} vendor(s) without emergency filter")
     
     # If no vendors found for specific service type, try "general"
     if not vendors and service_type != "general":
@@ -237,10 +286,50 @@ def match_vendors_to_maintenance_request(
             property_id=maintenance_request.property_id,
             service_type="general",
             session=session,
-            emergency_only=is_emergency,
+            emergency_only=False,  # More lenient: don't require emergency for general
             include_inactive=False
         )
         print(f"   Found {len(vendors)} 'general' vendor(s)")
+    
+    # If still no vendors, try more lenient matching (any service type for this property)
+    if not vendors:
+        print(f"⚠️  [VENDOR MATCHING] No vendors found for '{service_type}' or 'general', trying ANY service type for property")
+        # Try without service type filter
+        from .db import PropertyVendor, Vendor
+        query = (
+            select(PropertyVendor, Vendor)
+            .join(Vendor, PropertyVendor.vendor_id == Vendor.vendor_id)
+            .where(PropertyVendor.property_id == maintenance_request.property_id)
+            .where(PropertyVendor.is_active == True)
+            .where(Vendor.is_active == True)
+            .where(Vendor.opted_out == False)
+        )
+        
+        # Don't filter by emergency_available in fallback - be more lenient
+        # if is_emergency:
+        #     query = query.where(Vendor.emergency_available == True)
+        
+        query = query.order_by(PropertyVendor.priority.asc())
+        results = session.exec(query).all()
+        
+        print(f"   Found {len(results)} vendor(s) for property (any service type)")
+        
+        for property_vendor, vendor in results:
+            vendors.append({
+                "vendor_id": vendor.vendor_id,
+                "vendor": vendor,
+                "property_vendor": property_vendor,
+                "priority": property_vendor.priority,
+                "name": vendor.name,
+                "phone_number": vendor.phone_number,
+                "backup_phone": vendor.backup_phone,
+                "email": vendor.email,
+                "emergency_available": vendor.emergency_available,
+                "operating_hours_start": vendor.operating_hours_start,
+                "operating_hours_end": vendor.operating_hours_end,
+                "timezone": vendor.timezone,
+                "notes": vendor.notes,
+            })
     
     # Filter by operating hours if requested
     if respect_operating_hours:
