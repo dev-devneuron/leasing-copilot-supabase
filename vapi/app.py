@@ -4228,21 +4228,31 @@ async def start_vendor_calls(
             detail="Only Property Managers can start vendor calls"
         )
     
-    with Session(engine) as session:
-        maintenance_request = session.get(MaintenanceRequest, request_id)
-        if not maintenance_request:
-            raise HTTPException(status_code=404, detail="Maintenance request not found")
-        
-        if maintenance_request.property_manager_id != user_id:
-            raise HTTPException(status_code=403, detail="Not authorized to manage this request")
-        
-        # Start calling
-        result = start_vendor_calling(request_id, session)
-        
-        if not result.get("success"):
-            raise HTTPException(status_code=400, detail=result.get("error", "Failed to start vendor calls"))
-        
-        return JSONResponse(content=result)
+    try:
+        with Session(engine) as session:
+            maintenance_request = session.get(MaintenanceRequest, request_id)
+            if not maintenance_request:
+                raise HTTPException(status_code=404, detail="Maintenance request not found")
+            
+            if maintenance_request.property_manager_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to manage this request")
+            
+            # Start calling
+            result = start_vendor_calling(request_id, session)
+            
+            if not result.get("success"):
+                error_msg = result.get("error", "Failed to start vendor calls")
+                print(f"❌ [VENDOR CALLING] Failed to start vendor calls for request {request_id}: {error_msg}")
+                raise HTTPException(status_code=400, detail=error_msg)
+            
+            return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [VENDOR CALLING] Error in start_vendor_calls endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.get("/maintenance-requests/{request_id}/vendor-call-status")
@@ -4264,71 +4274,92 @@ async def get_vendor_call_status(
             detail="Only Property Managers can view vendor call status"
         )
     
-    with Session(engine) as session:
-        maintenance_request = session.get(MaintenanceRequest, request_id)
-        if not maintenance_request:
-            raise HTTPException(status_code=404, detail="Maintenance request not found")
-        
-        if maintenance_request.property_manager_id != user_id:
-            raise HTTPException(status_code=403, detail="Not authorized to view this request")
-        
-        # Get queue
-        queue = session.exec(
-            select(VendorCallQueue).where(
-                VendorCallQueue.maintenance_request_id == request_id
-            )
-        ).first()
-        
-        # Get call attempts
-        attempts = session.exec(
-            select(VendorCallAttempt, Vendor)
-            .join(Vendor, VendorCallAttempt.vendor_id == Vendor.vendor_id)
-            .where(VendorCallAttempt.maintenance_request_id == request_id)
-            .order_by(VendorCallAttempt.initiated_at.desc())
-        ).all()
-        
-        attempt_list = []
-        for attempt, vendor in attempts:
-            attempt_list.append({
-                "attempt_id": attempt.attempt_id,
-                "vendor_id": vendor.vendor_id,
-                "vendor_name": vendor.name,
-                "call_status": attempt.call_status,
-                "outcome": attempt.outcome,
-                "is_available": attempt.is_available,
-                "earliest_available_time": attempt.earliest_available_time,
-                "estimated_cost_range": attempt.estimated_cost_range,
-                "vendor_notes": attempt.vendor_notes,
-                "vapi_call_id": attempt.vapi_call_id,
-                "call_transcript": attempt.call_transcript,
-                "call_recording_url": attempt.call_recording_url,
-                "call_duration_seconds": attempt.call_duration_seconds,
-                "attempt_number": attempt.attempt_number,
-                "initiated_at": attempt.initiated_at.isoformat() if attempt.initiated_at else None,
-                "answered_at": attempt.answered_at.isoformat() if attempt.answered_at else None,
-                "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+    try:
+        with Session(engine) as session:
+            maintenance_request = session.get(MaintenanceRequest, request_id)
+            if not maintenance_request:
+                raise HTTPException(status_code=404, detail="Maintenance request not found")
+            
+            if maintenance_request.property_manager_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to view this request")
+            
+            # Get queue
+            queue = session.exec(
+                select(VendorCallQueue).where(
+                    VendorCallQueue.maintenance_request_id == request_id
+                )
+            ).first()
+            
+            # Get call attempts
+            attempts = session.exec(
+                select(VendorCallAttempt)
+                .where(VendorCallAttempt.maintenance_request_id == request_id)
+                .order_by(VendorCallAttempt.initiated_at.desc())
+            ).all()
+            
+            # Get vendors separately to handle missing vendors gracefully
+            vendor_ids = [attempt.vendor_id for attempt in attempts]
+            vendors_map = {}
+            if vendor_ids:
+                vendors = session.exec(
+                    select(Vendor).where(Vendor.vendor_id.in_(vendor_ids))
+                ).all()
+                vendors_map = {v.vendor_id: v for v in vendors}
+            
+            attempt_list = []
+            for attempt in attempts:
+                vendor = vendors_map.get(attempt.vendor_id)
+                # Handle case where vendor might be None (deleted vendor)
+                vendor_id = vendor.vendor_id if vendor else attempt.vendor_id
+                vendor_name = vendor.name if vendor else f"Vendor {attempt.vendor_id} (deleted)"
+                
+                attempt_list.append({
+                    "attempt_id": attempt.attempt_id,
+                    "vendor_id": vendor_id,
+                    "vendor_name": vendor_name,
+                    "call_status": attempt.call_status,
+                    "outcome": attempt.outcome,
+                    "is_available": attempt.is_available,
+                    "earliest_available_time": attempt.earliest_available_time,
+                    "estimated_cost_range": attempt.estimated_cost_range,
+                    "vendor_notes": attempt.vendor_notes,
+                    "vapi_call_id": attempt.vapi_call_id,
+                    "call_transcript": attempt.call_transcript,
+                    "call_recording_url": attempt.call_recording_url,
+                    "call_duration_seconds": attempt.call_duration_seconds,
+                    "attempt_number": attempt.attempt_number,
+                    "initiated_at": attempt.initiated_at.isoformat() if attempt.initiated_at else None,
+                    "answered_at": attempt.answered_at.isoformat() if attempt.answered_at else None,
+                    "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+                })
+            
+            queue_info = None
+            if queue:
+                queue_info = {
+                    "queue_id": queue.queue_id,
+                    "status": queue.status,
+                    "current_vendor_index": queue.current_vendor_index,
+                    "vendor_queue": queue.vendor_queue,
+                    "max_retries_per_vendor": queue.max_retries_per_vendor,
+                    "retry_delay_minutes": queue.retry_delay_minutes,
+                    "started_at": queue.started_at.isoformat() if queue.started_at else None,
+                    "completed_at": queue.completed_at.isoformat() if queue.completed_at else None,
+                }
+            
+            return JSONResponse(content={
+                "maintenance_request_id": request_id,
+                "vendor_call_status": maintenance_request.vendor_call_status,
+                "assigned_vendor_id": maintenance_request.assigned_vendor_id,
+                "queue": queue_info,
+                "call_attempts": attempt_list,
             })
-        
-        queue_info = None
-        if queue:
-            queue_info = {
-                "queue_id": queue.queue_id,
-                "status": queue.status,
-                "current_vendor_index": queue.current_vendor_index,
-                "vendor_queue": queue.vendor_queue,
-                "max_retries_per_vendor": queue.max_retries_per_vendor,
-                "retry_delay_minutes": queue.retry_delay_minutes,
-                "started_at": queue.started_at.isoformat() if queue.started_at else None,
-                "completed_at": queue.completed_at.isoformat() if queue.completed_at else None,
-            }
-        
-        return JSONResponse(content={
-            "maintenance_request_id": request_id,
-            "vendor_call_status": maintenance_request.vendor_call_status,
-            "assigned_vendor_id": maintenance_request.assigned_vendor_id,
-            "queue": queue_info,
-            "call_attempts": attempt_list,
-        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [VENDOR CALLING] Error in get_vendor_call_status endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.post("/maintenance-requests/{request_id}/pause-vendor-calls")
