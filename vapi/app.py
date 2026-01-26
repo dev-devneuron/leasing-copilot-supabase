@@ -1888,6 +1888,27 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
                     print(f"   Priority: {priority} (auto-detected: {priority not in args.get('priority', '')})")
                     print(f"   Category: {category} (auto-detected: {category not in args.get('category', '')})")
                     
+                    # Trigger vendor calling if enabled
+                    try:
+                        from DB.vendor_matching import should_auto_call_vendors
+                        from DB.vendor_calling import create_vendor_call_queue
+                        
+                        if should_auto_call_vendors(maintenance_request, session):
+                            print(f"📞 Auto-calling vendors for maintenance request {maintenance_request.maintenance_request_id}")
+                            try:
+                                queue = create_vendor_call_queue(maintenance_request, session, auto_start=True)
+                                print(f"✅ Started vendor calling queue (ID: {queue.queue_id})")
+                            except Exception as e:
+                                print(f"⚠️  Failed to start vendor calling: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                # Don't fail the request creation if vendor calling fails
+                        else:
+                            print(f"⏸️  Vendor auto-calling disabled for this request")
+                    except Exception as e:
+                        print(f"⚠️  Error checking vendor calling settings: {e}")
+                        # Don't fail the request creation if vendor calling check fails
+                    
                     # Return success message (user-friendly)
                     property_address = tenant_info.get('property_address') or "your property"
                     success_msg = (
@@ -3475,6 +3496,2069 @@ async def update_maintenance_request(
             "maintenance_request_id": request.maintenance_request_id,
             "status": request.status
         })
+
+
+# ============================================================================
+# VENDOR MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.post("/vendors")
+async def create_vendor(
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Create a new vendor.
+    
+    Only Property Managers can create vendors.
+    """
+    from DB.db import Vendor
+    from datetime import time as time_obj
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can create vendors"
+        )
+    
+    # Extract required fields
+    name = payload.get("name")
+    service_type = payload.get("service_type")
+    phone_number = payload.get("phone_number")
+    
+    if not name or not service_type or not phone_number:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required fields: name, service_type, phone_number"
+        )
+    
+    # Validate service type
+    valid_service_types = ["electrician", "plumber", "carpenter", "hvac", "general", "emergency"]
+    if service_type not in valid_service_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid service_type. Must be one of: {', '.join(valid_service_types)}"
+        )
+    
+    # Normalize phone number
+    from DB.user_lookup import normalize_phone_number
+    try:
+        phone_number = normalize_phone_number(phone_number)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid phone number format: {str(e)}")
+    
+    # Extract optional fields
+    backup_phone = payload.get("backup_phone")
+    if backup_phone:
+        try:
+            backup_phone = normalize_phone_number(backup_phone)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid backup_phone format: {str(e)}")
+    
+    email = payload.get("email")
+    operating_hours_start_str = payload.get("operating_hours_start")  # "09:00" or "09:00:00"
+    operating_hours_end_str = payload.get("operating_hours_end")
+    emergency_available = payload.get("emergency_available", False)
+    timezone = payload.get("timezone", "America/New_York")
+    notes = payload.get("notes")
+    
+    # Parse operating hours
+    operating_hours_start = None
+    operating_hours_end = None
+    if operating_hours_start_str:
+        try:
+            parts = operating_hours_start_str.split(":")
+            operating_hours_start = time_obj(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid operating_hours_start format (use HH:MM or HH:MM:SS)")
+    
+    if operating_hours_end_str:
+        try:
+            parts = operating_hours_end_str.split(":")
+            operating_hours_end = time_obj(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid operating_hours_end format (use HH:MM or HH:MM:SS)")
+    
+    with Session(engine) as session:
+        vendor = Vendor(
+            property_manager_id=property_manager_id,
+            name=name,
+            service_type=service_type,
+            phone_number=phone_number,
+            backup_phone=backup_phone,
+            email=email,
+            operating_hours_start=operating_hours_start,
+            operating_hours_end=operating_hours_end,
+            emergency_available=emergency_available,
+            timezone=timezone,
+            notes=notes,
+            is_active=True
+        )
+        
+        session.add(vendor)
+        session.commit()
+        session.refresh(vendor)
+        
+        return JSONResponse(content={
+            "vendor_id": vendor.vendor_id,
+            "name": vendor.name,
+            "service_type": vendor.service_type,
+            "phone_number": vendor.phone_number,
+            "backup_phone": vendor.backup_phone,
+            "email": vendor.email,
+            "operating_hours_start": vendor.operating_hours_start.isoformat() if vendor.operating_hours_start else None,
+            "operating_hours_end": vendor.operating_hours_end.isoformat() if vendor.operating_hours_end else None,
+            "emergency_available": vendor.emergency_available,
+            "timezone": vendor.timezone,
+            "notes": vendor.notes,
+            "is_active": vendor.is_active,
+            "opted_out": vendor.opted_out,
+            "opt_out_timestamp": vendor.opt_out_timestamp.isoformat() if vendor.opt_out_timestamp else None,
+            "opt_out_method": vendor.opt_out_method,
+            "created_at": vendor.created_at.isoformat() if vendor.created_at else None,
+        })
+
+
+@app.get("/vendors")
+async def get_vendors(
+    user_data: dict = Depends(get_current_user_data),
+    service_type: Optional[str] = None,
+    is_active: Optional[bool] = None
+):
+    """
+    Get all vendors for the authenticated Property Manager.
+    
+    Query Parameters:
+    - service_type: Filter by service type (electrician, plumber, etc.)
+    - is_active: Filter by active status (true/false)
+    """
+    from DB.db import Vendor
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can view vendors"
+        )
+    
+    with Session(engine) as session:
+        query = select(Vendor).where(Vendor.property_manager_id == property_manager_id)
+        
+        if service_type:
+            query = query.where(Vendor.service_type == service_type)
+        
+        if is_active is not None:
+            query = query.where(Vendor.is_active == is_active)
+        
+        vendors = session.exec(query.order_by(Vendor.name.asc())).all()
+        
+        result = []
+        for vendor in vendors:
+            result.append({
+                "vendor_id": vendor.vendor_id,
+                "name": vendor.name,
+                "service_type": vendor.service_type,
+                "phone_number": vendor.phone_number,
+                "backup_phone": vendor.backup_phone,
+                "email": vendor.email,
+                "operating_hours_start": vendor.operating_hours_start.isoformat() if vendor.operating_hours_start else None,
+                "operating_hours_end": vendor.operating_hours_end.isoformat() if vendor.operating_hours_end else None,
+                "emergency_available": vendor.emergency_available,
+                "timezone": vendor.timezone,
+                "notes": vendor.notes,
+                "is_active": vendor.is_active,
+                "opted_out": vendor.opted_out,
+                "opt_out_timestamp": vendor.opt_out_timestamp.isoformat() if vendor.opt_out_timestamp else None,
+                "opt_out_method": vendor.opt_out_method,
+                "created_at": vendor.created_at.isoformat() if vendor.created_at else None,
+                "updated_at": vendor.updated_at.isoformat() if vendor.updated_at else None,
+            })
+        
+        return JSONResponse(content={"vendors": result})
+
+
+@app.get("/vendors/{vendor_id}")
+async def get_vendor(
+    vendor_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Get a specific vendor by ID.
+    """
+    from DB.db import Vendor
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can view vendors"
+        )
+    
+    with Session(engine) as session:
+        vendor = session.get(Vendor, vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        if vendor.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this vendor")
+        
+        return JSONResponse(content={
+            "vendor_id": vendor.vendor_id,
+            "name": vendor.name,
+            "service_type": vendor.service_type,
+            "phone_number": vendor.phone_number,
+            "backup_phone": vendor.backup_phone,
+            "email": vendor.email,
+            "operating_hours_start": vendor.operating_hours_start.isoformat() if vendor.operating_hours_start else None,
+            "operating_hours_end": vendor.operating_hours_end.isoformat() if vendor.operating_hours_end else None,
+            "emergency_available": vendor.emergency_available,
+            "timezone": vendor.timezone,
+            "notes": vendor.notes,
+            "is_active": vendor.is_active,
+            "opted_out": vendor.opted_out,
+            "opt_out_timestamp": vendor.opt_out_timestamp.isoformat() if vendor.opt_out_timestamp else None,
+            "opt_out_method": vendor.opt_out_method,
+            "created_at": vendor.created_at.isoformat() if vendor.created_at else None,
+            "updated_at": vendor.updated_at.isoformat() if vendor.updated_at else None,
+        })
+
+
+@app.patch("/vendors/{vendor_id}")
+async def update_vendor(
+    vendor_id: int,
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Update a vendor.
+    """
+    from DB.db import Vendor
+    from datetime import time as time_obj
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can update vendors"
+        )
+    
+    with Session(engine) as session:
+        vendor = session.get(Vendor, vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        if vendor.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to update this vendor")
+        
+        # Update fields
+        if "name" in payload:
+            vendor.name = payload["name"]
+        if "service_type" in payload:
+            service_type = payload["service_type"]
+            valid_service_types = ["electrician", "plumber", "carpenter", "hvac", "general", "emergency"]
+            if service_type not in valid_service_types:
+                raise HTTPException(status_code=400, detail=f"Invalid service_type")
+            vendor.service_type = service_type
+        if "phone_number" in payload:
+            from DB.user_lookup import normalize_phone_number
+            try:
+                vendor.phone_number = normalize_phone_number(payload["phone_number"])
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid phone_number: {str(e)}")
+        if "backup_phone" in payload:
+            if payload["backup_phone"]:
+                from DB.user_lookup import normalize_phone_number
+                try:
+                    vendor.backup_phone = normalize_phone_number(payload["backup_phone"])
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid backup_phone: {str(e)}")
+            else:
+                vendor.backup_phone = None
+        if "email" in payload:
+            vendor.email = payload["email"]
+        if "operating_hours_start" in payload:
+            if payload["operating_hours_start"]:
+                try:
+                    parts = payload["operating_hours_start"].split(":")
+                    vendor.operating_hours_start = time_obj(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+                except:
+                    raise HTTPException(status_code=400, detail="Invalid operating_hours_start format")
+            else:
+                vendor.operating_hours_start = None
+        if "operating_hours_end" in payload:
+            if payload["operating_hours_end"]:
+                try:
+                    parts = payload["operating_hours_end"].split(":")
+                    vendor.operating_hours_end = time_obj(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+                except:
+                    raise HTTPException(status_code=400, detail="Invalid operating_hours_end format")
+            else:
+                vendor.operating_hours_end = None
+        if "emergency_available" in payload:
+            vendor.emergency_available = payload["emergency_available"]
+        if "timezone" in payload:
+            vendor.timezone = payload["timezone"]
+        if "notes" in payload:
+            vendor.notes = payload["notes"]
+        if "is_active" in payload:
+            vendor.is_active = payload["is_active"]
+        
+        vendor.updated_at = datetime.utcnow()
+        session.add(vendor)
+        session.commit()
+        session.refresh(vendor)
+        
+        return JSONResponse(content={
+            "vendor_id": vendor.vendor_id,
+            "name": vendor.name,
+            "service_type": vendor.service_type,
+            "phone_number": vendor.phone_number,
+            "backup_phone": vendor.backup_phone,
+            "email": vendor.email,
+            "operating_hours_start": vendor.operating_hours_start.isoformat() if vendor.operating_hours_start else None,
+            "operating_hours_end": vendor.operating_hours_end.isoformat() if vendor.operating_hours_end else None,
+            "emergency_available": vendor.emergency_available,
+            "timezone": vendor.timezone,
+            "notes": vendor.notes,
+            "is_active": vendor.is_active,
+            "opted_out": vendor.opted_out,
+            "opt_out_timestamp": vendor.opt_out_timestamp.isoformat() if vendor.opt_out_timestamp else None,
+            "opt_out_method": vendor.opt_out_method,
+            "updated_at": vendor.updated_at.isoformat() if vendor.updated_at else None,
+        })
+
+
+@app.delete("/vendors/{vendor_id}")
+async def delete_vendor(
+    vendor_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Delete a vendor (soft delete by setting is_active=False).
+    """
+    from DB.db import Vendor
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can delete vendors"
+        )
+    
+    with Session(engine) as session:
+        vendor = session.get(Vendor, vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        if vendor.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this vendor")
+        
+        # Soft delete
+        vendor.is_active = False
+        vendor.updated_at = datetime.utcnow()
+        session.add(vendor)
+        session.commit()
+        
+        return JSONResponse(content={
+            "message": "Vendor deleted successfully",
+            "vendor_id": vendor_id
+        })
+
+
+@app.post("/vendors/{vendor_id}/opt-out")
+async def opt_out_vendor(
+    vendor_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Opt-out a vendor from automated AI calls (manual opt-out by PM).
+    
+    This can also be triggered automatically when vendor says "stop calling"
+    during a call (handled by webhook).
+    """
+    from DB.db import Vendor
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can opt-out vendors"
+        )
+    
+    with Session(engine) as session:
+        vendor = session.get(Vendor, vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        if vendor.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this vendor")
+        
+        # Record opt-out
+        vendor.opted_out = True
+        vendor.opt_out_timestamp = datetime.utcnow()
+        vendor.opt_out_method = "manual"
+        vendor.updated_at = datetime.utcnow()
+        session.add(vendor)
+        session.commit()
+        
+        print(f"🚫 Vendor {vendor_id} ({vendor.name}) opted out manually by PM {property_manager_id}")
+        
+        return JSONResponse(content={
+            "message": "Vendor opted out successfully",
+            "vendor_id": vendor_id,
+            "vendor_name": vendor.name,
+            "opted_out": True,
+            "opt_out_timestamp": vendor.opt_out_timestamp.isoformat() if vendor.opt_out_timestamp else None
+        })
+
+
+@app.post("/vendors/{vendor_id}/clear-opt-out")
+async def clear_vendor_opt_out(
+    vendor_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Clear opt-out status for a vendor (for PM use).
+    Use this if opt-out was detected incorrectly or vendor wants to re-enable calls.
+    """
+    from DB.db import Vendor
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can clear vendor opt-out status"
+        )
+    
+    with Session(engine) as session:
+        vendor = session.get(Vendor, vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        if vendor.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this vendor")
+        
+        # Clear opt-out status
+        vendor.opted_out = False
+        vendor.opt_out_timestamp = None
+        vendor.opt_out_method = None
+        vendor.opt_out_call_id = None
+        vendor.updated_at = datetime.utcnow()
+        session.add(vendor)
+        session.commit()
+        
+        print(f"✅ Opt-out status cleared for vendor {vendor_id} ({vendor.name}) by PM {property_manager_id}")
+        
+        return JSONResponse(content={
+            "message": "Vendor opt-out status cleared successfully",
+            "vendor_id": vendor_id,
+            "vendor_name": vendor.name,
+            "opted_out": False
+        })
+
+
+@app.post("/properties/{property_id}/vendors")
+async def link_vendor_to_property(
+    property_id: int,
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Link a vendor to a property with priority and service type.
+    
+    This allows multiple vendors per property for the same service type
+    (e.g., 1st call plumber, 2nd call plumber, etc.).
+    """
+    from DB.db import PropertyVendor, Vendor, ApartmentListing
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can link vendors to properties"
+        )
+    
+    vendor_id = payload.get("vendor_id")
+    service_type = payload.get("service_type")
+    priority = payload.get("priority", 1)
+    notes = payload.get("notes")
+    
+    if not vendor_id or not service_type:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required fields: vendor_id, service_type"
+        )
+    
+    # Validate service type
+    valid_service_types = ["electrician", "plumber", "carpenter", "hvac", "general", "emergency"]
+    if service_type not in valid_service_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid service_type. Must be one of: {', '.join(valid_service_types)}"
+        )
+    
+    with Session(engine) as session:
+        # Verify property belongs to PM
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found")
+        
+        # Get source to check PM
+        from DB.db import Source
+        source = session.get(Source, property_listing.source_id)
+        if not source or source.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this property")
+        
+        # Verify vendor belongs to PM
+        vendor = session.get(Vendor, vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        if vendor.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to use this vendor")
+        
+        # Check if link already exists
+        existing = session.exec(
+            select(PropertyVendor).where(
+                PropertyVendor.property_id == property_id,
+                PropertyVendor.vendor_id == vendor_id,
+                PropertyVendor.service_type == service_type
+            )
+        ).first()
+        
+        if existing:
+            # Update existing link
+            existing.priority = priority
+            existing.notes = notes
+            existing.is_active = True
+            existing.updated_at = datetime.utcnow()
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            
+            return JSONResponse(content={
+                "property_vendor_id": existing.property_vendor_id,
+                "property_id": existing.property_id,
+                "vendor_id": existing.vendor_id,
+                "service_type": existing.service_type,
+                "priority": existing.priority,
+                "notes": existing.notes,
+                "is_active": existing.is_active,
+            })
+        else:
+            # Create new link
+            property_vendor = PropertyVendor(
+                property_id=property_id,
+                vendor_id=vendor_id,
+                service_type=service_type,
+                priority=priority,
+                notes=notes,
+                is_active=True
+            )
+            
+            session.add(property_vendor)
+            session.commit()
+            session.refresh(property_vendor)
+            
+            return JSONResponse(content={
+                "property_vendor_id": property_vendor.property_vendor_id,
+                "property_id": property_vendor.property_id,
+                "vendor_id": property_vendor.vendor_id,
+                "service_type": property_vendor.service_type,
+                "priority": property_vendor.priority,
+                "notes": property_vendor.notes,
+                "is_active": property_vendor.is_active,
+            })
+
+
+@app.get("/properties/{property_id}/vendors")
+async def get_property_vendors(
+    property_id: int,
+    user_data: dict = Depends(get_current_user_data),
+    service_type: Optional[str] = None
+):
+    """
+    Get all vendors linked to a property.
+    """
+    from DB.db import PropertyVendor, Vendor, ApartmentListing
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can view property vendors"
+        )
+    
+    with Session(engine) as session:
+        # Verify property belongs to PM
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found")
+        
+        # Get source to check PM
+        from DB.db import Source
+        source = session.get(Source, property_listing.source_id)
+        if not source or source.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this property")
+        
+        # Get property vendors
+        query = (
+            select(PropertyVendor, Vendor)
+            .join(Vendor, PropertyVendor.vendor_id == Vendor.vendor_id)
+            .where(PropertyVendor.property_id == property_id)
+            .where(PropertyVendor.is_active == True)
+        )
+        
+        if service_type:
+            query = query.where(PropertyVendor.service_type == service_type)
+        
+        query = query.order_by(PropertyVendor.service_type.asc(), PropertyVendor.priority.asc())
+        
+        results = session.exec(query).all()
+        
+        result = []
+        for property_vendor, vendor in results:
+            result.append({
+                "property_vendor_id": property_vendor.property_vendor_id,
+                "property_id": property_vendor.property_id,
+                "vendor_id": vendor.vendor_id,
+                "vendor_name": vendor.name,
+                "service_type": property_vendor.service_type,
+                "priority": property_vendor.priority,
+                "notes": property_vendor.notes,
+                "vendor_phone": vendor.phone_number,
+                "vendor_email": vendor.email,
+                "emergency_available": vendor.emergency_available,
+            })
+        
+        return JSONResponse(content={"property_vendors": result})
+
+
+@app.delete("/properties/{property_id}/vendors/{property_vendor_id}")
+async def unlink_vendor_from_property(
+    property_id: int,
+    property_vendor_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Unlink a vendor from a property (soft delete).
+    """
+    from DB.db import PropertyVendor, ApartmentListing
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can unlink vendors from properties"
+        )
+    
+    with Session(engine) as session:
+        # Verify property belongs to PM
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found")
+        
+        # Get source to check PM
+        from DB.db import Source
+        source = session.get(Source, property_listing.source_id)
+        if not source or source.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this property")
+        
+        # Get property vendor
+        property_vendor = session.get(PropertyVendor, property_vendor_id)
+        if not property_vendor:
+            raise HTTPException(status_code=404, detail="Property vendor link not found")
+        
+        if property_vendor.property_id != property_id:
+            raise HTTPException(status_code=400, detail="Property vendor link does not match property")
+        
+        # Soft delete
+        property_vendor.is_active = False
+        property_vendor.updated_at = datetime.utcnow()
+        session.add(property_vendor)
+        session.commit()
+        
+        return JSONResponse(content={
+            "message": "Vendor unlinked from property successfully",
+            "property_vendor_id": property_vendor_id
+        })
+
+
+# ============================================================================
+# VENDOR CALLING ENDPOINTS
+# ============================================================================
+
+@app.post("/maintenance-requests/{request_id}/start-vendor-calls")
+async def start_vendor_calls(
+    request_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Start automated vendor calling for a maintenance request.
+    
+    This will:
+    1. Match vendors to the request based on property, category, priority
+    2. Create a call queue
+    3. Start calling vendors in priority order
+    """
+    from DB.db import MaintenanceRequest
+    from DB.vendor_calling import start_vendor_calling, create_vendor_call_queue
+    from DB.vendor_matching import should_auto_call_vendors
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can start vendor calls"
+        )
+    
+    with Session(engine) as session:
+        maintenance_request = session.get(MaintenanceRequest, request_id)
+        if not maintenance_request:
+            raise HTTPException(status_code=404, detail="Maintenance request not found")
+        
+        if maintenance_request.property_manager_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this request")
+        
+        # Start calling
+        result = start_vendor_calling(request_id, session)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Failed to start vendor calls"))
+        
+        return JSONResponse(content=result)
+
+
+@app.get("/maintenance-requests/{request_id}/vendor-call-status")
+async def get_vendor_call_status(
+    request_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Get vendor call status and queue information for a maintenance request.
+    """
+    from DB.db import MaintenanceRequest, VendorCallQueue, VendorCallAttempt, Vendor
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can view vendor call status"
+        )
+    
+    with Session(engine) as session:
+        maintenance_request = session.get(MaintenanceRequest, request_id)
+        if not maintenance_request:
+            raise HTTPException(status_code=404, detail="Maintenance request not found")
+        
+        if maintenance_request.property_manager_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this request")
+        
+        # Get queue
+        queue = session.exec(
+            select(VendorCallQueue).where(
+                VendorCallQueue.maintenance_request_id == request_id
+            )
+        ).first()
+        
+        # Get call attempts
+        attempts = session.exec(
+            select(VendorCallAttempt, Vendor)
+            .join(Vendor, VendorCallAttempt.vendor_id == Vendor.vendor_id)
+            .where(VendorCallAttempt.maintenance_request_id == request_id)
+            .order_by(VendorCallAttempt.initiated_at.desc())
+        ).all()
+        
+        attempt_list = []
+        for attempt, vendor in attempts:
+            attempt_list.append({
+                "attempt_id": attempt.attempt_id,
+                "vendor_id": vendor.vendor_id,
+                "vendor_name": vendor.name,
+                "call_status": attempt.call_status,
+                "outcome": attempt.outcome,
+                "is_available": attempt.is_available,
+                "earliest_available_time": attempt.earliest_available_time,
+                "estimated_cost_range": attempt.estimated_cost_range,
+                "vendor_notes": attempt.vendor_notes,
+                "vapi_call_id": attempt.vapi_call_id,
+                "call_transcript": attempt.call_transcript,
+                "call_recording_url": attempt.call_recording_url,
+                "call_duration_seconds": attempt.call_duration_seconds,
+                "attempt_number": attempt.attempt_number,
+                "initiated_at": attempt.initiated_at.isoformat() if attempt.initiated_at else None,
+                "answered_at": attempt.answered_at.isoformat() if attempt.answered_at else None,
+                "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+            })
+        
+        queue_info = None
+        if queue:
+            queue_info = {
+                "queue_id": queue.queue_id,
+                "status": queue.status,
+                "current_vendor_index": queue.current_vendor_index,
+                "vendor_queue": queue.vendor_queue,
+                "max_retries_per_vendor": queue.max_retries_per_vendor,
+                "retry_delay_minutes": queue.retry_delay_minutes,
+                "started_at": queue.started_at.isoformat() if queue.started_at else None,
+                "completed_at": queue.completed_at.isoformat() if queue.completed_at else None,
+            }
+        
+        return JSONResponse(content={
+            "maintenance_request_id": request_id,
+            "vendor_call_status": maintenance_request.vendor_call_status,
+            "assigned_vendor_id": maintenance_request.assigned_vendor_id,
+            "queue": queue_info,
+            "call_attempts": attempt_list,
+        })
+
+
+@app.post("/maintenance-requests/{request_id}/pause-vendor-calls")
+async def pause_vendor_calls(
+    request_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Pause vendor calling for a maintenance request.
+    """
+    from DB.db import MaintenanceRequest
+    from DB.vendor_calling import pause_vendor_calling
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can pause vendor calls"
+        )
+    
+    with Session(engine) as session:
+        maintenance_request = session.get(MaintenanceRequest, request_id)
+        if not maintenance_request:
+            raise HTTPException(status_code=404, detail="Maintenance request not found")
+        
+        if maintenance_request.property_manager_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this request")
+        
+        result = pause_vendor_calling(request_id, session)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Failed to pause vendor calls"))
+        
+        return JSONResponse(content=result)
+
+
+@app.post("/maintenance-requests/{request_id}/cancel-vendor-calls")
+async def cancel_vendor_calls(
+    request_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Cancel vendor calling for a maintenance request.
+    """
+    from DB.db import MaintenanceRequest
+    from DB.vendor_calling import cancel_vendor_calling
+    
+    user_type = user_data["user_type"]
+    user_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can cancel vendor calls"
+        )
+    
+    with Session(engine) as session:
+        maintenance_request = session.get(MaintenanceRequest, request_id)
+        if not maintenance_request:
+            raise HTTPException(status_code=404, detail="Maintenance request not found")
+        
+        if maintenance_request.property_manager_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this request")
+        
+        result = cancel_vendor_calling(request_id, session)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Failed to cancel vendor calls"))
+        
+        return JSONResponse(content=result)
+
+
+@app.post("/properties/{property_id}/vendor-settings")
+async def update_property_vendor_settings(
+    property_id: int,
+    payload: dict = Body(...),
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Update vendor calling settings for a property.
+    """
+    from DB.db import PropertyVendorSettings, ApartmentListing
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can update vendor settings"
+        )
+    
+    with Session(engine) as session:
+        # Verify property belongs to PM
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found")
+        
+        # Get source to check PM
+        from DB.db import Source
+        source = session.get(Source, property_listing.source_id)
+        if not source or source.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this property")
+        
+        # Get or create settings
+        settings = session.exec(
+            select(PropertyVendorSettings).where(
+                PropertyVendorSettings.property_id == property_id
+            )
+        ).first()
+        
+        if not settings:
+            settings = PropertyVendorSettings(
+                property_id=property_id,
+                auto_call_enabled=payload.get("auto_call_enabled", True),
+                emergency_only=payload.get("emergency_only", False),
+                call_time_restrictions=payload.get("call_time_restrictions")
+            )
+            session.add(settings)
+        else:
+            if "auto_call_enabled" in payload:
+                settings.auto_call_enabled = payload["auto_call_enabled"]
+            if "emergency_only" in payload:
+                settings.emergency_only = payload["emergency_only"]
+            if "call_time_restrictions" in payload:
+                settings.call_time_restrictions = payload["call_time_restrictions"]
+            settings.updated_at = datetime.utcnow()
+        
+        session.commit()
+        session.refresh(settings)
+        
+        return JSONResponse(content={
+            "settings_id": settings.settings_id,
+            "property_id": settings.property_id,
+            "auto_call_enabled": settings.auto_call_enabled,
+            "emergency_only": settings.emergency_only,
+            "call_time_restrictions": settings.call_time_restrictions,
+        })
+
+
+@app.get("/properties/{property_id}/vendor-settings")
+async def get_property_vendor_settings(
+    property_id: int,
+    user_data: dict = Depends(get_current_user_data)
+):
+    """
+    Get vendor calling settings for a property.
+    """
+    from DB.db import PropertyVendorSettings, ApartmentListing
+    
+    user_type = user_data["user_type"]
+    property_manager_id = user_data["id"]
+    
+    if user_type != "property_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only Property Managers can view vendor settings"
+        )
+    
+    with Session(engine) as session:
+        # Verify property belongs to PM
+        property_listing = session.get(ApartmentListing, property_id)
+        if not property_listing:
+            raise HTTPException(status_code=404, detail="Property not found")
+        
+        # Get source to check PM
+        from DB.db import Source
+        source = session.get(Source, property_listing.source_id)
+        if not source or source.property_manager_id != property_manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this property")
+        
+        # Get settings
+        settings = session.exec(
+            select(PropertyVendorSettings).where(
+                PropertyVendorSettings.property_id == property_id
+            )
+        ).first()
+        
+        if not settings:
+            # Return defaults
+            return JSONResponse(content={
+                "property_id": property_id,
+                "auto_call_enabled": True,
+                "emergency_only": False,
+                "call_time_restrictions": None,
+            })
+        
+        return JSONResponse(content={
+            "settings_id": settings.settings_id,
+            "property_id": settings.property_id,
+            "auto_call_enabled": settings.auto_call_enabled,
+            "emergency_only": settings.emergency_only,
+            "call_time_restrictions": settings.call_time_restrictions,
+        })
+
+
+# ============================================================================
+# VAPI VENDOR CALLING FUNCTION ENDPOINTS
+# ============================================================================
+# These endpoints are called by VAPI assistant during vendor calls
+# Base URL: https://leasing-copilot-mvp.onrender.com
+
+@app.post("/vapi/vendor/capture-response")
+async def capture_vendor_response(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: captureVendorResponse
+    Capture vendor's availability, timing, and cost estimate for a maintenance request.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/capture-response
+    """
+    from DB.db import VendorCallAttempt, Vendor, MaintenanceRequest
+    from DB.vendor_calling import handle_vendor_call_outcome
+    
+    try:
+        # Parse request body
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "captureVendorResponse":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        # Fallback: try VapiRequest format
+        if not args and request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+            for tool_call in request.message.toolCalls:
+                if tool_call.function.name == "captureVendorResponse":
+                    tool_call_id = tool_call.id
+                    func_args = tool_call.function.arguments
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        # Extract metadata from request to identify vendor call attempt
+        metadata = request_body.get("metadata", {}) or {}
+        vendor_call_attempt_id = metadata.get("vendorCallAttemptId") or request_body.get("vendorCallAttemptId")
+        
+        if not vendor_call_attempt_id:
+            raise HTTPException(status_code=400, detail="Missing vendorCallAttemptId in metadata")
+        
+        # Extract vendor response data
+        available = args.get("available", False)
+        available_date = args.get("availableDate")
+        available_time_window = args.get("availableTimeWindow")
+        estimated_cost_range = args.get("estimatedCostRange")
+        requires_access_instructions = args.get("requiresAccessInstructions", False)
+        emergency_surcharge = args.get("emergencySurcharge")
+        vendor_notes = args.get("vendorNotes")
+        preferred_contact_method = args.get("preferredContactMethod")
+        next_available_if_not_now = args.get("nextAvailableIfNotNow")
+        
+        with Session(engine) as session:
+            # Get vendor call attempt
+            attempt = session.get(VendorCallAttempt, vendor_call_attempt_id)
+            if not attempt:
+                raise HTTPException(status_code=404, detail="Vendor call attempt not found")
+            
+            # Update attempt with vendor response
+            attempt.is_available = available
+            if available_date:
+                attempt.earliest_available_time = f"{available_date} {available_time_window or ''}".strip()
+            elif available_time_window:
+                attempt.earliest_available_time = available_time_window
+            elif next_available_if_not_now:
+                attempt.earliest_available_time = next_available_if_not_now
+            
+            if estimated_cost_range:
+                attempt.estimated_cost_range = estimated_cost_range
+            if vendor_notes:
+                attempt.vendor_notes = vendor_notes
+            
+            # Store additional metadata
+            if attempt.call_metadata is None:
+                attempt.call_metadata = {}
+            attempt.call_metadata.update({
+                "requires_access_instructions": requires_access_instructions,
+                "emergency_surcharge": emergency_surcharge,
+                "preferred_contact_method": preferred_contact_method,
+                "next_available_if_not_now": next_available_if_not_now,
+            })
+            
+            session.add(attempt)
+            session.commit()
+            
+            # Determine outcome and process
+            outcome = "accepted" if available else "declined"
+            call_data = {
+                "is_available": available,
+                "earliest_available_time": attempt.earliest_available_time,
+                "estimated_cost_range": estimated_cost_range,
+                "vendor_notes": vendor_notes,
+            }
+            
+            result = handle_vendor_call_outcome(
+                vendor_call_attempt_id=vendor_call_attempt_id,
+                outcome=outcome,
+                session=session,
+                call_data=call_data
+            )
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "message": f"Vendor response captured: {'Available' if available else 'Not available'}",
+                        "vendor_call_attempt_id": vendor_call_attempt_id,
+                        "outcome": outcome
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in capture_vendor_response: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": f"I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/escalate-next")
+async def escalate_to_next_vendor(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: escalateToNextVendor
+    Trigger when current vendor declines or call fails, to move to next vendor in queue.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/escalate-next
+    """
+    from DB.db import VendorCallAttempt, Vendor
+    from DB.vendor_calling import handle_vendor_call_outcome, call_next_vendor
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "escalateToNextVendor":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        # Fallback: try VapiRequest format
+        if not args and request and hasattr(request, 'message') and hasattr(request.message, 'toolCalls'):
+            for tool_call in request.message.toolCalls:
+                if tool_call.function.name == "escalateToNextVendor":
+                    tool_call_id = tool_call.id
+                    func_args = tool_call.function.arguments
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        vendor_call_attempt_id = metadata.get("vendorCallAttemptId") or request_body.get("vendorCallAttemptId")
+        
+        if not vendor_call_attempt_id:
+            raise HTTPException(status_code=400, detail="Missing vendorCallAttemptId in metadata")
+        
+        call_outcome = args.get("callOutcome", "no_answer")
+        decline_reason = args.get("declineReason")
+        suggested_callback_time = args.get("suggestedCallbackTime")
+        permanent_opt_out = args.get("permanentOptOut", False)
+        retry_recommended = args.get("retryRecommended", False)
+        retry_delay_minutes = args.get("retryDelayMinutes")
+        
+        with Session(engine) as session:
+            attempt = session.get(VendorCallAttempt, vendor_call_attempt_id)
+            if not attempt:
+                raise HTTPException(status_code=404, detail="Vendor call attempt not found")
+            
+            # Handle permanent opt-out
+            if permanent_opt_out:
+                vendor = session.get(Vendor, attempt.vendor_id)
+                if vendor:
+                    vendor.opted_out = True
+                    vendor.opt_out_timestamp = datetime.utcnow()
+                    vendor.opt_out_method = "voice"
+                    vendor.opt_out_call_id = attempt.vapi_call_id
+                    vendor.updated_at = datetime.utcnow()
+                    session.add(vendor)
+                    print(f"🚫 Vendor {vendor.vendor_id} opted out permanently")
+            
+            # Map call outcome to our outcome format
+            outcome_map = {
+                "declined": "declined",
+                "no_answer": "no_response",
+                "voicemail": "voicemail",
+                "busy": "no_response",
+                "wrong_number": "no_response",
+                "out_of_service": "no_response"
+            }
+            outcome = outcome_map.get(call_outcome, "no_response")
+            
+            # Update attempt
+            if decline_reason:
+                attempt.vendor_notes = decline_reason
+            if attempt.call_metadata is None:
+                attempt.call_metadata = {}
+            attempt.call_metadata.update({
+                "suggested_callback_time": suggested_callback_time,
+                "retry_recommended": retry_recommended,
+                "retry_delay_minutes": retry_delay_minutes,
+            })
+            session.add(attempt)
+            session.commit()
+            
+            # Process outcome (will move to next vendor if declined/no_response)
+            result = handle_vendor_call_outcome(
+                vendor_call_attempt_id=vendor_call_attempt_id,
+                outcome=outcome,
+                session=session,
+                call_data={"vendor_notes": decline_reason}
+            )
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "message": f"Escalated to next vendor. Outcome: {call_outcome}",
+                        "outcome": outcome,
+                        "moved_to_next": result.get("success", False)
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in escalate_to_next_vendor: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/log-call")
+async def log_vendor_call(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: logVendorCall
+    Log call details for tracking and reporting.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/log-call
+    """
+    from DB.db import VendorCallAttempt
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "logVendorCall":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        vendor_call_attempt_id = metadata.get("vendorCallAttemptId") or request_body.get("vendorCallAttemptId")
+        
+        if not vendor_call_attempt_id:
+            raise HTTPException(status_code=400, detail="Missing vendorCallAttemptId in metadata")
+        
+        call_duration = args.get("callDuration")
+        call_result = args.get("callResult", "answered")
+        person_spoke_with = args.get("personSpokeWith")
+        vendor_mood = args.get("vendorMood")
+        call_quality_issues = args.get("callQualityIssues", [])
+        transcript_summary = args.get("transcriptSummary")
+        
+        with Session(engine) as session:
+            attempt = session.get(VendorCallAttempt, vendor_call_attempt_id)
+            if not attempt:
+                raise HTTPException(status_code=404, detail="Vendor call attempt not found")
+            
+            # Update attempt with call log data
+            if call_duration:
+                attempt.call_duration_seconds = call_duration
+            if attempt.call_metadata is None:
+                attempt.call_metadata = {}
+            attempt.call_metadata.update({
+                "person_spoke_with": person_spoke_with,
+                "vendor_mood": vendor_mood,
+                "call_quality_issues": call_quality_issues,
+                "transcript_summary": transcript_summary,
+                "call_result": call_result,
+            })
+            
+            # Update call status based on result
+            status_map = {
+                "answered": "answered",
+                "declined": "answered",
+                "no_answer": "no_answer",
+                "voicemail": "voicemail",
+                "callback_scheduled": "answered",
+                "opted_out": "answered"
+            }
+            attempt.call_status = status_map.get(call_result, "answered")
+            
+            session.add(attempt)
+            session.commit()
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "message": "Call logged successfully",
+                        "vendor_call_attempt_id": vendor_call_attempt_id
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in log_vendor_call: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/schedule-callback")
+async def schedule_vendor_callback(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: scheduleVendorCallback
+    Schedule a follow-up call with vendor for future availability.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/schedule-callback
+    """
+    from DB.db import VendorCallAttempt
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "scheduleVendorCallback":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        vendor_call_attempt_id = metadata.get("vendorCallAttemptId") or request_body.get("vendorCallAttemptId")
+        
+        if not vendor_call_attempt_id:
+            raise HTTPException(status_code=400, detail="Missing vendorCallAttemptId in metadata")
+        
+        callback_date = args.get("callbackDate")
+        callback_time = args.get("callbackTime")
+        callback_reason = args.get("callbackReason")
+        notes_for_next_call = args.get("notesForNextCall")
+        
+        if not callback_date or not callback_time or not callback_reason:
+            raise HTTPException(status_code=400, detail="Missing required fields: callbackDate, callbackTime, callbackReason")
+        
+        with Session(engine) as session:
+            attempt = session.get(VendorCallAttempt, vendor_call_attempt_id)
+            if not attempt:
+                raise HTTPException(status_code=404, detail="Vendor call attempt not found")
+            
+            # Store callback information
+            if attempt.call_metadata is None:
+                attempt.call_metadata = {}
+            attempt.call_metadata.update({
+                "callback_scheduled": True,
+                "callback_date": callback_date,
+                "callback_time": callback_time,
+                "callback_reason": callback_reason,
+                "notes_for_next_call": notes_for_next_call,
+            })
+            
+            session.add(attempt)
+            session.commit()
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "message": f"Callback scheduled for {callback_date} at {callback_time}",
+                        "callback_date": callback_date,
+                        "callback_time": callback_time
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in schedule_vendor_callback: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/update-ticket")
+async def update_maintenance_ticket(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: updateMaintenanceTicket
+    Update maintenance ticket with vendor response information.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/update-ticket
+    """
+    from DB.db import MaintenanceRequest, VendorCallAttempt
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "updateMaintenanceTicket":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        maintenance_request_id = metadata.get("maintenanceRequestId") or request_body.get("maintenanceRequestId")
+        
+        if not maintenance_request_id:
+            raise HTTPException(status_code=400, detail="Missing maintenanceRequestId in metadata")
+        
+        vendor_status = args.get("vendorStatus")
+        proposed_schedule = args.get("proposedSchedule")
+        cost_estimate = args.get("costEstimate")
+        priority_recommendation = args.get("priorityRecommendation")
+        notes_for_pm = args.get("notesForPM")
+        
+        if not vendor_status:
+            raise HTTPException(status_code=400, detail="Missing required field: vendorStatus")
+        
+        with Session(engine) as session:
+            maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
+            if not maintenance_request:
+                raise HTTPException(status_code=404, detail="Maintenance request not found")
+            
+            # Update maintenance request with vendor status
+            if vendor_status == "available":
+                maintenance_request.vendor_call_status = "vendor_accepted"
+            elif vendor_status == "unavailable":
+                maintenance_request.vendor_call_status = "vendor_declined"
+            elif vendor_status == "callback_scheduled":
+                maintenance_request.vendor_call_status = "calling"
+            elif vendor_status == "needs_followup":
+                maintenance_request.vendor_call_status = "calling"
+            
+            # Store additional information in PM notes
+            update_notes = []
+            if proposed_schedule:
+                schedule_text = f"Proposed schedule: {proposed_schedule.get('date', '')} {proposed_schedule.get('timeWindow', '')}"
+                if proposed_schedule.get('estimatedDuration'):
+                    schedule_text += f" (Duration: {proposed_schedule.get('estimatedDuration')})"
+                update_notes.append(schedule_text)
+            
+            if cost_estimate:
+                cost_text = f"Cost estimate: {cost_estimate.get('range', '')}"
+                if cost_estimate.get('emergencyFee'):
+                    cost_text += f" (Emergency fee: {cost_estimate.get('emergencyFee')})"
+                update_notes.append(cost_text)
+            
+            if priority_recommendation:
+                update_notes.append(f"AI Recommendation: {priority_recommendation}")
+            
+            if notes_for_pm:
+                update_notes.append(f"Notes: {notes_for_pm}")
+            
+            if update_notes:
+                existing_notes = maintenance_request.pm_notes or ""
+                maintenance_request.pm_notes = f"{existing_notes}\n\nVendor Update: {' | '.join(update_notes)}".strip()
+            
+            maintenance_request.updated_at = datetime.utcnow()
+            session.add(maintenance_request)
+            session.commit()
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "message": "Maintenance ticket updated successfully",
+                        "maintenance_request_id": maintenance_request_id,
+                        "vendor_status": vendor_status
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in update_maintenance_ticket: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/check-operating-hours")
+async def check_vendor_operating_hours(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: checkVendorOperatingHours
+    Verify if call is within vendor's stated operating hours.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/check-operating-hours
+    """
+    from DB.db import Vendor
+    from DB.vendor_matching import is_vendor_available_now
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "checkVendorOperatingHours":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        vendor_id = metadata.get("vendorId") or request_body.get("vendorId")
+        
+        if not vendor_id:
+            raise HTTPException(status_code=400, detail="Missing vendorId in metadata")
+        
+        vendor_operating_hours = args.get("vendorOperatingHours", {})
+        current_time_check = args.get("currentTimeCheck")
+        within_hours = args.get("withinHours")
+        
+        with Session(engine) as session:
+            vendor = session.get(Vendor, vendor_id)
+            if not vendor:
+                raise HTTPException(status_code=404, detail="Vendor not found")
+            
+            # Check if vendor is currently available based on operating hours
+            is_available = is_vendor_available_now(vendor, vendor.timezone or "America/New_York")
+            
+            # Calculate next available call time if not available
+            next_available_call_time = None
+            if not is_available and vendor.operating_hours_start:
+                # Simple calculation: next available time is start of next operating period
+                from datetime import datetime, time as time_obj
+                import pytz
+                tz = pytz.timezone(vendor.timezone or "America/New_York")
+                now = datetime.now(tz)
+                today_start = now.replace(
+                    hour=vendor.operating_hours_start.hour,
+                    minute=vendor.operating_hours_start.minute,
+                    second=0,
+                    microsecond=0
+                )
+                if now.time() < vendor.operating_hours_start:
+                    next_available_call_time = today_start.isoformat()
+                else:
+                    # Tomorrow at start time
+                    from datetime import timedelta
+                    next_available_call_time = (today_start + timedelta(days=1)).isoformat()
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "withinHours": is_available,
+                        "nextAvailableCallTime": next_available_call_time,
+                        "vendorOperatingHours": {
+                            "start": vendor.operating_hours_start.isoformat() if vendor.operating_hours_start else None,
+                            "end": vendor.operating_hours_end.isoformat() if vendor.operating_hours_end else None,
+                            "timezone": vendor.timezone,
+                            "emergencyService": vendor.emergency_available
+                        }
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in check_vendor_operating_hours: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/validate-emergency")
+async def validate_emergency_request(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: validateEmergencyRequest
+    Validate and process emergency maintenance requests.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/validate-emergency
+    """
+    from DB.db import MaintenanceRequest, Vendor
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "validateEmergencyRequest":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        maintenance_request_id = metadata.get("maintenanceRequestId") or request_body.get("maintenanceRequestId")
+        
+        if not maintenance_request_id:
+            raise HTTPException(status_code=400, detail="Missing maintenanceRequestId in metadata")
+        
+        is_emergency = args.get("isEmergency", False)
+        emergency_type = args.get("emergencyType")
+        requires_immediate_dispatch = args.get("requiresImmediateDispatch", False)
+        after_hours_approval = args.get("afterHoursApproval", False)
+        emergency_contact_attempted = args.get("emergencyContactAttempted", False)
+        
+        with Session(engine) as session:
+            maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
+            if not maintenance_request:
+                raise HTTPException(status_code=404, detail="Maintenance request not found")
+            
+            # Update maintenance request priority if emergency
+            if is_emergency and maintenance_request.priority != "urgent":
+                maintenance_request.priority = "urgent"
+                maintenance_request.updated_at = datetime.utcnow()
+                session.add(maintenance_request)
+                session.commit()
+            
+            # Check if vendor supports emergency service
+            vendor_id = metadata.get("vendorId") or request_body.get("vendorId")
+            vendor_supports_emergency = False
+            if vendor_id:
+                vendor = session.get(Vendor, vendor_id)
+                if vendor:
+                    vendor_supports_emergency = vendor.emergency_available
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "isEmergency": is_emergency,
+                        "emergencyType": emergency_type,
+                        "requiresImmediateDispatch": requires_immediate_dispatch,
+                        "afterHoursApproval": after_hours_approval,
+                        "emergencyContactAttempted": emergency_contact_attempted,
+                        "vendorSupportsEmergency": vendor_supports_emergency,
+                        "priorityUpdated": is_emergency and maintenance_request.priority == "urgent"
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in validate_emergency_request: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/create-assignment")
+async def create_vendor_assignment(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: createVendorAssignment
+    Create vendor assignment for the maintenance job.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/create-assignment
+    """
+    from DB.db import MaintenanceRequest, VendorCallQueue
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "createVendorAssignment":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        maintenance_request_id = metadata.get("maintenanceRequestId") or request_body.get("maintenanceRequestId")
+        
+        if not maintenance_request_id:
+            raise HTTPException(status_code=400, detail="Missing maintenanceRequestId in metadata")
+        
+        assignment_status = args.get("assignmentStatus")
+        assigned_vendor_id = args.get("assignedVendorId")
+        scheduled_date_time = args.get("scheduledDateTime")
+        estimated_cost = args.get("estimatedCost")
+        tenant_access_instructions = args.get("tenantAccessInstructions")
+        special_requirements = args.get("specialRequirements")
+        
+        if not assignment_status or not assigned_vendor_id:
+            raise HTTPException(status_code=400, detail="Missing required fields: assignmentStatus, assignedVendorId")
+        
+        with Session(engine) as session:
+            maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
+            if not maintenance_request:
+                raise HTTPException(status_code=404, detail="Maintenance request not found")
+            
+            # Convert vendor ID to integer if it's a string
+            try:
+                vendor_id_int = int(assigned_vendor_id)
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="Invalid assignedVendorId format")
+            
+            # Update maintenance request with vendor assignment
+            if assignment_status in ["proposed", "tentative", "confirmed"]:
+                maintenance_request.assigned_vendor_id = vendor_id_int
+                maintenance_request.vendor_call_status = "vendor_accepted"
+                maintenance_request.status = "in_progress"
+            
+            # Store assignment details in PM notes
+            assignment_notes = []
+            if scheduled_date_time:
+                assignment_notes.append(f"Scheduled: {scheduled_date_time}")
+            if estimated_cost:
+                assignment_notes.append(f"Estimated cost: {estimated_cost}")
+            if tenant_access_instructions:
+                assignment_notes.append(f"Access instructions: {tenant_access_instructions}")
+            if special_requirements:
+                assignment_notes.append(f"Special requirements: {special_requirements}")
+            
+            if assignment_notes:
+                existing_notes = maintenance_request.pm_notes or ""
+                maintenance_request.pm_notes = f"{existing_notes}\n\nVendor Assignment ({assignment_status}): {' | '.join(assignment_notes)}".strip()
+            
+            # Complete the call queue
+            queue = session.exec(
+                select(VendorCallQueue).where(
+                    VendorCallQueue.maintenance_request_id == maintenance_request_id
+                )
+            ).first()
+            if queue:
+                queue.status = "completed"
+                queue.completed_at = datetime.utcnow()
+                session.add(queue)
+            
+            maintenance_request.updated_at = datetime.utcnow()
+            session.add(maintenance_request)
+            session.commit()
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "message": f"Vendor assignment created: {assignment_status}",
+                        "maintenance_request_id": maintenance_request_id,
+                        "assigned_vendor_id": vendor_id_int,
+                        "assignment_status": assignment_status
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in create_vendor_assignment: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
+
+
+@app.post("/vapi/vendor/send-notification")
+async def send_vendor_notification(
+    http_request: Request,
+    request: Optional[VapiRequest] = None
+):
+    """
+    VAPI Function: sendVendorNotification
+    Send confirmation/notification to vendor via preferred method.
+    
+    Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/send-notification
+    
+    Note: This endpoint logs the notification request. Actual sending would be handled
+    by a separate notification service (SMS/email provider).
+    """
+    from DB.db import Vendor, MaintenanceRequest
+    
+    try:
+        request_body = await http_request.json()
+        tool_call_id = None
+        args = {}
+        
+        # Extract from VAPI tool call format
+        if request_body.get("message") and request_body["message"].get("toolCalls"):
+            tool_calls = request_body["message"]["toolCalls"]
+            for tool_call in tool_calls:
+                if tool_call.get("function", {}).get("name") == "sendVendorNotification":
+                    tool_call_id = tool_call.get("id")
+                    func_args = tool_call.get("function", {}).get("arguments", {})
+                    if isinstance(func_args, str):
+                        args = json.loads(func_args)
+                    else:
+                        args = func_args
+                    break
+        
+        metadata = request_body.get("metadata", {}) or {}
+        vendor_id = metadata.get("vendorId") or request_body.get("vendorId")
+        maintenance_request_id = metadata.get("maintenanceRequestId") or request_body.get("maintenanceRequestId")
+        
+        notification_type = args.get("notificationType")
+        delivery_method = args.get("deliveryMethod")
+        message_content = args.get("messageContent", {})
+        confirmation_required = args.get("confirmationRequired", False)
+        
+        if not notification_type or not delivery_method:
+            raise HTTPException(status_code=400, detail="Missing required fields: notificationType, deliveryMethod")
+        
+        with Session(engine) as session:
+            vendor = None
+            if vendor_id:
+                vendor = session.get(Vendor, vendor_id)
+                if not vendor:
+                    raise HTTPException(status_code=404, detail="Vendor not found")
+            
+            maintenance_request = None
+            if maintenance_request_id:
+                maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
+            
+            # Log notification request (actual sending would be handled by notification service)
+            notification_log = {
+                "notification_type": notification_type,
+                "delivery_method": delivery_method,
+                "vendor_id": vendor_id,
+                "vendor_name": vendor.name if vendor else None,
+                "vendor_email": vendor.email if vendor else None,
+                "vendor_phone": vendor.phone_number if vendor else None,
+                "maintenance_request_id": maintenance_request_id,
+                "message_content": message_content,
+                "confirmation_required": confirmation_required,
+                "requested_at": datetime.utcnow().isoformat()
+            }
+            
+            print(f"📧 Vendor notification requested: {json.dumps(notification_log, indent=2)}")
+            
+            # TODO: Integrate with actual notification service (Twilio SMS, SendGrid email, etc.)
+            # For now, we just log the request
+            
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": True,
+                        "message": f"Notification request logged. Type: {notification_type}, Method: {delivery_method}",
+                        "notification_logged": True,
+                        "note": "Actual notification sending will be handled by notification service"
+                    }
+                }]
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in send_vendor_notification: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "results": [{
+                "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
+                "result": {
+                    "success": False,
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                }
+            }]
+        }
 
 
 @app.post("/tenants")
@@ -8314,6 +10398,126 @@ async def vapi_webhook_hyphen(request: Request):
                 except Exception as e:
                     print(f"⚠️  Error updating Contact.last_call_outcome: {e}")
                     # Don't fail webhook processing if outcome update fails
+            
+            # ========================================================================
+            # PROCESS VENDOR CALL OUTCOMES AND OPT-OUTS
+            # ========================================================================
+            # Check if this is a vendor call and process the outcome
+            if call_record.call_metadata and call_record.call_metadata.get("vendorCall"):
+                try:
+                    from DB.db import VendorCallAttempt, Vendor
+                    from DB.vendor_calling import handle_vendor_call_outcome
+                    from DB.outbound_calling import record_opt_out
+                    
+                    vendor_call_attempt_id = call_record.call_metadata.get("vendorCallAttemptId")
+                    vendor_id = call_record.call_metadata.get("vendorId")
+                    
+                    # Check for vendor opt-out
+                    if opt_out_result and opt_out_result.get("detected"):
+                        if vendor_id:
+                            vendor = session.get(Vendor, vendor_id)
+                            if vendor:
+                                # Record vendor opt-out (similar to contact opt-out)
+                                vendor.opted_out = True
+                                vendor.opt_out_timestamp = datetime.utcnow()
+                                vendor.opt_out_method = opt_out_result.get("method", "voice")
+                                vendor.opt_out_call_id = call_id
+                                vendor.updated_at = datetime.utcnow()
+                                session.add(vendor)
+                                updated = True
+                                
+                                print(f"🚫 VENDOR OPT-OUT RECORDED: Vendor {vendor_id} ({vendor.name}) via {vendor.opt_out_method}")
+                                print(f"   Reason: {opt_out_result.get('reason')}")
+                                print(f"   Transcript line: {opt_out_result.get('transcript_line')}")
+                                
+                                # Also record opt-out in the contact record (for consistency)
+                                if call_record.contact_id:
+                                    try:
+                                        contact = session.get(Contact, call_record.contact_id)
+                                        if contact:
+                                            record_opt_out(
+                                                phone_number=contact.phone_number,
+                                                session=session,
+                                                method=opt_out_result.get("method", "voice"),
+                                                call_id=call_id
+                                            )
+                                    except Exception as e:
+                                        print(f"⚠️  Error recording contact opt-out for vendor: {e}")
+                    
+                    if vendor_call_attempt_id:
+                        # Determine outcome from call status and transcript
+                        outcome = None
+                        if call_record.call_status == "ended" and call_record.call_duration and call_record.call_duration > 30:
+                            # Call was answered and had meaningful duration
+                            transcript_lower = (call_record.transcript or "").lower()
+                            
+                            # Check transcript for acceptance/decline indicators
+                            if any(phrase in transcript_lower for phrase in ["yes", "available", "can do", "sure", "okay", "accept"]):
+                                outcome = "accepted"
+                            elif any(phrase in transcript_lower for phrase in ["no", "not available", "can't", "decline", "busy", "unavailable"]):
+                                outcome = "declined"
+                            else:
+                                # Default to accepted if call was answered and had duration
+                                outcome = "accepted"
+                        elif call_record.call_status == "no-answer" or call_record.call_status == "busy":
+                            outcome = "no_response"
+                        elif call_record.call_status == "voicemail":
+                            outcome = "voicemail"
+                        else:
+                            outcome = "no_response"
+                        
+                        # Extract vendor response data from transcript if available
+                        call_data = {
+                            "transcript": call_record.transcript,
+                            "recording_url": call_record.recording_url,
+                            "duration": call_record.call_duration,
+                        }
+                        
+                        # Try to extract structured data from transcript
+                        if call_record.transcript:
+                            transcript_lower = call_record.transcript.lower()
+                            
+                            # Extract availability time
+                            import re
+                            time_patterns = [
+                                r"(?:available|come|arrive|be there|schedule).*?(?:at|by|around|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
+                                r"(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday).*?(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
+                            ]
+                            for pattern in time_patterns:
+                                match = re.search(pattern, transcript_lower)
+                                if match:
+                                    call_data["earliest_available_time"] = match.group(1)
+                                    break
+                            
+                            # Extract cost estimate
+                            cost_patterns = [
+                                r"(?:cost|price|charge|estimate).*?(\$?\d+(?:,\d{3})*(?:\.\d{2})?)",
+                                r"(\$?\d+(?:,\d{3})*(?:\.\d{2})?).*?(?:dollar|buck)",
+                            ]
+                            for pattern in cost_patterns:
+                                match = re.search(pattern, transcript_lower)
+                                if match:
+                                    call_data["estimated_cost_range"] = match.group(1)
+                                    break
+                        
+                        # Process outcome
+                        result = handle_vendor_call_outcome(
+                            vendor_call_attempt_id=vendor_call_attempt_id,
+                            outcome=outcome,
+                            session=session,
+                            call_data=call_data
+                        )
+                        
+                        if result.get("success"):
+                            print(f"✅ Processed vendor call outcome: {outcome} for attempt {vendor_call_attempt_id}")
+                        else:
+                            print(f"⚠️  Failed to process vendor call outcome: {result.get('error')}")
+                    
+                except Exception as e:
+                    print(f"⚠️  Error processing vendor call outcome: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Don't fail webhook processing if vendor call processing fails
             
             if updated:
                 session.commit()

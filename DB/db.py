@@ -152,6 +152,7 @@ class PropertyManager(SQLModel, table=True):
     )
     tenants: List["Tenant"] = Relationship()
     maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="property_manager")
+    vendors: List["Vendor"] = Relationship()
 
 
 class Realtor(SQLModel, table=True):
@@ -784,11 +785,230 @@ class MaintenanceRequest(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = None  # When the request was marked as completed
     
+    # Vendor assignment (new feature)
+    assigned_vendor_id: Optional[int] = Field(
+        default=None,
+        foreign_key="vendor.vendor_id",
+        index=True
+    )  # Vendor assigned to handle this request
+    vendor_call_status: Optional[str] = Field(
+        default=None,
+        index=True
+    )  # "not_started", "calling", "vendor_accepted", "vendor_declined", "no_response", "completed"
+    vendor_call_automation_enabled: bool = Field(default=True)  # Whether auto-calling is enabled for this request
+    
     # Relationships
     tenant: Optional["Tenant"] = Relationship(back_populates="maintenance_requests")
     property: Optional["ApartmentListing"] = Relationship()
     property_manager: Optional["PropertyManager"] = Relationship(back_populates="maintenance_requests")
     assigned_realtor: Optional["Realtor"] = Relationship(back_populates="assigned_maintenance_requests")
+    assigned_vendor: Optional["Vendor"] = Relationship(back_populates="assigned_maintenance_requests")
+    vendor_call_attempts: List["VendorCallAttempt"] = Relationship(back_populates="maintenance_request")
+    vendor_call_queue: Optional["VendorCallQueue"] = Relationship(back_populates="maintenance_request")
+
+
+class Vendor(SQLModel, table=True):
+    """
+    Vendor entity representing repair/service providers.
+    
+    Vendors can be linked to properties and provide services like plumbing,
+    electrical, HVAC, general maintenance, etc.
+    """
+    vendor_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Property Manager relationship (for data isolation)
+    property_manager_id: int = Field(
+        foreign_key="propertymanager.property_manager_id",
+        index=True
+    )
+    
+    # Vendor identification
+    name: str = Field(index=True)  # Vendor name/company name
+    service_type: str = Field(index=True)  # "electrician", "plumber", "carpenter", "hvac", "general", "emergency"
+    phone_number: str = Field(index=True)  # Primary phone (E.164 format: +14125551234)
+    backup_phone: Optional[str] = None  # Backup phone number (E.164 format)
+    email: Optional[str] = None  # Email address
+    
+    # Operating details
+    operating_hours_start: Optional[time] = None  # e.g., "09:00:00"
+    operating_hours_end: Optional[time] = None  # e.g., "17:00:00"
+    emergency_available: bool = Field(default=False)  # Available for emergency calls
+    timezone: Optional[str] = Field(default="America/New_York")  # Vendor's timezone
+    
+    # Additional metadata
+    notes: Optional[str] = None  # Internal notes (e.g., "Preferred vendor", "After-hours only")
+    is_active: bool = Field(default=True, index=True)  # Whether vendor is currently active
+    
+    # Opt-out tracking (ZERO TOLERANCE - must be immediate and permanent)
+    opted_out: bool = Field(default=False, index=True)  # True if vendor has opted out of automated AI calls
+    opt_out_timestamp: Optional[datetime] = None  # When opt-out occurred
+    opt_out_method: Optional[str] = None  # 'voice', 'keypad', 'sms', 'email', 'manual'
+    opt_out_call_id: Optional[str] = None  # Call ID where opt-out occurred (if applicable)
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    property_manager: Optional["PropertyManager"] = Relationship()
+    property_vendors: List["PropertyVendor"] = Relationship(back_populates="vendor")
+    assigned_maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="assigned_vendor")
+    call_attempts: List["VendorCallAttempt"] = Relationship(back_populates="vendor")
+
+
+class PropertyVendor(SQLModel, table=True):
+    """
+    Links vendors to properties with priority and configuration.
+    
+    Multiple vendors can be linked to the same property for the same service type,
+    allowing for fallback chains (1st call, 2nd call, etc.).
+    """
+    property_vendor_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Property relationship
+    property_id: int = Field(
+        foreign_key="apartmentlisting.id",
+        index=True
+    )
+    
+    # Vendor relationship
+    vendor_id: int = Field(
+        foreign_key="vendor.vendor_id",
+        index=True
+    )
+    
+    # Configuration
+    priority: int = Field(default=1, index=True)  # 1 = first call, 2 = second call, etc. (lower = higher priority)
+    service_type: str = Field(index=True)  # "electrician", "plumber", "carpenter", "hvac", "general", "emergency"
+    
+    # Additional configuration
+    notes: Optional[str] = None  # Property-specific notes for this vendor
+    is_active: bool = Field(default=True, index=True)  # Whether this property-vendor link is active
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    property: Optional["ApartmentListing"] = Relationship()
+    vendor: Optional["Vendor"] = Relationship(back_populates="property_vendors")
+
+
+class VendorCallQueue(SQLModel, table=True):
+    """
+    Manages the call queue for a maintenance request.
+    
+    Tracks which vendors are in the queue, their order, and the current status
+    of the automated calling process.
+    """
+    queue_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Maintenance request relationship
+    maintenance_request_id: int = Field(
+        foreign_key="maintenancerequest.maintenance_request_id",
+        unique=True,
+        index=True
+    )
+    
+    # Queue state
+    status: str = Field(default="pending", index=True)  # "pending", "calling", "completed", "cancelled", "paused"
+    current_vendor_index: int = Field(default=0)  # Index in vendor_queue list of current vendor being called
+    vendor_queue: Dict[str, Any] = Field(
+        default=None,
+        sa_column=Column(JSONB)
+    )  # JSON array of vendor IDs in priority order: [{"vendor_id": 1, "priority": 1}, ...]
+    
+    # Retry configuration
+    max_retries_per_vendor: int = Field(default=2)  # Max retries per vendor
+    retry_delay_minutes: int = Field(default=15)  # Minutes to wait between retries
+    
+    # Timestamps
+    started_at: Optional[datetime] = None  # When calling started
+    completed_at: Optional[datetime] = None  # When calling completed
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    maintenance_request: Optional["MaintenanceRequest"] = Relationship(back_populates="vendor_call_queue")
+
+
+class VendorCallAttempt(SQLModel, table=True):
+    """
+    Tracks individual call attempts to vendors for maintenance requests.
+    
+    Records the outcome of each call (accepted, declined, no answer, etc.)
+    and stores call metadata.
+    """
+    attempt_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Relationships
+    maintenance_request_id: int = Field(
+        foreign_key="maintenancerequest.maintenance_request_id",
+        index=True
+    )
+    vendor_id: int = Field(
+        foreign_key="vendor.vendor_id",
+        index=True
+    )
+    
+    # Call details
+    vapi_call_id: Optional[str] = Field(default=None, index=True)  # VAPI call ID
+    call_status: str = Field(index=True)  # "initiated", "answered", "declined", "no_answer", "voicemail", "failed"
+    outcome: Optional[str] = None  # "accepted", "declined", "no_response", "voicemail"
+    
+    # Vendor response (if answered)
+    is_available: Optional[bool] = None  # Whether vendor confirmed availability
+    earliest_available_time: Optional[str] = None  # Earliest time vendor can come (free text)
+    estimated_cost_range: Optional[str] = None  # Estimated cost (free text)
+    vendor_notes: Optional[str] = None  # Any additional notes from vendor
+    
+    # Call metadata
+    call_transcript: Optional[str] = None  # Transcript of the call
+    call_recording_url: Optional[str] = None  # MP3 recording URL from VAPI
+    call_duration_seconds: Optional[int] = None  # Call duration in seconds
+    
+    # Retry tracking
+    attempt_number: int = Field(default=1)  # Which attempt this is (1, 2, 3, etc.)
+    
+    # Timestamps
+    initiated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    answered_at: Optional[datetime] = None  # When call was answered
+    completed_at: Optional[datetime] = None  # When call ended
+    
+    # Relationships
+    maintenance_request: Optional["MaintenanceRequest"] = Relationship(back_populates="vendor_call_attempts")
+    vendor: Optional["Vendor"] = Relationship(back_populates="call_attempts")
+
+
+class PropertyVendorSettings(SQLModel, table=True):
+    """
+    Property-level settings for vendor calling automation.
+    
+    Allows PMs to configure auto-calling behavior per property.
+    """
+    settings_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Property relationship
+    property_id: int = Field(
+        foreign_key="apartmentlisting.id",
+        unique=True,
+        index=True
+    )
+    
+    # Automation settings
+    auto_call_enabled: bool = Field(default=True)  # Enable automatic calling when request is created
+    emergency_only: bool = Field(default=False)  # Only auto-call for emergency requests
+    call_time_restrictions: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)
+    )  # {"start_hour": 8, "end_hour": 21, "timezone": "America/New_York"}
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    property: Optional["ApartmentListing"] = Relationship()
 
 # ---------------------- EMBEDDING SETUP ----------------------
 class GeminiEmbedder:
