@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 import json
 import threading
 import queue as queue_module
+import time
 from sqlmodel import Session, select, or_
 from .db import (
     Vendor,
@@ -105,7 +106,82 @@ def create_vendor_call_queue(
     if auto_start:
         start_vendor_calling(maintenance_request.maintenance_request_id, session)
     
+    print(f"📋 [VENDOR CALLING] Created vendor call queue {queue.queue_id} for maintenance request {maintenance_request.maintenance_request_id}")
+    print(f"   Status: {queue.status}, Vendors in queue: {len(vendor_queue)}")
+    
     return queue
+
+
+def schedule_delayed_vendor_calling(
+    maintenance_request_id: int,
+    delay_minutes: int,
+    session: Session
+) -> None:
+    """
+    Schedule vendor calling to start after a delay.
+    
+    This is used to delay vendor calling until 1 minute after the inbound
+    maintenance request call ends (end-of-call-report webhook).
+    
+    Args:
+        maintenance_request_id: Maintenance request ID
+        delay_minutes: Delay in minutes before starting vendor calls
+        session: Database session
+    """
+    print(f"⏰ [VENDOR CALLING] Scheduling delayed vendor calling for maintenance request {maintenance_request_id}")
+    print(f"   Delay: {delay_minutes} minute(s)")
+    
+    def delayed_start():
+        """Background thread function to start vendor calling after delay"""
+        try:
+            # Wait for the delay
+            delay_seconds = delay_minutes * 60
+            print(f"⏳ [VENDOR CALLING] Waiting {delay_seconds} seconds before starting vendor calls for request {maintenance_request_id}")
+            time.sleep(delay_seconds)
+            
+            # Start vendor calling
+            with Session(engine) as new_session:
+                maintenance_request = new_session.get(MaintenanceRequest, maintenance_request_id)
+                if not maintenance_request:
+                    print(f"❌ [VENDOR CALLING] Maintenance request {maintenance_request_id} not found after delay")
+                    return
+                
+                # Check if vendor calling is still enabled
+                from .vendor_matching import should_auto_call_vendors
+                if not should_auto_call_vendors(maintenance_request, new_session):
+                    print(f"⏸️  [VENDOR CALLING] Vendor calling disabled for request {maintenance_request_id} (skipping)")
+                    return
+                
+                # Check if queue already exists and is in progress
+                existing_queue = new_session.exec(
+                    select(VendorCallQueue).where(
+                        VendorCallQueue.maintenance_request_id == maintenance_request_id
+                    )
+                ).first()
+                
+                if existing_queue and existing_queue.status in ["calling", "completed"]:
+                    print(f"ℹ️  [VENDOR CALLING] Vendor calling already {existing_queue.status} for request {maintenance_request_id}")
+                    return
+                
+                print(f"🚀 [VENDOR CALLING] Starting vendor calling for maintenance request {maintenance_request_id} after {delay_minutes} minute delay")
+                
+                # Create queue and start calling
+                try:
+                    queue = create_vendor_call_queue(maintenance_request, new_session, auto_start=True)
+                    print(f"✅ [VENDOR CALLING] Successfully started vendor calling queue {queue.queue_id}")
+                except Exception as e:
+                    print(f"❌ [VENDOR CALLING] Failed to start vendor calling: {e}")
+                    import traceback
+                    traceback.print_exc()
+        except Exception as e:
+            print(f"❌ [VENDOR CALLING] Error in delayed vendor calling thread: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Start background thread
+    thread = threading.Thread(target=delayed_start, daemon=True)
+    thread.start()
+    print(f"✅ [VENDOR CALLING] Started background thread for delayed vendor calling")
 
 
 def start_vendor_calling(
@@ -122,9 +198,12 @@ def start_vendor_calling(
     Returns:
         Result dictionary with success status and details
     """
+    print(f"🚀 [VENDOR CALLING] Starting vendor calling for maintenance request {maintenance_request_id}")
+    
     # Get maintenance request
     maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
     if not maintenance_request:
+        print(f"❌ [VENDOR CALLING] Maintenance request {maintenance_request_id} not found")
         return {
             "success": False,
             "error": "Maintenance request not found"
@@ -138,22 +217,28 @@ def start_vendor_calling(
     ).first()
     
     if not queue:
+        print(f"📋 [VENDOR CALLING] No queue found, creating new queue for request {maintenance_request_id}")
         # Create queue
         queue = create_vendor_call_queue(maintenance_request, session, auto_start=True)
+    else:
+        print(f"📋 [VENDOR CALLING] Found existing queue {queue.queue_id} with status: {queue.status}")
     
     if queue.status == "completed":
+        print(f"⏸️  [VENDOR CALLING] Vendor calling already completed for request {maintenance_request_id}")
         return {
             "success": False,
             "error": "Vendor calling already completed for this request"
         }
     
     if queue.status == "calling":
+        print(f"⏸️  [VENDOR CALLING] Vendor calling already in progress for request {maintenance_request_id}")
         return {
             "success": False,
             "error": "Vendor calling already in progress"
         }
     
     # Update queue status
+    print(f"🔄 [VENDOR CALLING] Updating queue {queue.queue_id} status to 'calling'")
     queue.status = "calling"
     queue.started_at = datetime.utcnow()
     session.add(queue)
@@ -163,6 +248,8 @@ def start_vendor_calling(
     maintenance_request.vendor_call_status = "calling"
     session.add(maintenance_request)
     session.commit()
+    
+    print(f"✅ [VENDOR CALLING] Queue {queue.queue_id} activated, starting first vendor call")
     
     # Call next vendor
     return call_next_vendor(maintenance_request_id, session)
@@ -182,6 +269,8 @@ def call_next_vendor(
     Returns:
         Result dictionary with call status
     """
+    print(f"📞 [VENDOR CALLING] Calling next vendor for maintenance request {maintenance_request_id}")
+    
     # Get queue
     queue = session.exec(
         select(VendorCallQueue).where(
@@ -190,12 +279,14 @@ def call_next_vendor(
     ).first()
     
     if not queue:
+        print(f"❌ [VENDOR CALLING] Vendor call queue not found for request {maintenance_request_id}")
         return {
             "success": False,
             "error": "Vendor call queue not found"
         }
     
     if queue.status != "calling":
+        print(f"⏸️  [VENDOR CALLING] Queue {queue.queue_id} status is {queue.status}, not 'calling'")
         return {
             "success": False,
             "error": f"Queue status is {queue.status}, not 'calling'"
@@ -203,9 +294,11 @@ def call_next_vendor(
     
     # Get vendor queue
     vendor_queue = queue.vendor_queue or []
+    print(f"📋 [VENDOR CALLING] Queue {queue.queue_id} has {len(vendor_queue)} vendors, current index: {queue.current_vendor_index}")
     
     if queue.current_vendor_index >= len(vendor_queue):
         # No more vendors
+        print(f"⚠️  [VENDOR CALLING] No more vendors in queue {queue.queue_id} for request {maintenance_request_id}")
         queue.status = "completed"
         queue.completed_at = datetime.utcnow()
         session.add(queue)
@@ -228,8 +321,12 @@ def call_next_vendor(
     vendor_id = current_vendor_data["vendor_id"]
     vendor = session.get(Vendor, vendor_id)
     
+    print(f"📞 [VENDOR CALLING] Attempting to call vendor {vendor_id} ({current_vendor_data.get('name', 'Unknown')})")
+    print(f"   Attempt number: {queue.current_vendor_index + 1} of {len(vendor_queue)}")
+    
     if not vendor:
         # Skip invalid vendor
+        print(f"⚠️  [VENDOR CALLING] Vendor {vendor_id} not found, skipping")
         queue.current_vendor_index += 1
         session.add(queue)
         session.commit()
@@ -237,7 +334,7 @@ def call_next_vendor(
     
     # Check if vendor has opted out
     if vendor.opted_out:
-        print(f"🚫 Vendor {vendor_id} ({vendor.name}) has opted out - skipping")
+        print(f"🚫 [VENDOR CALLING] Vendor {vendor_id} ({vendor.name}) has opted out - skipping")
         # Skip opted-out vendor and move to next
         queue.current_vendor_index += 1
         session.add(queue)
@@ -251,7 +348,10 @@ def call_next_vendor(
         .where(VendorCallAttempt.vendor_id == vendor_id)
     ).all()
     
+    print(f"📊 [VENDOR CALLING] Vendor {vendor_id} has {len(attempt_count)} previous attempts (max: {queue.max_retries_per_vendor})")
+    
     if len(attempt_count) >= queue.max_retries_per_vendor:
+        print(f"⚠️  [VENDOR CALLING] Max retries ({queue.max_retries_per_vendor}) reached for vendor {vendor_id}, moving to next vendor")
         # Move to next vendor
         queue.current_vendor_index += 1
         session.add(queue)
@@ -259,14 +359,18 @@ def call_next_vendor(
         return call_next_vendor(maintenance_request_id, session)
     
     # Create call attempt record
+    attempt_number = len(attempt_count) + 1
+    print(f"📝 [VENDOR CALLING] Creating call attempt {attempt_number} for vendor {vendor_id}")
     attempt = VendorCallAttempt(
         maintenance_request_id=maintenance_request_id,
         vendor_id=vendor_id,
         call_status="initiated",
-        attempt_number=len(attempt_count) + 1
+        attempt_number=attempt_number
     )
     session.add(attempt)
     session.commit()
+    session.refresh(attempt)
+    print(f"✅ [VENDOR CALLING] Created call attempt {attempt.attempt_id}")
     
     # Get maintenance request for context
     maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
@@ -281,12 +385,12 @@ def call_next_vendor(
             # Fallback to outbound assistant if vendor assistant not configured
             vendor_assistant_id = pm.vapi_outbound_assistant_id
             if vendor_assistant_id:
-                print(f"⚠️  No vendor calling assistant configured for PM {maintenance_request.property_manager_id}, using outbound assistant")
+                print(f"⚠️  [VENDOR CALLING] No vendor calling assistant configured for PM {maintenance_request.property_manager_id}, using outbound assistant")
         else:
-            print(f"✅ Using vendor calling assistant ID: {vendor_assistant_id}")
+            print(f"✅ [VENDOR CALLING] Using vendor calling assistant ID: {vendor_assistant_id}")
     
     if not vendor_assistant_id:
-        print(f"❌ No assistant ID available for vendor calls (PM {maintenance_request.property_manager_id})")
+        print(f"❌ [VENDOR CALLING] No assistant ID available for vendor calls (PM {maintenance_request.property_manager_id})")
         # Move to next vendor
         queue.current_vendor_index += 1
         session.add(queue)
@@ -324,8 +428,9 @@ def call_next_vendor(
     # Normalize vendor phone number
     try:
         vendor_phone = normalize_phone_number(vendor.phone_number)
+        print(f"📞 [VENDOR CALLING] Normalized vendor phone: {vendor.phone_number} → {vendor_phone}")
     except Exception as e:
-        print(f"❌ Error normalizing vendor phone number: {e}")
+        print(f"❌ [VENDOR CALLING] Error normalizing vendor phone number {vendor.phone_number}: {e}")
         # Move to next vendor
         queue.current_vendor_index += 1
         session.add(queue)
@@ -334,14 +439,16 @@ def call_next_vendor(
     
     # Get or create contact for vendor
     try:
+        print(f"👤 [VENDOR CALLING] Getting/creating contact for vendor {vendor_id} ({vendor_phone})")
         contact = get_or_create_contact(
             phone_number=vendor_phone,
             name=vendor.name,
             email=vendor.email,
             session=session
         )
+        print(f"✅ [VENDOR CALLING] Contact {contact.id} ready for vendor {vendor_id}")
     except Exception as e:
-        print(f"❌ Error creating contact for vendor: {e}")
+        print(f"❌ [VENDOR CALLING] Error creating contact for vendor {vendor_id}: {e}")
         # Move to next vendor
         queue.current_vendor_index += 1
         session.add(queue)
@@ -349,6 +456,10 @@ def call_next_vendor(
         return call_next_vendor(maintenance_request_id, session)
     
     # Trigger outbound call with explicit vendor calling assistant ID
+    print(f"📞 [VENDOR CALLING] Triggering outbound call to vendor {vendor_id} ({vendor_phone})")
+    print(f"   Assistant ID: {vendor_assistant_id}")
+    print(f"   Maintenance Request: {maintenance_request_id}")
+    print(f"   Attempt ID: {attempt.attempt_id}")
     try:
         result = trigger_outbound_call(
             contact=contact,
@@ -366,20 +477,27 @@ def call_next_vendor(
         
         if result["success"]:
             # Update attempt with VAPI call ID
-            attempt.vapi_call_id = result.get("call_id")
+            call_id = result.get("call_id")
+            attempt.vapi_call_id = call_id
             attempt.call_status = "initiated"
             session.add(attempt)
             session.commit()
             
+            print(f"✅ [VENDOR CALLING] Successfully initiated call to vendor {vendor_id}")
+            print(f"   VAPI Call ID: {call_id}")
+            print(f"   Attempt ID: {attempt.attempt_id}")
+            
             return {
                 "success": True,
-                "call_id": result.get("call_id"),
+                "call_id": call_id,
                 "vendor_id": vendor_id,
                 "vendor_name": vendor.name,
                 "attempt_id": attempt.attempt_id
             }
         else:
             # Call failed
+            error_msg = result.get("error", "Call failed")
+            print(f"❌ [VENDOR CALLING] Failed to initiate call to vendor {vendor_id}: {error_msg}")
             attempt.call_status = "failed"
             attempt.completed_at = datetime.utcnow()
             session.add(attempt)
@@ -389,15 +507,19 @@ def call_next_vendor(
             session.add(queue)
             session.commit()
             
+            print(f"➡️  [VENDOR CALLING] Moving to next vendor (index: {queue.current_vendor_index})")
+            
             return {
                 "success": False,
-                "error": result.get("error", "Call failed"),
+                "error": error_msg,
                 "vendor_id": vendor_id,
                 "will_retry": queue.current_vendor_index < len(vendor_queue)
             }
     
     except Exception as e:
-        print(f"❌ Error triggering vendor call: {e}")
+        print(f"❌ [VENDOR CALLING] Exception triggering vendor call to {vendor_id}: {e}")
+        import traceback
+        traceback.print_exc()
         import traceback
         traceback.print_exc()
         
@@ -438,13 +560,22 @@ def handle_vendor_call_outcome(
     Returns:
         Result dictionary
     """
+    print(f"📞 [VENDOR CALLING] Handling call outcome for attempt {vendor_call_attempt_id}")
+    print(f"   Outcome: {outcome}")
+    
     # Get attempt
     attempt = session.get(VendorCallAttempt, vendor_call_attempt_id)
     if not attempt:
+        print(f"❌ [VENDOR CALLING] Vendor call attempt {vendor_call_attempt_id} not found")
         return {
             "success": False,
             "error": "Vendor call attempt not found"
         }
+    
+    print(f"📋 [VENDOR CALLING] Attempt {vendor_call_attempt_id} details:")
+    print(f"   Vendor ID: {attempt.vendor_id}")
+    print(f"   Maintenance Request ID: {attempt.maintenance_request_id}")
+    print(f"   Attempt Number: {attempt.attempt_number}")
     
     # Update attempt
     attempt.outcome = outcome
@@ -491,6 +622,7 @@ def handle_vendor_call_outcome(
     
     if outcome == "accepted":
         # Vendor accepted - assign to maintenance request
+        print(f"✅ [VENDOR CALLING] Vendor {attempt.vendor_id} ACCEPTED the job")
         maintenance_request.assigned_vendor_id = attempt.vendor_id
         maintenance_request.vendor_call_status = "vendor_accepted"
         maintenance_request.status = "in_progress"
@@ -500,9 +632,11 @@ def handle_vendor_call_outcome(
             queue.status = "completed"
             queue.completed_at = datetime.utcnow()
             session.add(queue)
+            print(f"✅ [VENDOR CALLING] Queue {queue.queue_id} marked as completed")
         
         session.add(maintenance_request)
         session.commit()
+        print(f"✅ [VENDOR CALLING] Maintenance request {attempt.maintenance_request_id} assigned to vendor {attempt.vendor_id}")
         
         # Send notification to vendor
         try:
@@ -520,6 +654,7 @@ def handle_vendor_call_outcome(
                 }
                 
                 # Try SMS first, fallback to email
+                print(f"📧 [VENDOR CALLING] Sending notification to vendor {attempt.vendor_id}")
                 result = send_vendor_notification(
                     vendor_id=attempt.vendor_id,
                     maintenance_request_id=attempt.maintenance_request_id,
@@ -529,8 +664,11 @@ def handle_vendor_call_outcome(
                     session=session
                 )
                 
-                if not result.get("success") and vendor.email:
+                if result.get("success"):
+                    print(f"✅ [VENDOR CALLING] SMS notification sent successfully")
+                elif vendor.email:
                     # Fallback to email if SMS failed
+                    print(f"⚠️  [VENDOR CALLING] SMS failed, trying email")
                     result = send_vendor_notification(
                         vendor_id=attempt.vendor_id,
                         maintenance_request_id=attempt.maintenance_request_id,
@@ -539,8 +677,10 @@ def handle_vendor_call_outcome(
                         message_content=message_content,
                         session=session
                     )
+                    if result.get("success"):
+                        print(f"✅ [VENDOR CALLING] Email notification sent successfully")
         except Exception as e:
-            print(f"⚠️  Failed to send notification to vendor: {e}")
+            print(f"⚠️  [VENDOR CALLING] Failed to send notification to vendor {attempt.vendor_id}: {e}")
             # Don't fail assignment if notification fails
         
         return {
@@ -552,10 +692,12 @@ def handle_vendor_call_outcome(
     
     elif outcome == "declined":
         # Vendor declined - move to next vendor
+        print(f"❌ [VENDOR CALLING] Vendor {attempt.vendor_id} DECLINED the job")
         if queue:
             queue.current_vendor_index += 1
             session.add(queue)
             session.commit()
+            print(f"➡️  [VENDOR CALLING] Moving to next vendor (index: {queue.current_vendor_index})")
             
             # Call next vendor
             return call_next_vendor(attempt.maintenance_request_id, session)
@@ -569,15 +711,19 @@ def handle_vendor_call_outcome(
     
     elif outcome in ["no_response", "voicemail"]:
         # No response - check if we should retry
+        print(f"⏳ [VENDOR CALLING] Vendor {attempt.vendor_id} - {outcome.upper()}")
+        print(f"   Attempt number: {attempt.attempt_number} (max: {queue.max_retries_per_vendor if queue else 'N/A'})")
+        
         if queue and attempt.attempt_number < queue.max_retries_per_vendor:
             # Schedule retry after delay
+            print(f"⏰ [VENDOR CALLING] Scheduling retry for attempt {attempt.attempt_id} in {queue.retry_delay_minutes} minutes")
             session.commit()
             enqueue_retry_job(
                 attempt_id=attempt.attempt_id,
                 maintenance_request_id=attempt.maintenance_request_id,
                 retry_delay_minutes=queue.retry_delay_minutes
             )
-            print(f"⏳ Scheduled retry for attempt {attempt.attempt_id} in {queue.retry_delay_minutes} minutes")
+            print(f"✅ [VENDOR CALLING] Retry job enqueued")
             return {
                 "success": True,
                 "outcome": outcome,
@@ -585,10 +731,12 @@ def handle_vendor_call_outcome(
             }
         else:
             # Move to next vendor
+            print(f"➡️  [VENDOR CALLING] Max retries reached or no queue, moving to next vendor")
             if queue:
                 queue.current_vendor_index += 1
                 session.add(queue)
                 session.commit()
+                print(f"➡️  [VENDOR CALLING] Moving to next vendor (index: {queue.current_vendor_index})")
                 return call_next_vendor(attempt.maintenance_request_id, session)
             else:
                 session.commit()

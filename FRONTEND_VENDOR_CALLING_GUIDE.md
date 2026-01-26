@@ -1,5 +1,7 @@
 # Frontend Implementation Guide: Automated Vendor Calling for Maintenance Requests
 
+> **Note:** This feature has been simplified. Vendor calling assistant ID is configured by the technical team in Supabase. SMS/reminder systems are not part of this feature.
+
 ## Table of Contents
 1. [Feature Overview](#feature-overview)
 2. [Architecture & Data Models](#architecture--data-models)
@@ -483,6 +485,7 @@ GET /properties/{property_id}/vendor-settings
 Response: PropertyVendorSettings object (or defaults if not configured)
 ```
 
+
 ---
 
 ## UI Components & Pages
@@ -733,14 +736,14 @@ interface VendorCallingState {
    - All endpoints use maintenance_request_id
    - Backend automatically uses property_id from maintenance request for vendor matching
 
-### Step 4: Add Real-time Updates
+### Step 5: Add Real-time Updates
 
 1. Implement polling for active vendor calls
 2. Update call status every 5-10 seconds for active calls
 3. Show loading states during calls
 4. Display new call attempts as they occur
 
-### Step 5: Add Notifications
+### Step 6: Add Notifications
 
 1. Show toast notifications when:
    - Vendor accepts
@@ -1129,7 +1132,7 @@ const VendorCallingSection = ({ maintenanceRequest, maintenanceRequestId }) => {
 };
 ```
 
-### Example 4: Display Call Attempts Timeline
+### Example 4: Display Call Attempts Timeline (Enhanced with New Features)
 
 ```typescript
 const CallAttemptsTimeline = ({ attempts }: { attempts: VendorCallAttempt[] }) => {
@@ -1151,6 +1154,7 @@ const CallAttemptsTimeline = ({ attempts }: { attempts: VendorCallAttempt[] }) =
                 <OutcomeBadge outcome={attempt.outcome} />
               )}
             </div>
+            
             {attempt.is_available !== null && (
               <div className="availability">
                 Available: {attempt.is_available ? 'Yes' : 'No'}
@@ -1456,12 +1460,37 @@ https://leasing-copilot-mvp.onrender.com
 - See `VENDOR_CALLING_FEATURE.md` for backend implementation details
 - See API endpoint documentation above for request/response formats
 
+### Technical Notes
+
+**Vendor Calling Assistant ID:**
+- Configured by technical team directly in Supabase
+- No frontend configuration needed
+- Backend automatically uses the configured assistant ID for vendor calls
+
 ### Support
 For questions or issues, contact the backend team with:
 - API endpoint
 - Request payload
 - Response/error details
 - Expected vs actual behavior
+
+---
+
+## Implementation Notes
+
+### Simplified Feature Scope
+
+This feature focuses on **core vendor calling automation**:
+- ✅ Vendor management (PM-level)
+- ✅ Property-vendor assignment
+- ✅ Automatic vendor calling on maintenance requests
+- ✅ Call status tracking and display
+- ✅ Vendor response capture
+
+**Not included in frontend:**
+- ❌ Vendor calling assistant ID configuration (handled by technical team directly in Supabase)
+- ❌ SMS/email notification sending (backend handles automatically, no frontend UI needed)
+- ❌ Reminder systems (not part of this feature)
 
 ---
 
@@ -1479,19 +1508,26 @@ For questions or issues, contact the backend team with:
 10. ✅ Add loading states and empty states
 11. ✅ Polish UI/UX
 
+**Note:** Vendor calling assistant ID is configured by technical team in Supabase - no frontend action needed.
+
 ## Key Takeaways for Frontend Implementation
 
-### 1. Vendor Creation vs Assignment
+### 1. Vendor Calling Assistant ID
+- **Configured by technical team** in Supabase (not in frontend)
+- Backend automatically uses the configured assistant ID
+- No frontend configuration or validation needed
+
+### 2. Vendor Creation vs Assignment
 - **Vendor Creation**: PM-level, done once, reusable
 - **Vendor Assignment**: Property-level, done per property, configurable per property
 
-### 2. Maintenance Request Flow
+### 3. Maintenance Request Flow
 - Maintenance request **already has property_id** (from tenant)
 - **No need to select property** when starting vendor calls
 - Backend automatically uses `property_id` from maintenance request
 - System matches vendors assigned to that property only
 
-### 3. UI Organization
+### 4. UI Organization
 - **Vendor Management Page**: Shows all PM's vendors (not property-specific)
 - **Property Detail Page → Vendors Tab**: Shows vendors for THIS property
 - **Maintenance Request Page**: Shows vendors being called (auto-matched from property)

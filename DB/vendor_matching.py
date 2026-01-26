@@ -204,14 +204,21 @@ def match_vendors_to_maintenance_request(
     Returns:
         List of vendor dictionaries sorted by priority, ready for call queue
     """
+    print(f"🔍 [VENDOR MATCHING] Matching vendors for maintenance request {maintenance_request.maintenance_request_id}")
+    print(f"   Property ID: {maintenance_request.property_id}")
+    print(f"   Category: {maintenance_request.category}")
+    print(f"   Priority: {maintenance_request.priority}")
+    
     # Map category to service type
     service_type = map_category_to_service_type(
         maintenance_request.category,
         maintenance_request.priority
     )
+    print(f"   Mapped service type: {service_type}")
     
     # Check if emergency
     is_emergency = maintenance_request.priority.lower() == "urgent"
+    print(f"   Emergency: {is_emergency}")
     
     # Get vendors for property
     vendors = get_vendors_for_property(
@@ -221,10 +228,11 @@ def match_vendors_to_maintenance_request(
         emergency_only=is_emergency,
         include_inactive=False
     )
+    print(f"   Found {len(vendors)} vendor(s) for service type '{service_type}'")
     
     # If no vendors found for specific service type, try "general"
     if not vendors and service_type != "general":
-        print(f"⚠️  No {service_type} vendors found, trying 'general' service type")
+        print(f"⚠️  [VENDOR MATCHING] No {service_type} vendors found, trying 'general' service type")
         vendors = get_vendors_for_property(
             property_id=maintenance_request.property_id,
             service_type="general",
@@ -232,9 +240,11 @@ def match_vendors_to_maintenance_request(
             emergency_only=is_emergency,
             include_inactive=False
         )
+        print(f"   Found {len(vendors)} 'general' vendor(s)")
     
     # Filter by operating hours if requested
     if respect_operating_hours:
+        print(f"🕐 [VENDOR MATCHING] Filtering vendors by operating hours")
         available_vendors = []
         unavailable_vendors = []
         
@@ -244,6 +254,8 @@ def match_vendors_to_maintenance_request(
                 available_vendors.append(vendor_data)
             else:
                 unavailable_vendors.append(vendor_data)
+        
+        print(f"   Available now: {len(available_vendors)}, Unavailable: {len(unavailable_vendors)}")
         
         # Prioritize available vendors, but include unavailable ones at the end
         vendors = available_vendors + unavailable_vendors
@@ -256,6 +268,10 @@ def match_vendors_to_maintenance_request(
             "priority": vendor_data["priority"],
             "name": vendor_data["name"],
         })
+    
+    print(f"✅ [VENDOR MATCHING] Matched {len(vendors)} vendor(s) for maintenance request {maintenance_request.maintenance_request_id}")
+    for i, v in enumerate(vendor_queue, 1):
+        print(f"   {i}. Vendor {v['vendor_id']} ({v['name']}) - Priority: {v['priority']}")
     
     return vendors
 
@@ -299,17 +315,28 @@ def should_auto_call_vendors(
     Returns:
         True if auto-calling should be enabled, False otherwise
     """
+    print(f"🔍 [VENDOR MATCHING] Checking if auto-calling should be enabled for request {maintenance_request.maintenance_request_id}")
+    
     # Check property settings
     settings = get_property_vendor_settings(maintenance_request.property_id, session)
     
     if settings:
+        print(f"   Property settings found: auto_call_enabled={settings.auto_call_enabled}, emergency_only={settings.emergency_only}")
+        
         # Check if auto-call is disabled
         if not settings.auto_call_enabled:
+            print(f"   ❌ Auto-calling disabled in property settings")
             return False
         
         # Check if emergency-only mode
         if settings.emergency_only:
-            return maintenance_request.priority.lower() == "urgent"
+            is_urgent = maintenance_request.priority.lower() == "urgent"
+            print(f"   Emergency-only mode: request priority is '{maintenance_request.priority}' (urgent={is_urgent})")
+            return is_urgent
+    else:
+        print(f"   No property settings found, using request-level setting")
     
     # Default: auto-call enabled (unless explicitly disabled in request)
-    return maintenance_request.vendor_call_automation_enabled
+    result = maintenance_request.vendor_call_automation_enabled
+    print(f"   ✅ Auto-calling enabled: {result}")
+    return result

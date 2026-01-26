@@ -1899,27 +1899,8 @@ async def submit_maintenance_request(request: VapiRequest, http_request: Request
                     print(f"✅ Created maintenance request ID {maintenance_request.maintenance_request_id}")
                     print(f"   Priority: {priority} (auto-detected: {priority not in args.get('priority', '')})")
                     print(f"   Category: {category} (auto-detected: {category not in args.get('category', '')})")
-                    
-                    # Trigger vendor calling if enabled
-                    try:
-                        from DB.vendor_matching import should_auto_call_vendors
-                        from DB.vendor_calling import create_vendor_call_queue
-                        
-                        if should_auto_call_vendors(maintenance_request, session):
-                            print(f"📞 Auto-calling vendors for maintenance request {maintenance_request.maintenance_request_id}")
-                            try:
-                                queue = create_vendor_call_queue(maintenance_request, session, auto_start=True)
-                                print(f"✅ Started vendor calling queue (ID: {queue.queue_id})")
-                            except Exception as e:
-                                print(f"⚠️  Failed to start vendor calling: {e}")
-                                import traceback
-                                traceback.print_exc()
-                                # Don't fail the request creation if vendor calling fails
-                        else:
-                            print(f"⏸️  Vendor auto-calling disabled for this request")
-                    except Exception as e:
-                        print(f"⚠️  Error checking vendor calling settings: {e}")
-                        # Don't fail the request creation if vendor calling check fails
+                    print(f"   VAPI Call ID: {call_id}")
+                    print(f"ℹ️  Vendor calling will be triggered 1 minute after end-of-call-report webhook is received")
                     
                     # Return success message (user-friendly)
                     property_address = tenant_info.get('property_address') or "your property"
@@ -10571,6 +10552,48 @@ async def vapi_webhook_hyphen(request: Request):
             if updated:
                 session.commit()
                 session.refresh(call_record)
+            
+            # ========================================================================
+            # DELAYED VENDOR CALLING TRIGGER (1 minute after end-of-call-report)
+            # ========================================================================
+            # Check if this is an inbound call that created a maintenance request
+            # If so, schedule vendor calling 1 minute after the call ends
+            if call_record.call_direction == "inbound" and call_id:
+                try:
+                    from DB.db import MaintenanceRequest
+                    from DB.vendor_matching import should_auto_call_vendors
+                    from DB.vendor_calling import schedule_delayed_vendor_calling
+                    
+                    # Find maintenance request linked to this call
+                    maintenance_request = session.exec(
+                        select(MaintenanceRequest).where(
+                            MaintenanceRequest.vapi_call_id == call_id
+                        )
+                    ).first()
+                    
+                    if maintenance_request:
+                        print(f"📋 [VENDOR CALLING] Found maintenance request {maintenance_request.maintenance_request_id} for call {call_id}")
+                        
+                        # Check if vendor calling should be enabled
+                        if should_auto_call_vendors(maintenance_request, session):
+                            print(f"⏰ [VENDOR CALLING] Scheduling vendor calling for maintenance request {maintenance_request.maintenance_request_id} in 1 minute")
+                            
+                            # Schedule delayed vendor calling (1 minute delay)
+                            schedule_delayed_vendor_calling(
+                                maintenance_request_id=maintenance_request.maintenance_request_id,
+                                delay_minutes=1,
+                                session=session
+                            )
+                            print(f"✅ [VENDOR CALLING] Scheduled vendor calling to start in 1 minute")
+                        else:
+                            print(f"⏸️  [VENDOR CALLING] Vendor auto-calling disabled for maintenance request {maintenance_request.maintenance_request_id}")
+                    else:
+                        print(f"ℹ️  [VENDOR CALLING] No maintenance request found for call {call_id} (may not be a maintenance request call)")
+                except Exception as e:
+                    print(f"⚠️  [VENDOR CALLING] Error scheduling delayed vendor calling: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Don't fail webhook if vendor calling scheduling fails
         
         return {"status": "ok", "call_id": call_id, "transcript_stored": bool(full_transcript)}
     
