@@ -6,13 +6,55 @@ This feature enables automated vendor calling when tenants submit maintenance re
 
 ## Architecture
 
+### Key Architecture Points
+
+**Important:** 
+- **One PM can manage multiple properties**
+- **Each property can have multiple vendors** (same vendor can be assigned to multiple properties)
+- **Vendors are created at PM level** (PM owns/manages the vendor pool)
+- **Vendors are assigned to specific properties** via PropertyVendor links
+- **Maintenance requests are already linked to properties** (via tenant records)
+- **Vendor matching uses the property_id from the maintenance request**
+
+### Data Flow
+
+```
+Property Manager (PM)
+  ├── Property 1
+  │   ├── Vendor A (plumber, priority 1)
+  │   ├── Vendor B (plumber, priority 2)
+  │   └── Vendor C (electrician, priority 1)
+  ├── Property 2
+  │   ├── Vendor A (plumber, priority 1) ← Same vendor, different property
+  │   └── Vendor D (hvac, priority 1)
+  └── Property 3
+      └── Vendor E (general, priority 1)
+
+Tenant (linked to Property 1)
+  └── Maintenance Request (has property_id = Property 1)
+      └── System matches vendors from Property 1 only
+          └── Calls Vendor A (plumber) first, then Vendor B if needed
+```
+
 ### Database Models
 
 1. **Vendor** - Stores vendor information (name, service type, phone, operating hours, etc.)
-2. **PropertyVendor** - Links vendors to properties with priority and service type
+   - **Belongs to Property Manager** (`property_manager_id`)
+   - **Can be assigned to multiple properties** via PropertyVendor links
+   
+2. **PropertyVendor** - Links vendors to specific properties with priority and service type
+   - **Links Vendor to Property** (many-to-many relationship)
+   - **Defines priority per property** (same vendor can have different priorities for different properties)
+   - **Defines service type per property** (same vendor can provide different services per property)
+   
 3. **VendorCallQueue** - Manages call queue for each maintenance request
+   - **Linked to Maintenance Request** (which already has property_id)
+   
 4. **VendorCallAttempt** - Tracks individual call attempts and outcomes
+   - **Linked to Maintenance Request and Vendor**
+   
 5. **PropertyVendorSettings** - Property-level settings for auto-calling behavior
+   - **One per property** (defines auto-call behavior for that specific property)
 
 ### Core Modules
 
@@ -52,7 +94,7 @@ This feature enables automated vendor calling when tenants submit maintenance re
 
 ### 1. Pre-Setup (PM Dashboard)
 
-PM configures vendors per property:
+**Step 1: PM creates vendors (PM-level, reusable across properties)**
 
 ```json
 POST /vendors
@@ -70,33 +112,69 @@ POST /vendors
 }
 ```
 
-Link vendor to property:
+**Note:** Vendor is created at PM level. It's not yet assigned to any property.
 
+**Step 2: PM assigns vendors to specific properties**
+
+For Property 1:
 ```json
 POST /properties/123/vendors
 {
   "vendor_id": 1,
   "service_type": "plumber",
   "priority": 1,
-  "notes": "Primary plumber for this property"
+  "notes": "Primary plumber for Property 1"
 }
 ```
 
+For Property 2 (same vendor, different priority):
+```json
+POST /properties/456/vendors
+{
+  "vendor_id": 1,  // Same vendor
+  "service_type": "plumber",
+  "priority": 2,  // Different priority for Property 2
+  "notes": "Secondary plumber for Property 2"
+}
+```
+
+**Key Points:**
+- Same vendor can be assigned to multiple properties
+- Each property can have different priority for the same vendor
+- Each property can have different service type for the same vendor
+
 ### 2. Tenant Submits Maintenance Request
 
-When a tenant submits a maintenance request via phone/text, the system:
-1. Creates the maintenance request
-2. Checks if auto-calling is enabled (property settings)
-3. If enabled, automatically creates a vendor call queue and starts calling
+**Important:** Maintenance requests are already linked to properties via tenant records.
+
+When a tenant submits a maintenance request via phone/text:
+1. System identifies tenant (from phone/email/name)
+2. Tenant record already has `property_id` (tenant is renting that property)
+3. Maintenance request is created with:
+   - `tenant_id` (links to tenant)
+   - `property_id` (from tenant record - **this is the key for vendor matching**)
+   - `property_manager_id` (from tenant record)
+4. System checks if auto-calling is enabled for that **property** (property settings)
+5. If enabled, automatically creates a vendor call queue using vendors assigned to **that property**
 
 ### 3. Vendor Matching
 
-The system matches vendors based on:
-- Property ID
-- Issue category (mapped to service type: plumbing → plumber, electrical → electrician, etc.)
-- Priority (urgent requests may use emergency vendors)
-- Operating hours (respects vendor availability)
-- Priority order (1st call, 2nd call, etc.)
+**The system matches vendors based on the property_id from the maintenance request:**
+
+1. **Get property_id** from maintenance request (already linked via tenant)
+2. **Get issue category** from maintenance request (e.g., "plumbing", "electrical")
+3. **Map category to service type** (plumbing → plumber, electrical → electrician, etc.)
+4. **Fetch vendors for that specific property** matching the service type:
+   - Query `PropertyVendor` table where `property_id` = maintenance request property_id
+   - Filter by `service_type` = mapped service type
+   - Exclude opted-out vendors
+   - Exclude inactive vendors
+5. **Sort by priority** (1st call, 2nd call, etc.) - priority is per property
+6. **Filter by emergency availability** (if urgent request)
+7. **Respect operating hours** (optional filter)
+8. **Build call queue** with vendors in priority order
+
+**Key Point:** Vendors are matched based on the **property** the maintenance request is for, not the PM. A PM's vendors are only called if they're assigned to that specific property.
 
 ### 4. Automated Calling Flow
 
@@ -183,6 +261,8 @@ The webhook handler (`/vapi-webhook`) automatically:
 3. Processes outcome via `handle_vendor_call_outcome()`
 4. Updates maintenance request and call queue
 5. Moves to next vendor if needed
+
+**Important:** The webhook uses the `vendorCallAttemptId` from metadata to identify which vendor call attempt this is. The attempt is already linked to the maintenance request, which has the `property_id` for vendor matching.
 
 ## Configuration
 
@@ -439,6 +519,49 @@ All endpoints return VAPI-compatible responses:
 - **Error:** `{"results": [{"toolCallId": "...", "result": {"success": false, "error": "..."}}]}`
 
 If a function fails, the response includes: *"I'm having technical difficulties. Let me have our property manager follow up with you directly."*
+
+## Architecture Summary: PM → Properties → Vendors
+
+### Three-Level Hierarchy
+
+```
+Level 1: Property Manager (PM)
+  └── Owns/manages vendor pool
+      └── Vendors are reusable across properties
+
+Level 2: Properties
+  └── Each property has vendors assigned to it
+      └── Same vendor can be assigned to multiple properties
+      └── Each property-vendor link has:
+          - Service type (for that property)
+          - Priority (for that property)
+          - Notes (property-specific)
+
+Level 3: Maintenance Requests
+  └── Already linked to property (via tenant)
+      └── System automatically matches vendors from that property
+```
+
+### Key Points
+
+1. **Vendors are PM-level**: Created once, owned by PM, reusable
+2. **Vendors are property-specific when assigned**: Each property has its own vendor list
+3. **Maintenance requests are property-linked**: Already have `property_id` from tenant
+4. **Vendor matching is automatic**: Uses `property_id` from maintenance request
+5. **No manual property selection needed**: System knows which property from maintenance request
+
+### Example Flow
+
+1. **PM creates Vendor A** (ABC Plumbing) → Added to PM's vendor pool
+2. **PM assigns Vendor A to Property 1** → plumber, priority 1
+3. **PM assigns Vendor A to Property 2** → plumber, priority 2 (different priority)
+4. **Tenant (renting Property 1) submits maintenance request** → Request has `property_id = Property 1`
+5. **System automatically**:
+   - Gets `property_id` from maintenance request
+   - Finds vendors assigned to Property 1
+   - Matches by service type (plumbing → plumber)
+   - Calls Vendor A (priority 1) for Property 1
+6. **If Vendor A declines**, system moves to next vendor for Property 1 (if any)
 
 ## Future Enhancements
 

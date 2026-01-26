@@ -266,6 +266,28 @@ def call_next_vendor(
     # Get maintenance request for context
     maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
     
+    # Get vendor calling assistant ID from Property Manager
+    from .db import PropertyManager
+    pm = session.get(PropertyManager, maintenance_request.property_manager_id)
+    vendor_assistant_id = None
+    if pm:
+        vendor_assistant_id = pm.vapi_vendor_calling_assistant_id
+        if not vendor_assistant_id:
+            # Fallback to outbound assistant if vendor assistant not configured
+            vendor_assistant_id = pm.vapi_outbound_assistant_id
+            if vendor_assistant_id:
+                print(f"⚠️  No vendor calling assistant configured for PM {maintenance_request.property_manager_id}, using outbound assistant")
+        else:
+            print(f"✅ Using vendor calling assistant ID: {vendor_assistant_id}")
+    
+    if not vendor_assistant_id:
+        print(f"❌ No assistant ID available for vendor calls (PM {maintenance_request.property_manager_id})")
+        # Move to next vendor
+        queue.current_vendor_index += 1
+        session.add(queue)
+        session.commit()
+        return call_next_vendor(maintenance_request_id, session)
+    
     # Prepare call metadata
     call_metadata = {
         "maintenance_request_id": maintenance_request_id,
@@ -321,10 +343,11 @@ def call_next_vendor(
         session.commit()
         return call_next_vendor(maintenance_request_id, session)
     
-    # Trigger outbound call
+    # Trigger outbound call with explicit vendor calling assistant ID
     try:
         result = trigger_outbound_call(
             contact=contact,
+            assistant_id=vendor_assistant_id,  # ✅ EXPLICIT: Vendor calling assistant
             property_manager_id=maintenance_request.property_manager_id,
             session=session,
             metadata={

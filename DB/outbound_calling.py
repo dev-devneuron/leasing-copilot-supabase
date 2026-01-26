@@ -2320,11 +2320,27 @@ def trigger_outbound_call(
     if not assistant_id and property_manager_id:
         try:
             pm = session.get(PropertyManager, property_manager_id)
-            if pm and pm.vapi_outbound_assistant_id:
-                assistant_id = pm.vapi_outbound_assistant_id
-                print(f"✅ Using outbound assistant ID from PropertyManager {property_manager_id}: {assistant_id}")
+            if pm:
+                # Check metadata to determine call type (backup logic if assistant_id not passed explicitly)
+                is_vendor_call = metadata and metadata.get("vendorCall") == True
+                
+                if is_vendor_call:
+                    # Prefer vendor calling assistant
+                    assistant_id = pm.vapi_vendor_calling_assistant_id
+                    if not assistant_id:
+                        print(f"⚠️  No vendor calling assistant configured for PM {property_manager_id}, falling back to outbound assistant")
+                        assistant_id = pm.vapi_outbound_assistant_id
+                    else:
+                        print(f"✅ Using vendor calling assistant ID from PropertyManager {property_manager_id}: {assistant_id}")
+                else:
+                    # Customer re-engagement call
+                    assistant_id = pm.vapi_outbound_assistant_id
+                    if assistant_id:
+                        print(f"✅ Using outbound assistant ID from PropertyManager {property_manager_id}: {assistant_id}")
+                    else:
+                        print(f"⚠️  PropertyManager {property_manager_id} has no vapi_outbound_assistant_id configured")
             else:
-                print(f"⚠️  PropertyManager {property_manager_id} has no vapi_outbound_assistant_id configured")
+                print(f"⚠️  PropertyManager {property_manager_id} not found")
         except Exception as e:
             print(f"⚠️  Error loading PropertyManager {property_manager_id}: {e}")
     

@@ -132,12 +132,13 @@ class PropertyManager(SQLModel, table=True):
     
     # VAPI Assistant IDs
     vapi_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for inbound calls/chat requests
-    vapi_outbound_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for outbound calls
+    vapi_outbound_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for outbound calls (customer re-engagement)
+    vapi_vendor_calling_assistant_id: Optional[str] = Field(default=None, index=True)  # VAPI assistant ID for vendor calling automation
     
     # Timestamps
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
-
+    
     # Relationships
     managed_realtors: List["Realtor"] = Relationship(back_populates="property_manager")
     sources: List["Source"] = Relationship(back_populates="property_manager")
