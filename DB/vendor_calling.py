@@ -422,17 +422,25 @@ def call_next_vendor(
     pm = session.get(PropertyManager, maintenance_request.property_manager_id)
     vendor_assistant_id = None
     if pm:
+        print(f"🔍 [VENDOR CALLING] PropertyManager {pm.property_manager_id} found")
+        print(f"   vapi_vendor_calling_assistant_id: {pm.vapi_vendor_calling_assistant_id}")
+        print(f"   vapi_outbound_assistant_id: {pm.vapi_outbound_assistant_id}")
         vendor_assistant_id = pm.vapi_vendor_calling_assistant_id
         if not vendor_assistant_id:
             # Fallback to outbound assistant if vendor assistant not configured
             vendor_assistant_id = pm.vapi_outbound_assistant_id
             if vendor_assistant_id:
-                print(f"⚠️  [VENDOR CALLING] No vendor calling assistant configured for PM {maintenance_request.property_manager_id}, using outbound assistant")
+                print(f"⚠️  [VENDOR CALLING] No vendor calling assistant configured for PM {maintenance_request.property_manager_id}, using outbound assistant: {vendor_assistant_id}")
+            else:
+                print(f"❌ [VENDOR CALLING] No vendor calling assistant AND no outbound assistant configured for PM {maintenance_request.property_manager_id}")
         else:
             print(f"✅ [VENDOR CALLING] Using vendor calling assistant ID: {vendor_assistant_id}")
+    else:
+        print(f"❌ [VENDOR CALLING] PropertyManager {maintenance_request.property_manager_id} not found")
     
     if not vendor_assistant_id:
         print(f"❌ [VENDOR CALLING] No assistant ID available for vendor calls (PM {maintenance_request.property_manager_id})")
+        print(f"   This will cause trigger_outbound_call to fail. Please configure vapi_vendor_calling_assistant_id or vapi_outbound_assistant_id for PropertyManager {maintenance_request.property_manager_id}")
         # Move to next vendor
         queue.current_vendor_index += 1
         session.add(queue)
@@ -517,7 +525,23 @@ def call_next_vendor(
             }
         )
         
-        if result["success"]:
+        print(f"📞 [VENDOR CALLING] trigger_outbound_call result: {json.dumps(result, indent=2) if result else 'None'}")
+        
+        if not result:
+            print(f"❌ [VENDOR CALLING] trigger_outbound_call returned None - this should not happen")
+            attempt.call_status = "failed"
+            attempt.completed_at = datetime.utcnow()
+            session.add(attempt)
+            queue.current_vendor_index += 1
+            session.add(queue)
+            session.commit()
+            return {
+                "success": False,
+                "error": "trigger_outbound_call returned None",
+                "vendor_id": vendor_id
+            }
+        
+        if result.get("success"):
             # Update attempt with VAPI call ID
             call_id = result.get("call_id")
             attempt.vapi_call_id = call_id
