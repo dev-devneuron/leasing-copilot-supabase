@@ -7,18 +7,23 @@ This module handles:
 - Handling call outcomes (accepted, declined, no answer)
 - Retry logic and fallback to next vendor
 - Integration with VAPI outbound calling system
+- Background workers for retry delays and callback scheduling
+- Webhook timeout handling
 """
 
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 import json
-from sqlmodel import Session, select
+import threading
+import queue as queue_module
+from sqlmodel import Session, select, or_
 from .db import (
     Vendor,
     VendorCallQueue,
     VendorCallAttempt,
     MaintenanceRequest,
     PropertyManager,
+    VendorCallbackSchedule,
     engine
 )
 from .vendor_matching import (
@@ -499,6 +504,45 @@ def handle_vendor_call_outcome(
         session.add(maintenance_request)
         session.commit()
         
+        # Send notification to vendor
+        try:
+            vendor = session.get(Vendor, attempt.vendor_id)
+            if vendor:
+                # Build notification message
+                message_content = {
+                    "subject": "Maintenance Job Assignment Confirmation",
+                    "body": f"Hello {vendor.name},\n\nYou have been assigned to maintenance request #{attempt.maintenance_request_id}. "
+                           f"Please review the details and confirm your availability.\n\n"
+                           f"Issue: {maintenance_request.issue_description}\n"
+                           f"Location: {maintenance_request.location}\n"
+                           f"Priority: {maintenance_request.priority}\n\n"
+                           f"Thank you!"
+                }
+                
+                # Try SMS first, fallback to email
+                result = send_vendor_notification(
+                    vendor_id=attempt.vendor_id,
+                    maintenance_request_id=attempt.maintenance_request_id,
+                    notification_type="job_assignment",
+                    delivery_method="sms",
+                    message_content=message_content,
+                    session=session
+                )
+                
+                if not result.get("success") and vendor.email:
+                    # Fallback to email if SMS failed
+                    result = send_vendor_notification(
+                        vendor_id=attempt.vendor_id,
+                        maintenance_request_id=attempt.maintenance_request_id,
+                        notification_type="job_assignment",
+                        delivery_method="email",
+                        message_content=message_content,
+                        session=session
+                    )
+        except Exception as e:
+            print(f"⚠️  Failed to send notification to vendor: {e}")
+            # Don't fail assignment if notification fails
+        
         return {
             "success": True,
             "outcome": "accepted",
@@ -526,14 +570,19 @@ def handle_vendor_call_outcome(
     elif outcome in ["no_response", "voicemail"]:
         # No response - check if we should retry
         if queue and attempt.attempt_number < queue.max_retries_per_vendor:
-            # Retry same vendor after delay
+            # Schedule retry after delay
             session.commit()
-            # Note: Actual retry would be handled by a background job or scheduled task
-            # For now, we'll move to next vendor
-            queue.current_vendor_index += 1
-            session.add(queue)
-            session.commit()
-            return call_next_vendor(attempt.maintenance_request_id, session)
+            enqueue_retry_job(
+                attempt_id=attempt.attempt_id,
+                maintenance_request_id=attempt.maintenance_request_id,
+                retry_delay_minutes=queue.retry_delay_minutes
+            )
+            print(f"⏳ Scheduled retry for attempt {attempt.attempt_id} in {queue.retry_delay_minutes} minutes")
+            return {
+                "success": True,
+                "outcome": outcome,
+                "message": f"Retry scheduled in {queue.retry_delay_minutes} minutes"
+            }
         else:
             # Move to next vendor
             if queue:
@@ -641,3 +690,476 @@ def cancel_vendor_calling(
         "success": True,
         "message": "Vendor calling cancelled"
     }
+
+
+# ============================================================================
+# Background Workers for Retry Delays and Callback Scheduling
+# ============================================================================
+
+# Retry queue and worker
+_retry_queue = queue_module.Queue()
+_retry_in_flight = set()
+_retry_lock = threading.Lock()
+_retry_worker_started = False
+
+
+def _retry_worker_loop() -> None:
+    """
+    Background worker loop that processes retry jobs for vendor calls.
+    Waits for retry_delay_minutes before retrying a vendor call.
+    """
+    print("🚀 Vendor call retry worker started")
+    while True:
+        try:
+            job = _retry_queue.get(timeout=60)  # Check queue every minute
+            if job is None:
+                continue
+            
+            attempt_id = job.get("attempt_id")
+            maintenance_request_id = job.get("maintenance_request_id")
+            retry_delay_minutes = job.get("retry_delay_minutes", 15)
+            
+            print(f"⏳ Retry job queued for attempt {attempt_id}, waiting {retry_delay_minutes} minutes...")
+            
+            # Wait for retry delay
+            import time
+            time.sleep(retry_delay_minutes * 60)
+            
+            # Check if attempt still needs retry
+            with Session(engine) as session:
+                attempt = session.get(VendorCallAttempt, attempt_id)
+                if not attempt:
+                    print(f"⚠️  Attempt {attempt_id} not found, skipping retry")
+                    continue
+                
+                # Check if outcome already determined
+                if attempt.outcome and attempt.outcome not in ["no_response", "voicemail"]:
+                    print(f"✅ Attempt {attempt_id} already has outcome {attempt.outcome}, skipping retry")
+                    continue
+                
+                # Check if queue still active
+                queue = session.exec(
+                    select(VendorCallQueue).where(
+                        VendorCallQueue.maintenance_request_id == maintenance_request_id
+                    )
+                ).first()
+                
+                if not queue or queue.status != "calling":
+                    print(f"⚠️  Queue for request {maintenance_request_id} is not active, skipping retry")
+                    continue
+                
+                # Retry the same vendor
+                print(f"🔄 Retrying vendor call for attempt {attempt_id}")
+                call_next_vendor(maintenance_request_id, session)
+            
+        except queue_module.Empty:
+            continue
+        except Exception as e:
+            print(f"❌ Error in retry worker: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            with _retry_lock:
+                if attempt_id:
+                    _retry_in_flight.discard(str(attempt_id))
+            _retry_queue.task_done()
+
+
+def _ensure_retry_worker_started() -> None:
+    """Ensure the retry worker thread is started once."""
+    global _retry_worker_started
+    with _retry_lock:
+        if not _retry_worker_started:
+            worker = threading.Thread(target=_retry_worker_loop, daemon=True)
+            worker.start()
+            _retry_worker_started = True
+
+
+def enqueue_retry_job(attempt_id: int, maintenance_request_id: int, retry_delay_minutes: int) -> None:
+    """
+    Enqueue a retry job for a vendor call attempt.
+    
+    Args:
+        attempt_id: VendorCallAttempt ID to retry
+        maintenance_request_id: Maintenance request ID
+        retry_delay_minutes: Minutes to wait before retry
+    """
+    _ensure_retry_worker_started()
+    with _retry_lock:
+        key = str(attempt_id)
+        if key in _retry_in_flight:
+            return  # Already queued
+        _retry_in_flight.add(key)
+        _retry_queue.put({
+            "attempt_id": attempt_id,
+            "maintenance_request_id": maintenance_request_id,
+            "retry_delay_minutes": retry_delay_minutes
+        })
+        print(f"✅ Enqueued retry job for attempt {attempt_id} (delay: {retry_delay_minutes} min)")
+
+
+# Callback scheduling queue and worker
+_callback_queue = queue_module.Queue()
+_callback_in_flight = set()
+_callback_lock = threading.Lock()
+_callback_worker_started = False
+
+
+def _callback_worker_loop() -> None:
+    """
+    Background worker loop that processes scheduled callbacks.
+    Checks for due callbacks and triggers vendor calls.
+    """
+    print("🚀 Vendor callback scheduler worker started")
+    while True:
+        try:
+            # Check for due callbacks every minute
+            import time
+            time.sleep(60)
+            
+            with Session(engine) as session:
+                now = datetime.utcnow()
+                
+                # Find callbacks that are due (within next 2 minutes to account for processing time)
+                due_callbacks = session.exec(
+                    select(VendorCallbackSchedule).where(
+                        VendorCallbackSchedule.status == "scheduled",
+                        VendorCallbackSchedule.callback_datetime <= now + timedelta(minutes=2)
+                    )
+                ).all()
+                
+                for callback in due_callbacks:
+                    if callback.callback_datetime > now:
+                        continue  # Not quite due yet
+                    
+                    print(f"📞 Executing scheduled callback {callback.callback_id} for maintenance request {callback.maintenance_request_id}")
+                    
+                    # Update callback status
+                    callback.status = "completed"
+                    callback.completed_at = datetime.utcnow()
+                    session.add(callback)
+                    
+                    # Trigger vendor call
+                    try:
+                        call_next_vendor(callback.maintenance_request_id, session)
+                        session.commit()
+                        print(f"✅ Callback {callback.callback_id} executed successfully")
+                    except Exception as e:
+                        print(f"❌ Error executing callback {callback.callback_id}: {e}")
+                        callback.status = "failed"
+                        session.commit()
+                        import traceback
+                        traceback.print_exc()
+                
+        except Exception as e:
+            print(f"❌ Error in callback worker: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+def _ensure_callback_worker_started() -> None:
+    """Ensure the callback worker thread is started once."""
+    global _callback_worker_started
+    with _callback_lock:
+        if not _callback_worker_started:
+            worker = threading.Thread(target=_callback_worker_loop, daemon=True)
+            worker.start()
+            _callback_worker_started = True
+
+
+def schedule_vendor_callback(
+    maintenance_request_id: int,
+    vendor_id: int,
+    callback_date: str,
+    callback_time: str,
+    callback_reason: str,
+    notes_for_next_call: Optional[str] = None,
+    vendor_call_attempt_id: Optional[int] = None,
+    session: Optional[Session] = None
+) -> VendorCallbackSchedule:
+    """
+    Schedule a callback with a vendor.
+    
+    Args:
+        maintenance_request_id: Maintenance request ID
+        vendor_id: Vendor ID
+        callback_date: Date in YYYY-MM-DD format
+        callback_time: Time in HH:MM format (24-hour)
+        callback_reason: Reason for callback
+        notes_for_next_call: Optional notes
+        vendor_call_attempt_id: Optional attempt ID that requested callback
+        session: Database session
+    
+    Returns:
+        VendorCallbackSchedule object
+    """
+    if not session:
+        session = Session(engine)
+    
+    # Parse callback datetime
+    try:
+        callback_datetime_str = f"{callback_date} {callback_time}"
+        callback_datetime = datetime.strptime(callback_datetime_str, "%Y-%m-%d %H:%M")
+        # Assume local timezone, convert to UTC (simplified - should use proper timezone)
+        # For now, assume callback time is in PM's timezone
+    except ValueError as e:
+        raise ValueError(f"Invalid callback date/time format: {e}")
+    
+    callback = VendorCallbackSchedule(
+        maintenance_request_id=maintenance_request_id,
+        vendor_id=vendor_id,
+        vendor_call_attempt_id=vendor_call_attempt_id,
+        callback_date=callback_date,
+        callback_time=callback_time,
+        callback_reason=callback_reason,
+        notes_for_next_call=notes_for_next_call,
+        callback_datetime=callback_datetime,
+        status="scheduled"
+    )
+    
+    session.add(callback)
+    session.commit()
+    session.refresh(callback)
+    
+    # Ensure callback worker is running
+    _ensure_callback_worker_started()
+    
+    print(f"✅ Scheduled callback {callback.callback_id} for {callback_date} at {callback_time}")
+    
+    return callback
+
+
+# ============================================================================
+# Webhook Timeout Handling
+# ============================================================================
+
+def check_and_handle_stuck_attempts(session: Optional[Session] = None) -> Dict[str, Any]:
+    """
+    Check for vendor call attempts that are stuck in "initiated" state
+    and poll VAPI API to get their status.
+    
+    Args:
+        session: Database session (optional)
+    
+    Returns:
+        Dict with statistics about processed attempts
+    """
+    if not session:
+        session = Session(engine)
+    
+    # Find attempts that are stuck (initiated > 5 minutes ago, no outcome)
+    timeout_threshold = datetime.utcnow() - timedelta(minutes=5)
+    
+    stuck_attempts = session.exec(
+        select(VendorCallAttempt).where(
+            VendorCallAttempt.call_status == "initiated",
+            VendorCallAttempt.outcome.is_(None),
+            VendorCallAttempt.initiated_at <= timeout_threshold,
+            VendorCallAttempt.vapi_call_id.isnot(None)
+        )
+    ).all()
+    
+    if not stuck_attempts:
+        return {
+            "checked": 0,
+            "processed": 0,
+            "errors": 0
+        }
+    
+    print(f"🔍 Found {len(stuck_attempts)} stuck vendor call attempts, checking VAPI status...")
+    
+    processed = 0
+    errors = 0
+    
+    # Import VAPI API client
+    import os
+    import httpx
+    VAPI_API_KEY = os.getenv("VAPI_API_KEY")
+    VAPI_BASE_URL = os.getenv("VAPI_BASE_URL", "https://api.vapi.ai")
+    
+    if not VAPI_API_KEY:
+        print("⚠️  VAPI_API_KEY not configured, cannot check stuck attempts")
+        return {
+            "checked": len(stuck_attempts),
+            "processed": 0,
+            "errors": len(stuck_attempts)
+        }
+    
+    for attempt in stuck_attempts:
+        try:
+            # Poll VAPI API for call status
+            url = f"{VAPI_BASE_URL}/v1/call/{attempt.vapi_call_id}"
+            headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
+            
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(url, headers=headers)
+                
+                if response.status_code == 200:
+                    call_data = response.json()
+                    call_status = call_data.get("status", "unknown")
+                    
+                    # Determine outcome from VAPI status
+                    outcome = None
+                    if call_status == "ended":
+                        duration = call_data.get("duration", 0)
+                        if duration and duration > 30:
+                            outcome = "accepted"  # Assume accepted if call had duration
+                        else:
+                            outcome = "declined"
+                    elif call_status in ["no-answer", "busy"]:
+                        outcome = "no_response"
+                    elif call_status == "voicemail":
+                        outcome = "voicemail"
+                    else:
+                        outcome = "no_response"
+                    
+                    # Update attempt with outcome
+                    attempt.call_status = call_status
+                    attempt.outcome = outcome
+                    attempt.completed_at = datetime.utcnow()
+                    
+                    # Get transcript and recording if available
+                    if call_data.get("transcript"):
+                        attempt.call_transcript = call_data.get("transcript")
+                    if call_data.get("recordingUrl") or call_data.get("recording"):
+                        attempt.call_recording_url = call_data.get("recordingUrl") or call_data.get("recording")
+                    if call_data.get("duration"):
+                        attempt.call_duration_seconds = call_data.get("duration")
+                    
+                    session.add(attempt)
+                    session.commit()
+                    
+                    # Process outcome (escalate or assign)
+                    handle_vendor_call_outcome(
+                        vendor_call_attempt_id=attempt.attempt_id,
+                        outcome=outcome,
+                        session=session,
+                        call_data={
+                            "transcript": attempt.call_transcript,
+                            "recording_url": attempt.call_recording_url,
+                            "duration": attempt.call_duration_seconds
+                        }
+                    )
+                    
+                    processed += 1
+                    print(f"✅ Processed stuck attempt {attempt.attempt_id}: {outcome}")
+                else:
+                    print(f"⚠️  VAPI API returned {response.status_code} for call {attempt.vapi_call_id}")
+                    errors += 1
+                    
+        except Exception as e:
+            print(f"❌ Error checking stuck attempt {attempt.attempt_id}: {e}")
+            errors += 1
+            import traceback
+            traceback.print_exc()
+    
+    return {
+        "checked": len(stuck_attempts),
+        "processed": processed,
+        "errors": errors
+    }
+
+
+# ============================================================================
+# Notification Sending
+# ============================================================================
+
+def send_vendor_notification(
+    vendor_id: int,
+    maintenance_request_id: int,
+    notification_type: str,
+    delivery_method: str,
+    message_content: Dict[str, Any],
+    session: Optional[Session] = None
+) -> Dict[str, Any]:
+    """
+    Send notification to vendor via SMS or email.
+    
+    Args:
+        vendor_id: Vendor ID
+        maintenance_request_id: Maintenance request ID
+        notification_type: Type of notification (job_assignment, details_confirmation, etc.)
+        delivery_method: How to send (sms, email)
+        message_content: Message content with subject/body
+        session: Database session
+    
+    Returns:
+        Dict with success status and details
+    """
+    if not session:
+        session = Session(engine)
+    
+    vendor = session.get(Vendor, vendor_id)
+    if not vendor:
+        return {
+            "success": False,
+            "error": "Vendor not found"
+        }
+    
+    maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
+    if not maintenance_request:
+        return {
+            "success": False,
+            "error": "Maintenance request not found"
+        }
+    
+    # Build message
+    subject = message_content.get("subject", "")
+    body = message_content.get("body", "")
+    
+    if delivery_method == "sms":
+        # Send SMS via Twilio
+        try:
+            from vapi.app import _send_sms_notification
+            phone_number = vendor.phone_number
+            if not phone_number:
+                return {
+                    "success": False,
+                    "error": "Vendor phone number not available"
+                }
+            
+            # Normalize phone number
+            phone_number = normalize_phone_number(phone_number)
+            
+            # Send SMS
+            success = _send_sms_notification(phone_number, body)
+            
+            if success:
+                print(f"✅ Sent SMS notification to vendor {vendor_id} ({vendor.name})")
+                return {
+                    "success": True,
+                    "method": "sms",
+                    "vendor_id": vendor_id
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to send SMS"
+                }
+        except Exception as e:
+            print(f"❌ Error sending SMS to vendor {vendor_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    elif delivery_method == "email":
+        # Send email (requires email service integration)
+        if not vendor.email:
+            return {
+                "success": False,
+                "error": "Vendor email not available"
+            }
+        
+        # TODO: Integrate with email service (SendGrid, Resend, etc.)
+        print(f"⚠️  Email sending not yet implemented for vendor {vendor_id}")
+        return {
+            "success": False,
+            "error": "Email sending not yet implemented"
+        }
+    
+    else:
+        return {
+            "success": False,
+            "error": f"Unsupported delivery method: {delivery_method}"
+        }

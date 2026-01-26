@@ -105,6 +105,18 @@ async def lifespan(app: FastAPI):
         print(f"⚠️ Database initialization failed: {e}")
         print("⚠️ Continuing without database connection...")
     
+    # Startup: Start background workers for vendor calling
+    print("🚀 Starting background workers...")
+    try:
+        from DB.vendor_calling import _ensure_retry_worker_started, _ensure_callback_worker_started
+        _ensure_retry_worker_started()
+        _ensure_callback_worker_started()
+        print("✅ Background workers started")
+    except Exception as e:
+        print(f"⚠️  Error starting background workers: {e}")
+        import traceback
+        traceback.print_exc()
+    
     yield  # Application runs here
     
     # Cleanup: Close HTTP client on shutdown
@@ -4410,6 +4422,40 @@ async def cancel_vendor_calls(
         return JSONResponse(content=result)
 
 
+@app.post("/admin/check-stuck-vendor-attempts")
+async def check_stuck_vendor_attempts(
+    auth: Dict[str, Any] = Depends(get_admin_auth)
+):
+    """
+    Admin endpoint to check for stuck vendor call attempts and process them.
+    
+    This should be called periodically (e.g., every 5 minutes) via cron job
+    to handle cases where webhooks never arrived.
+    
+    Authentication:
+    - ADMIN_API_KEY: Use "Authorization: Bearer <ADMIN_API_KEY>" header
+    - OR Property Manager JWT token
+    """
+    from DB.vendor_calling import check_and_handle_stuck_attempts
+    
+    try:
+        with Session(engine) as session:
+            result = check_and_handle_stuck_attempts(session)
+            
+            return JSONResponse(content={
+                "message": "Stuck attempts check completed",
+                "result": result
+            })
+    except Exception as e:
+        print(f"❌ Error checking stuck attempts: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error checking stuck attempts: {str(e)}"
+        )
+
+
 @app.post("/properties/{property_id}/vendor-settings")
 async def update_property_vendor_settings(
     property_id: int,
@@ -4943,6 +4989,7 @@ async def schedule_vendor_callback(
             tool_calls = request_body["message"]["toolCalls"]
             for tool_call in tool_calls:
                 if tool_call.get("function", {}).get("name") == "scheduleVendorCallback":
+                    from DB.vendor_calling import schedule_vendor_callback
                     tool_call_id = tool_call.get("id")
                     func_args = tool_call.get("function", {}).get("arguments", {})
                     if isinstance(func_args, str):
@@ -4970,17 +5017,27 @@ async def schedule_vendor_callback(
             if not attempt:
                 raise HTTPException(status_code=404, detail="Vendor call attempt not found")
             
-            # Store callback information
+            # Schedule callback using vendor_calling module
+            callback = schedule_vendor_callback(
+                maintenance_request_id=attempt.maintenance_request_id,
+                vendor_id=attempt.vendor_id,
+                callback_date=callback_date,
+                callback_time=callback_time,
+                callback_reason=callback_reason,
+                notes_for_next_call=notes_for_next_call,
+                vendor_call_attempt_id=attempt.attempt_id,
+                session=session
+            )
+            
+            # Also store in attempt metadata for reference
             if attempt.call_metadata is None:
                 attempt.call_metadata = {}
             attempt.call_metadata.update({
                 "callback_scheduled": True,
+                "callback_id": callback.callback_id,
                 "callback_date": callback_date,
                 "callback_time": callback_time,
-                "callback_reason": callback_reason,
-                "notes_for_next_call": notes_for_next_call,
             })
-            
             session.add(attempt)
             session.commit()
             
@@ -4990,6 +5047,7 @@ async def schedule_vendor_callback(
                     "result": {
                         "success": True,
                         "message": f"Callback scheduled for {callback_date} at {callback_time}",
+                        "callback_id": callback.callback_id,
                         "callback_date": callback_date,
                         "callback_time": callback_time
                     }
@@ -5513,34 +5571,25 @@ async def send_vendor_notification(
             if maintenance_request_id:
                 maintenance_request = session.get(MaintenanceRequest, maintenance_request_id)
             
-            # Log notification request (actual sending would be handled by notification service)
-            notification_log = {
-                "notification_type": notification_type,
-                "delivery_method": delivery_method,
-                "vendor_id": vendor_id,
-                "vendor_name": vendor.name if vendor else None,
-                "vendor_email": vendor.email if vendor else None,
-                "vendor_phone": vendor.phone_number if vendor else None,
-                "maintenance_request_id": maintenance_request_id,
-                "message_content": message_content,
-                "confirmation_required": confirmation_required,
-                "requested_at": datetime.utcnow().isoformat()
-            }
+            # Send notification using vendor_calling module
+            from DB.vendor_calling import send_vendor_notification
             
-            print(f"📧 Vendor notification requested: {json.dumps(notification_log, indent=2)}")
+            if not vendor_id or not maintenance_request_id:
+                raise HTTPException(status_code=400, detail="Missing vendor_id or maintenance_request_id in metadata")
             
-            # TODO: Integrate with actual notification service (Twilio SMS, SendGrid email, etc.)
-            # For now, we just log the request
+            result = send_vendor_notification(
+                vendor_id=vendor_id,
+                maintenance_request_id=maintenance_request_id,
+                notification_type=notification_type,
+                delivery_method=delivery_method,
+                message_content=message_content,
+                session=session
+            )
             
             return {
                 "results": [{
                     "toolCallId": tool_call_id,
-                    "result": {
-                        "success": True,
-                        "message": f"Notification request logged. Type: {notification_type}, Method: {delivery_method}",
-                        "notification_logged": True,
-                        "note": "Actual notification sending will be handled by notification service"
-                    }
+                    "result": result
                 }]
             }
     

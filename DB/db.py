@@ -976,9 +976,56 @@ class VendorCallAttempt(SQLModel, table=True):
     answered_at: Optional[datetime] = None  # When call was answered
     completed_at: Optional[datetime] = None  # When call ended
     
+    # Call metadata (JSONB for flexible storage)
+    call_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column(JSONB)
+    )  # Additional metadata: callback info, notification requests, etc.
+    
     # Relationships
     maintenance_request: Optional["MaintenanceRequest"] = Relationship(back_populates="vendor_call_attempts")
     vendor: Optional["Vendor"] = Relationship(back_populates="call_attempts")
+
+
+class VendorCallbackSchedule(SQLModel, table=True):
+    """
+    Scheduled callbacks for vendors.
+    
+    When a vendor requests a callback, this table stores the scheduled time
+    and triggers the callback via background worker.
+    """
+    callback_id: Optional[int] = Field(default=None, primary_key=True)
+    
+    # Relationships
+    maintenance_request_id: int = Field(
+        foreign_key="maintenancerequest.maintenance_request_id",
+        index=True
+    )
+    vendor_id: int = Field(
+        foreign_key="vendor.vendor_id",
+        index=True
+    )
+    vendor_call_attempt_id: Optional[int] = Field(
+        foreign_key="vendorcallattempt.attempt_id",
+        default=None,
+        index=True
+    )
+    
+    # Callback details
+    callback_date: str  # YYYY-MM-DD format
+    callback_time: str  # HH:MM format (24-hour)
+    callback_reason: str  # Reason for callback
+    notes_for_next_call: Optional[str] = None  # Notes to reference on next call
+    
+    # Status
+    status: str = Field(default="scheduled", index=True)  # "scheduled", "completed", "cancelled", "failed"
+    
+    # Timestamps
+    scheduled_at: datetime = Field(default_factory=datetime.utcnow)  # When callback was scheduled
+    callback_datetime: datetime = Field(index=True)  # When callback should happen (UTC)
+    completed_at: Optional[datetime] = None  # When callback was completed
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class PropertyVendorSettings(SQLModel, table=True):
