@@ -234,6 +234,9 @@ def match_vendors_to_maintenance_request(
         maintenance_request.priority
     )
     print(f"   Mapped service type: {service_type}")
+
+    # Initialize vendors list so we can safely check `if not vendors` below
+    vendors: list = []
     
     # If urgent mapped to "emergency" but no vendors found, try mapping without priority
     original_service_type = service_type
