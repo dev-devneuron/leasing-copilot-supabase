@@ -2604,6 +2604,18 @@ def trigger_outbound_call(
         }
         
         # Log the full payload being sent to Vapi (for debugging)
+        # IMPORTANT: redact secrets (Twilio auth token) before logging.
+        def _redact_vapi_payload_for_logs(p: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                redacted = json.loads(json.dumps(p))  # deep copy
+            except Exception:
+                # Best effort: shallow copy if non-serializable
+                redacted = dict(p)
+            phone = redacted.get("phoneNumber")
+            if isinstance(phone, dict) and phone.get("twilioAuthToken"):
+                phone["twilioAuthToken"] = "***REDACTED***"
+            return redacted
+
         is_vendor_call = metadata and metadata.get("vendorCall") == True
         call_type = "VENDOR CALL" if is_vendor_call else "CUSTOMER RE-ENGAGEMENT"
         print(f"\n📤 SENDING PAYLOAD TO VAPI ({call_type}):")
@@ -2617,7 +2629,15 @@ def trigger_outbound_call(
         else:
             print(f"   ⚠️  No call context (no extracted intelligence available)")
         print(f"   Metadata keys: {list(payload.get('metadata', {}).keys())}")
-        print(f"   Full payload (metadata only): {json.dumps(payload.get('metadata', {}), indent=2)}")
+        # Log the entire payload (sanitized) so we can confirm exactly what Vapi receives.
+        sanitized_payload = _redact_vapi_payload_for_logs(payload)
+        try:
+            print(f"   Full payload (sanitized): {json.dumps(sanitized_payload, indent=2)[:6000]}")
+            if len(json.dumps(sanitized_payload)) > 6000:
+                print(f"   (Payload truncated in logs; total chars={len(json.dumps(sanitized_payload))})")
+        except Exception as _log_err:
+            print(f"   ⚠️  Could not serialize full payload for logs: {_log_err}")
+            print(f"   Payload keys: {list(payload.keys())}")
         
         # VAPI API endpoint: POST https://api.vapi.ai/call
         # This is the correct endpoint according to VAPI documentation
@@ -2635,6 +2655,14 @@ def trigger_outbound_call(
         )
         
         print(f"📥 [OUTBOUND CALLING] VAPI API response status: {response.status_code}")
+        # Log response body (truncated) to verify how Vapi interpreted payload.
+        try:
+            resp_text = response.text or ""
+            print(f"📥 [OUTBOUND CALLING] VAPI response body (truncated): {resp_text[:2000]}")
+            if len(resp_text) > 2000:
+                print(f"   (Response truncated in logs; total chars={len(resp_text)})")
+        except Exception as _resp_log_err:
+            print(f"⚠️  [OUTBOUND CALLING] Could not log VAPI response body: {_resp_log_err}")
         
         if response.status_code not in [200, 201]:
             error_msg = response.text
