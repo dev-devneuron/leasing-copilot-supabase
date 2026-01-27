@@ -776,8 +776,33 @@ def handle_vendor_call_outcome(
     maintenance_request = session.get(MaintenanceRequest, attempt.maintenance_request_id)
     
     if outcome == "accepted":
-        # Vendor accepted - assign to maintenance request
-        print(f"✅ [VENDOR CALLING] Vendor {attempt.vendor_id} ACCEPTED the job")
+        # Vendor accepted - but first validate that we have meaningful availability data.
+        strong_accept = bool(attempt.is_available) and bool(attempt.earliest_available_time)
+        if not strong_accept:
+            # Do NOT auto-assign if we don't have at least a concrete availability time/window.
+            print("⚠️ [VENDOR CALLING] Outcome 'accepted' but missing concrete availability/time – not auto-assigning.")
+            print(f"   is_available={attempt.is_available}, earliest_available_time={attempt.earliest_available_time}")
+            # Mark the maintenance request as needing manual follow-up instead.
+            if maintenance_request:
+                maintenance_request.vendor_call_status = "needs_followup"
+                session.add(maintenance_request)
+            if queue:
+                # Stop the queue so we don't keep auto-calling with ambiguous outcome.
+                queue.status = "completed"
+                queue.completed_at = datetime.utcnow()
+                session.add(queue)
+                print(f"✅ [VENDOR CALLING] Queue {queue.queue_id} marked as completed (manual follow-up needed)")
+            session.commit()
+            return {
+                "success": True,
+                "outcome": "needs_followup",
+                "vendor_id": attempt.vendor_id,
+                "maintenance_request_id": attempt.maintenance_request_id,
+                "message": "Vendor said they are available but did not provide usable timing – manual follow-up required"
+            }
+
+        # Vendor clearly accepted with concrete availability – assign to maintenance request
+        print(f"✅ [VENDOR CALLING] Vendor {attempt.vendor_id} ACCEPTED the job with availability {attempt.earliest_available_time}")
         maintenance_request.assigned_vendor_id = attempt.vendor_id
         maintenance_request.vendor_call_status = "vendor_accepted"
         maintenance_request.status = "in_progress"
@@ -848,7 +873,7 @@ def handle_vendor_call_outcome(
     elif outcome == "declined":
         # Vendor declined - move to next vendor
         print(f"❌ [VENDOR CALLING] Vendor {attempt.vendor_id} DECLINED the job")
-        if queue:
+        if queue and queue.status == "calling":
             queue.current_vendor_index += 1
             session.add(queue)
             session.commit()
@@ -857,11 +882,14 @@ def handle_vendor_call_outcome(
             # Call next vendor
             return call_next_vendor(attempt.maintenance_request_id, session)
         else:
+            # Queue is missing or not in a calling state (e.g. completed/cancelled) – do NOT escalate further
+            if queue:
+                print(f"⏸️  [VENDOR CALLING] Queue {queue.queue_id} status is {queue.status}, not 'calling' – not moving to next vendor")
             session.commit()
             return {
                 "success": True,
                 "outcome": "declined",
-                "message": "Vendor declined, but no queue found to continue"
+                "message": "Vendor declined, but queue is not active to continue"
             }
     
     elif outcome in ["no_response", "voicemail"]:
@@ -869,7 +897,7 @@ def handle_vendor_call_outcome(
         print(f"⏳ [VENDOR CALLING] Vendor {attempt.vendor_id} - {outcome.upper()}")
         print(f"   Attempt number: {attempt.attempt_number} (max: {queue.max_retries_per_vendor if queue else 'N/A'})")
         
-        if queue and attempt.attempt_number < queue.max_retries_per_vendor:
+        if queue and queue.status == "calling" and attempt.attempt_number < queue.max_retries_per_vendor:
             # Schedule retry after delay
             print(f"⏰ [VENDOR CALLING] Scheduling retry for attempt {attempt.attempt_id} in {queue.retry_delay_minutes} minutes")
             session.commit()
@@ -887,7 +915,7 @@ def handle_vendor_call_outcome(
         else:
             # Move to next vendor
             print(f"➡️  [VENDOR CALLING] Max retries reached or no queue, moving to next vendor")
-            if queue:
+            if queue and queue.status == "calling":
                 queue.current_vendor_index += 1
                 session.add(queue)
                 session.commit()

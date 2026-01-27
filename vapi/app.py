@@ -4803,7 +4803,16 @@ async def capture_vendor_response(
             session.commit()
             
             # Determine outcome and process
-            outcome = "accepted" if available else "declined"
+            # Make this lenient: if the vendor says available=True, we record outcome "accepted"
+            # so the call is clearly visible as a YES in reporting.
+            # The *auto‑assignment* safety check still lives in handle_vendor_call_outcome
+            # and will downgrade to "needs_followup" when timing is missing.
+            if available:
+                outcome = "accepted"
+                print("✅ [VENDOR CALLING] captureVendorResponse: vendor marked AVAILABLE (outcome=accepted)")
+            else:
+                outcome = "declined"
+                print("ℹ️ [VENDOR CALLING] captureVendorResponse: vendor not available (outcome=declined)")
             call_data = {
                 "is_available": available,
                 "earliest_available_time": attempt.earliest_available_time,
