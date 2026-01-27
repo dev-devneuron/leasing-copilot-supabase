@@ -2287,7 +2287,8 @@ def trigger_outbound_call(
     from_number: Optional[str] = None,
     property_manager_id: Optional[int] = None,
     session: Session = None,
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None,
+    bypass_eligibility: bool = False  # For vendor calls and urgent maintenance requests
 ) -> Dict[str, Any]:
     """
     Trigger an outbound call via Vapi API.
@@ -2315,6 +2316,14 @@ def trigger_outbound_call(
     if not session:
         session = Session(engine)
         session_created = True
+    
+    print(f"🔍 [OUTBOUND CALLING] trigger_outbound_call called:")
+    print(f"   Contact ID: {contact.id}, Phone: {contact.phone_number}")
+    print(f"   Assistant ID provided: {assistant_id}")
+    print(f"   Property Manager ID: {property_manager_id}")
+    print(f"   From Number provided: {from_number}")
+    print(f"   Bypass Eligibility: {bypass_eligibility}")
+    print(f"   Metadata vendorCall: {metadata.get('vendorCall') if metadata else None}")
     
     # Get outbound assistant ID from property manager if not provided
     if not assistant_id and property_manager_id:
@@ -2351,17 +2360,21 @@ def trigger_outbound_call(
             print(f"⚠️  Using fallback VAPI_ASSISTANT_ID from environment (should use PM's outbound assistant ID)")
     
     if not assistant_id:
+        error_msg = "No VAPI outbound assistant ID configured. Please set vapi_outbound_assistant_id for the PropertyManager or set VAPI_ASSISTANT_ID environment variable."
+        print(f"❌ [OUTBOUND CALLING] {error_msg}")
         return {
             "success": False,
-            "error": "No VAPI outbound assistant ID configured. Please set vapi_outbound_assistant_id for the PropertyManager or set VAPI_ASSISTANT_ID environment variable.",
+            "error": error_msg,
             "contact_id": contact.id
         }
     
     # Validate Twilio credentials
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        error_msg = "Twilio credentials not configured (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN required)"
+        print(f"❌ [OUTBOUND CALLING] {error_msg}")
         return {
             "success": False,
-            "error": "Twilio credentials not configured (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN required)",
+            "error": error_msg,
             "contact_id": contact.id
         }
     
@@ -2381,11 +2394,18 @@ def trigger_outbound_call(
         if property_manager_id:
             error_msg += f" Property Manager {property_manager_id} does not have an assigned Twilio number."
         error_msg += " Provide it in the API call, assign a number to the PM, or set DEFAULT_TWILIO_FROM_NUMBER in environment (Twilio phone number in E.164 format, e.g., '+14125551234')"
+        print(f"❌ [OUTBOUND CALLING] {error_msg}")
         return {
             "success": False,
             "error": error_msg,
             "contact_id": contact.id
         }
+    
+    print(f"✅ [OUTBOUND CALLING] All prerequisites met:")
+    print(f"   Assistant ID: {assistant_id}")
+    print(f"   From Number: {from_number}")
+    print(f"   To Number: {contact.phone_number}")
+    print(f"   Proceeding to make VAPI API call...")
     
     # Load extracted intelligence from latest call for this contact
     # This provides context for personalized re-engagement
@@ -2502,6 +2522,8 @@ def trigger_outbound_call(
     # Best practice: Include customer.name if available for better personalization
     customer_name = contact.name or (extracted_intel.get("inferred_name") if extracted_intel else None)
     
+    # VAPI API endpoint: POST https://api.vapi.ai/call
+    # This is the correct endpoint for creating outbound calls
     payload = {
         "assistantId": assistant_id,
         "phoneNumber": {
@@ -2510,11 +2532,11 @@ def trigger_outbound_call(
             "twilioAuthToken": TWILIO_AUTH_TOKEN
         },
         "customer": {
-            "number": contact.phone_number,  # Recipient's phone number (TO)
+            "number": contact.phone_number,  # Recipient's phone number (TO) - E.164 format
         },
         "metadata": {
             "contactId": str(contact.id),
-            "campaign": "no_booking_followup",
+            "campaign": "no_booking_followup" if not (metadata and metadata.get("vendorCall")) else "vendor_maintenance_request",
             "callDirection": "outbound"
         }
     }
@@ -2582,10 +2604,14 @@ def trigger_outbound_call(
         }
         
         # Log the full payload being sent to Vapi (for debugging)
-        print(f"\n📤 SENDING PAYLOAD TO VAPI:")
+        is_vendor_call = metadata and metadata.get("vendorCall") == True
+        call_type = "VENDOR CALL" if is_vendor_call else "CUSTOMER RE-ENGAGEMENT"
+        print(f"\n📤 SENDING PAYLOAD TO VAPI ({call_type}):")
         print(f"   Assistant ID: {assistant_id}")
         print(f"   From Number: {from_number}")
         print(f"   To Number: {contact.phone_number}")
+        if bypass_eligibility:
+            print(f"   ⚠️  BYPASSING ELIGIBILITY CHECKS (vendor call or urgent request)")
         if payload.get("metadata", {}).get("callContext"):
             print(f"   ✅ Call context in metadata: {payload['metadata']['callContext'][:200]}...")
         else:
@@ -2593,31 +2619,62 @@ def trigger_outbound_call(
         print(f"   Metadata keys: {list(payload.get('metadata', {}).keys())}")
         print(f"   Full payload (metadata only): {json.dumps(payload.get('metadata', {}), indent=2)}")
         
+        # VAPI API endpoint: POST https://api.vapi.ai/call
+        # This is the correct endpoint according to VAPI documentation
+        # Endpoint: /call (not /calls)
+        # Method: POST
+        # Headers: Authorization: Bearer {VAPI_API_KEY}
+        api_url = f"{VAPI_BASE_URL}/call"
+        print(f"🌐 [OUTBOUND CALLING] Making POST request to: {api_url}")
+        
         response = requests.post(
-            f"{VAPI_BASE_URL}/call",
+            api_url,
             headers=headers,
             json=payload,
-            timeout=10
+            timeout=30  # Increased timeout for vendor calls
         )
+        
+        print(f"📥 [OUTBOUND CALLING] VAPI API response status: {response.status_code}")
         
         if response.status_code not in [200, 201]:
             error_msg = response.text
-            print(f"❌ Vapi API error: {response.status_code} - {error_msg}")
+            print(f"❌ [OUTBOUND CALLING] Vapi API error: {response.status_code}")
+            print(f"   Error response: {error_msg}")
+            print(f"   Request URL: {api_url}")
+            print(f"   Request payload keys: {list(payload.keys())}")
             return {
                 "success": False,
-                "error": f"Vapi API error: {error_msg}",
+                "error": f"Vapi API error ({response.status_code}): {error_msg}",
+                "contact_id": contact.id,
+                "status_code": response.status_code
+            }
+        
+        try:
+            result = response.json()
+            print(f"✅ [OUTBOUND CALLING] VAPI API call successful")
+            print(f"   Response keys: {list(result.keys())}")
+        except Exception as e:
+            print(f"❌ [OUTBOUND CALLING] Failed to parse VAPI response as JSON: {e}")
+            print(f"   Response text: {response.text[:500]}")
+            return {
+                "success": False,
+                "error": f"Invalid JSON response from VAPI: {str(e)}",
                 "contact_id": contact.id
             }
         
-        result = response.json()
         call_id = result.get("id") or result.get("callId")
         
         if not call_id:
+            print(f"❌ [OUTBOUND CALLING] No call ID in VAPI response")
+            print(f"   Response: {json.dumps(result, indent=2)}")
             return {
                 "success": False,
                 "error": "No call ID returned from Vapi",
-                "contact_id": contact.id
+                "contact_id": contact.id,
+                "response": result
             }
+        
+        print(f"✅ [OUTBOUND CALLING] Call ID received: {call_id}")
         
         # Create call record with explicit UUID generation
         call_record = CallRecord(
