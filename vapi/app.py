@@ -4355,6 +4355,39 @@ async def get_vendor_call_status(
                 .where(VendorCallAttempt.maintenance_request_id == request_id)
                 .order_by(VendorCallAttempt.initiated_at.desc())
             ).all()
+
+            # Auto-kick stuck queues (common after server restarts):
+            # If queue says "calling" but we have zero attempts, try to resume once (throttled).
+            if queue and queue.status == "calling" and not attempts:
+                from datetime import datetime, timedelta
+                now = datetime.utcnow()
+                started_at = queue.started_at
+                updated_at = queue.updated_at
+
+                should_kick = False
+                if started_at and (now - started_at) > timedelta(seconds=30):
+                    if (not updated_at) or (now - updated_at) > timedelta(seconds=30):
+                        should_kick = True
+
+                if should_kick:
+                    try:
+                        print(f"⚠️  [VENDOR CALLING] Queue {queue.queue_id} is 'calling' but has no attempts. Auto-resuming...")
+                        from DB.vendor_calling import call_next_vendor
+                        # Touch updated_at to throttle repeated kicks during polling
+                        queue.updated_at = now
+                        session.add(queue)
+                        session.commit()
+                        call_next_vendor(request_id, session)
+                        # Re-fetch attempts after kick so UI sees progress
+                        attempts = session.exec(
+                            select(VendorCallAttempt)
+                            .where(VendorCallAttempt.maintenance_request_id == request_id)
+                            .order_by(VendorCallAttempt.initiated_at.desc())
+                        ).all()
+                    except Exception as kick_err:
+                        print(f"❌ [VENDOR CALLING] Auto-resume failed: {kick_err}")
+                        import traceback
+                        traceback.print_exc()
             
             # Get vendors separately to handle missing vendors gracefully
             vendor_ids = [attempt.vendor_id for attempt in attempts]

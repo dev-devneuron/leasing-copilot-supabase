@@ -153,7 +153,7 @@ class PropertyManager(SQLModel, table=True):
     )
     tenants: List["Tenant"] = Relationship()
     maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="property_manager")
-    vendors: List["Vendor"] = Relationship()
+    vendors: List["Vendor"] = Relationship(back_populates="property_manager")
 
 
 class Realtor(SQLModel, table=True):
@@ -422,7 +422,7 @@ class ApartmentListing(SQLModel, table=True):
 
     source: Optional["Source"] = Relationship(back_populates="listings")
     tenants: List["Tenant"] = Relationship()
-    maintenance_requests: List["MaintenanceRequest"] = Relationship()
+    maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="property")
     tour_bookings: List["PropertyTourBooking"] = Relationship()
     assignment_history: List["PropertyAssignment"] = Relationship()
 
@@ -800,7 +800,7 @@ class MaintenanceRequest(SQLModel, table=True):
     
     # Relationships
     tenant: Optional["Tenant"] = Relationship(back_populates="maintenance_requests")
-    property: Optional["ApartmentListing"] = Relationship()
+    property: Optional["ApartmentListing"] = Relationship(back_populates="maintenance_requests")
     property_manager: Optional["PropertyManager"] = Relationship(back_populates="maintenance_requests")
     assigned_realtor: Optional["Realtor"] = Relationship(back_populates="assigned_maintenance_requests")
     assigned_vendor: Optional["Vendor"] = Relationship(back_populates="assigned_maintenance_requests")
@@ -851,7 +851,7 @@ class Vendor(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Relationships
-    property_manager: Optional["PropertyManager"] = Relationship()
+    property_manager: Optional["PropertyManager"] = Relationship(back_populates="vendors")
     property_vendors: List["PropertyVendor"] = Relationship(back_populates="vendor")
     assigned_maintenance_requests: List["MaintenanceRequest"] = Relationship(back_populates="assigned_vendor")
     call_attempts: List["VendorCallAttempt"] = Relationship(back_populates="vendor")
