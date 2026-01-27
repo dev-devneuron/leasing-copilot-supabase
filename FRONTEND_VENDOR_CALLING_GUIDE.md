@@ -436,6 +436,27 @@ Response: {
   "queue": VendorCallQueue | null,
   "call_attempts": VendorCallAttempt[]
 }
+
+// VendorCallAttempt interface (from response)
+interface VendorCallAttempt {
+  attempt_id: number;
+  vendor_id: number;
+  vendor_name: string;
+  call_status: string; // "initiated", "answered", "declined", "no_answer", "voicemail", "failed"
+  outcome: string | null; // "accepted", "declined", "no_response", "voicemail"
+  is_available: boolean | null;
+  earliest_available_time: string | null;
+  estimated_cost_range: string | null;
+  vendor_notes: string | null;
+  vapi_call_id: string | null;
+  call_transcript: string | null; // ⭐ Full call transcript (if available)
+  call_recording_url: string | null; // ⭐ Direct URL to audio recording (if available)
+  call_duration_seconds: number | null;
+  attempt_number: number;
+  initiated_at: string | null; // ISO timestamp
+  answered_at: string | null; // ISO timestamp
+  completed_at: string | null; // ISO timestamp
+}
 ```
 
 #### Pause Vendor Calls
@@ -597,8 +618,19 @@ VendorCallingSection
     │   ├── CallStatus
     │   ├── Outcome
     │   ├── ResponseDetails (time, cost, notes)
-    │   ├── TranscriptButton
-    │   └── RecordingButton
+    │   ├── CallRecordingSection (NEW - IMPORTANT)
+    │   │   ├── AudioPlayer (if call_recording_url exists)
+    │   │   │   └── <audio controls src={attempt.call_recording_url} />
+    │   │   └── DownloadRecordingButton (optional)
+    │   ├── CallTranscriptSection (NEW - IMPORTANT)
+    │   │   ├── TranscriptPreview (first 200 chars, expandable)
+    │   │   ├── ExpandTranscriptButton
+    │   │   └── FullTranscriptModal (when expanded)
+    │   └── CallMetadata
+    │       ├── Duration (call_duration_seconds)
+    │       ├── InitiatedAt
+    │       ├── AnsweredAt
+    │       └── CompletedAt
     └── EmptyState (if no attempts)
 ```
 
@@ -1175,30 +1207,690 @@ const CallAttemptsTimeline = ({ attempts }: { attempts: VendorCallAttempt[] }) =
                 Notes: {attempt.vendor_notes}
               </div>
             )}
-            <div className="attempt-actions">
-              {attempt.call_transcript && (
-                <button onClick={() => showTranscript(attempt)}>
-                  View Transcript
-                </button>
-              )}
-              {attempt.call_recording_url && (
-                <a href={attempt.call_recording_url} target="_blank">
-                  Listen to Recording
-                </a>
-              )}
-            </div>
-            <div className="attempt-time">
-              {new Date(attempt.initiated_at).toLocaleString()}
-            </div>
+            {/* ⭐ CALL RECORDING SECTION - IMPORTANT FOR PM VERIFICATION */}
+            {attempt.call_recording_url && (
+              <div className="call-recording-section">
+                <h4>📞 Call Recording</h4>
+                <div className="audio-player-container">
+                  <audio 
+                    controls 
+                    src={attempt.call_recording_url}
+                    className="call-recording-player"
+                  >
+                    Your browser does not support the audio element.
+                  </audio>
+                  <div className="recording-actions">
+                    <a 
+                      href={attempt.call_recording_url} 
+                      download 
+                      className="download-button"
+                    >
+                      Download Recording
+                    </a>
+                    <a 
+                      href={attempt.call_recording_url} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="open-new-tab-button"
+                    >
+                      Open in New Tab
+                    </a>
+                  </div>
+                </div>
+                <p className="recording-note">
+                  ⚠️ Listen to verify vendor acceptance and job details before confirming assignment.
+                </p>
+              </div>
+            )}
+
+            {/* ⭐ CALL TRANSCRIPT SECTION - IMPORTANT FOR PM VERIFICATION */}
+            {attempt.call_transcript && (
+              <div className="call-transcript-section">
+                <div className="transcript-header">
+                  <h4>📝 Call Transcript</h4>
+                  <button 
+                    onClick={() => toggleTranscript(attempt.attempt_id)}
+                    className="toggle-transcript-button"
+                  >
+                    {expandedTranscripts.has(attempt.attempt_id) ? 'Collapse' : 'Expand'}
+                  </button>
+                </div>
+                
+                {expandedTranscripts.has(attempt.attempt_id) ? (
+                  <div className="full-transcript">
+                    <pre className="transcript-text">{attempt.call_transcript}</pre>
+                    <div className="transcript-actions">
+                      <button 
+                        onClick={() => copyToClipboard(attempt.call_transcript)}
+                        className="copy-button"
+                      >
+                        Copy Transcript
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="transcript-preview">
+                    <p className="transcript-preview-text">
+                      {attempt.call_transcript.substring(0, 200)}
+                      {attempt.call_transcript.length > 200 && '...'}
+                    </p>
+                    <button 
+                      onClick={() => toggleTranscript(attempt.attempt_id)}
+                      className="read-more-button"
+                    >
+                      Read Full Transcript ({attempt.call_transcript.length} chars)
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Show message if no recording/transcript available */}
+            {!attempt.call_recording_url && !attempt.call_transcript && attempt.completed_at && (
+              <div className="no-media-message">
+                <p>📭 Recording and transcript not available yet. They will appear after the call completes.</p>
+              </div>
+            )}
           </div>
         </div>
       ))}
     </div>
   );
 };
+
+// Helper function to toggle transcript expansion
+const [expandedTranscripts, setExpandedTranscripts] = useState<Set<number>>(new Set());
+
+const toggleTranscript = (attemptId: number) => {
+  const newExpanded = new Set(expandedTranscripts);
+  if (newExpanded.has(attemptId)) {
+    newExpanded.delete(attemptId);
+  } else {
+    newExpanded.add(attemptId);
+  }
+  setExpandedTranscripts(newExpanded);
+};
+
+// Helper function to copy transcript
+const copyToClipboard = async (text: string) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    alert('Transcript copied to clipboard!');
+  } catch (err) {
+    console.error('Failed to copy:', err);
+  }
+};
 ```
 
-### Example 5: Polling for Call Status Updates
+### Example 4b: Complete Call Attempts Component with Recordings & Transcripts
+
+**⭐ FULL IMPLEMENTATION: This is the complete component you should use in the maintenance request modal**
+
+```typescript
+import { useState, useEffect } from 'react';
+
+interface VendorCallAttempt {
+  attempt_id: number;
+  vendor_id: number;
+  vendor_name: string;
+  call_status: string;
+  outcome: string | null;
+  is_available: boolean | null;
+  earliest_available_time: string | null;
+  estimated_cost_range: string | null;
+  vendor_notes: string | null;
+  vapi_call_id: string | null;
+  call_transcript: string | null; // ⭐ Full transcript
+  call_recording_url: string | null; // ⭐ Audio recording URL
+  call_duration_seconds: number | null;
+  attempt_number: number;
+  initiated_at: string | null;
+  answered_at: string | null;
+  completed_at: string | null;
+}
+
+const CallAttemptsTimeline = ({ attempts }: { attempts: VendorCallAttempt[] }) => {
+  const [expandedTranscripts, setExpandedTranscripts] = useState<Set<number>>(new Set());
+
+  const toggleTranscript = (attemptId: number) => {
+    const newExpanded = new Set(expandedTranscripts);
+    if (newExpanded.has(attemptId)) {
+      newExpanded.delete(attemptId);
+    } else {
+      newExpanded.add(attemptId);
+    }
+    setExpandedTranscripts(newExpanded);
+  };
+
+  const formatDateTime = (isoString: string | null): string => {
+    if (!isoString) return 'N/A';
+    const date = new Date(isoString);
+    return date.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
+  };
+
+  const formatDuration = (seconds: number | null): string => {
+    if (!seconds) return 'N/A';
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m ${secs}s`;
+  };
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      alert('Transcript copied to clipboard!');
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  return (
+    <div className="call-attempts-timeline">
+      <h3>Call Attempts ({attempts.length})</h3>
+      {attempts.length === 0 ? (
+        <div className="empty-state">No call attempts yet</div>
+      ) : (
+        attempts.map((attempt) => (
+          <div key={attempt.attempt_id} className="call-attempt-card">
+            {/* Header */}
+            <div className="attempt-header">
+              <div className="vendor-info">
+                <span className="vendor-name">{attempt.vendor_name}</span>
+                <span className="attempt-number">Attempt #{attempt.attempt_number}</span>
+              </div>
+              <div className="attempt-status">
+                <StatusBadge status={attempt.call_status} />
+                {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} />}
+              </div>
+            </div>
+
+            {/* Call Metadata */}
+            <div className="call-metadata">
+              {attempt.initiated_at && (
+                <div className="metadata-item">
+                  <span className="label">Initiated:</span>
+                  <span className="value">{formatDateTime(attempt.initiated_at)}</span>
+                </div>
+              )}
+              {attempt.answered_at && (
+                <div className="metadata-item">
+                  <span className="label">Answered:</span>
+                  <span className="value">{formatDateTime(attempt.answered_at)}</span>
+                </div>
+              )}
+              {attempt.completed_at && (
+                <div className="metadata-item">
+                  <span className="label">Completed:</span>
+                  <span className="value">{formatDateTime(attempt.completed_at)}</span>
+                </div>
+              )}
+              {attempt.call_duration_seconds && (
+                <div className="metadata-item">
+                  <span className="label">Duration:</span>
+                  <span className="value">{formatDuration(attempt.call_duration_seconds)}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Vendor Response Details */}
+            {attempt.outcome === "accepted" && (
+              <div className="vendor-response">
+                <h4>Vendor Response</h4>
+                {attempt.is_available !== null && (
+                  <div className="response-item">
+                    <span className="label">Available:</span>
+                    <span className="value">{attempt.is_available ? '✅ Yes' : '❌ No'}</span>
+                  </div>
+                )}
+                {attempt.earliest_available_time && (
+                  <div className="response-item">
+                    <span className="label">Earliest Available:</span>
+                    <span className="value">{attempt.earliest_available_time}</span>
+                  </div>
+                )}
+                {attempt.estimated_cost_range && (
+                  <div className="response-item">
+                    <span className="label">Estimated Cost:</span>
+                    <span className="value">{attempt.estimated_cost_range}</span>
+                  </div>
+                )}
+                {attempt.vendor_notes && (
+                  <div className="response-item">
+                    <span className="label">Notes:</span>
+                    <span className="value">{attempt.vendor_notes}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ⭐ CALL RECORDING SECTION - CRITICAL FOR PM VERIFICATION */}
+            {attempt.call_recording_url && (
+              <div className="call-recording-section">
+                <h4>📞 Call Recording</h4>
+                <div className="audio-player-container">
+                  <audio 
+                    controls 
+                    src={attempt.call_recording_url}
+                    className="call-recording-player"
+                  >
+                    Your browser does not support the audio element.
+                  </audio>
+                  <div className="recording-actions">
+                    <a 
+                      href={attempt.call_recording_url} 
+                      download 
+                      className="download-button"
+                    >
+                      Download Recording
+                    </a>
+                    <a 
+                      href={attempt.call_recording_url} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="open-new-tab-button"
+                    >
+                      Open in New Tab
+                    </a>
+                  </div>
+                </div>
+                <p className="recording-note">
+                  ⚠️ <strong>Important:</strong> Listen to verify vendor acceptance and job details before confirming assignment.
+                </p>
+              </div>
+            )}
+
+            {/* ⭐ CALL TRANSCRIPT SECTION - CRITICAL FOR PM VERIFICATION */}
+            {attempt.call_transcript && (
+              <div className="call-transcript-section">
+                <div className="transcript-header">
+                  <h4>📝 Call Transcript</h4>
+                  <button 
+                    onClick={() => toggleTranscript(attempt.attempt_id)}
+                    className="toggle-transcript-button"
+                  >
+                    {expandedTranscripts.has(attempt.attempt_id) ? 'Collapse' : 'Expand'}
+                  </button>
+                </div>
+                
+                {expandedTranscripts.has(attempt.attempt_id) ? (
+                  <div className="full-transcript">
+                    <pre className="transcript-text">{attempt.call_transcript}</pre>
+                    <div className="transcript-actions">
+                      <button 
+                        onClick={() => copyToClipboard(attempt.call_transcript!)}
+                        className="copy-button"
+                      >
+                        Copy Transcript
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="transcript-preview">
+                    <p className="transcript-preview-text">
+                      {attempt.call_transcript.substring(0, 200)}
+                      {attempt.call_transcript.length > 200 && '...'}
+                    </p>
+                    <button 
+                      onClick={() => toggleTranscript(attempt.attempt_id)}
+                      className="read-more-button"
+                    >
+                      Read Full Transcript ({attempt.call_transcript.length} chars)
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Show message if no recording/transcript available */}
+            {!attempt.call_recording_url && !attempt.call_transcript && attempt.completed_at && (
+              <div className="no-media-message">
+                <p>📭 Recording and transcript not available yet. They will appear after the call completes.</p>
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+};
+```
+
+### Example 5: Integration in Maintenance Request Modal
+
+**How to add call recordings and transcripts to your existing maintenance request detail modal:**
+
+```typescript
+const MaintenanceRequestModal = ({ requestId, isOpen, onClose }) => {
+  const [callStatus, setCallStatus] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (isOpen && requestId) {
+      loadVendorCallStatus();
+      // Poll every 5 seconds if calls are active
+      const interval = setInterval(() => {
+        if (callStatus?.vendor_call_status === 'calling') {
+          loadVendorCallStatus();
+        }
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [isOpen, requestId, callStatus?.vendor_call_status]);
+
+  const loadVendorCallStatus = async () => {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/maintenance-requests/${requestId}/vendor-call-status`,
+        {
+          headers: { 'Authorization': `Bearer ${getAuthToken()}` }
+        }
+      );
+      const data = await response.json();
+      setCallStatus(data);
+    } catch (error) {
+      console.error('Failed to load vendor call status:', error);
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} size="large">
+      <ModalHeader>
+        <h2>Maintenance Request #{requestId}</h2>
+      </ModalHeader>
+      <ModalBody>
+        {/* Existing maintenance request details */}
+        <MaintenanceRequestDetails requestId={requestId} />
+        
+        {/* Vendor Calling Section */}
+        <VendorCallingSection 
+          maintenanceRequestId={requestId}
+          callStatus={callStatus}
+          onStatusChange={loadVendorCallStatus}
+        />
+        
+        {/* ⭐ NEW: Call Attempts with Recordings & Transcripts */}
+        {callStatus?.call_attempts && callStatus.call_attempts.length > 0 && (
+          <div className="call-attempts-section">
+            <h3>Vendor Call History</h3>
+            <CallAttemptsTimeline attempts={callStatus.call_attempts} />
+          </div>
+        )}
+      </ModalBody>
+    </Modal>
+  );
+};
+```
+
+### Example 6: CSS Styling for Recordings & Transcripts
+
+**Add these styles to your CSS file:**
+
+```css
+/* Call Recording Section */
+.call-recording-section {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+}
+
+.audio-player-container {
+  margin: 1rem 0;
+}
+
+.call-recording-player {
+  width: 100%;
+  margin-bottom: 0.5rem;
+}
+
+.recording-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.download-button,
+.open-new-tab-button {
+  padding: 0.5rem 1rem;
+  background: #007bff;
+  color: white;
+  text-decoration: none;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  transition: background 0.2s;
+}
+
+.download-button:hover,
+.open-new-tab-button:hover {
+  background: #0056b3;
+}
+
+.recording-note {
+  font-size: 0.875rem;
+  color: #856404;
+  margin-top: 0.5rem;
+  font-style: italic;
+  background: #fff3cd;
+  padding: 0.5rem;
+  border-radius: 4px;
+  border: 1px solid #ffc107;
+}
+
+/* Call Transcript Section */
+.call-transcript-section {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+}
+
+.transcript-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.transcript-header h4 {
+  margin: 0;
+  color: #333;
+}
+
+.toggle-transcript-button {
+  padding: 0.5rem 1rem;
+  background: #6c757d;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: background 0.2s;
+}
+
+.toggle-transcript-button:hover {
+  background: #5a6268;
+}
+
+.transcript-preview {
+  padding: 1rem;
+  background: #f8f9fa;
+  border-radius: 4px;
+}
+
+.transcript-preview-text {
+  margin: 0;
+  color: #333;
+  line-height: 1.6;
+  font-size: 0.875rem;
+}
+
+.read-more-button {
+  margin-top: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: transparent;
+  border: 1px solid #007bff;
+  color: #007bff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+
+.read-more-button:hover {
+  background: #007bff;
+  color: white;
+}
+
+.full-transcript {
+  padding: 1rem;
+  background: #f8f9fa;
+  border-radius: 4px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.transcript-text {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: 'Courier New', monospace;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  margin: 0;
+  color: #333;
+}
+
+.transcript-actions {
+  margin-top: 1rem;
+}
+
+.copy-button {
+  padding: 0.5rem 1rem;
+  background: #28a745;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: background 0.2s;
+}
+
+.copy-button:hover {
+  background: #218838;
+}
+
+.no-media-message {
+  padding: 1rem;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  color: #856404;
+  font-size: 0.875rem;
+  margin-top: 1rem;
+}
+
+.call-attempt-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1rem;
+  background: white;
+}
+
+.attempt-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.vendor-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.vendor-name {
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: #333;
+}
+
+.attempt-number {
+  font-size: 0.875rem;
+  color: #666;
+}
+
+.call-metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background: #f8f9fa;
+  border-radius: 4px;
+}
+
+.metadata-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.metadata-item .label {
+  font-size: 0.75rem;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.metadata-item .value {
+  font-size: 0.875rem;
+  color: #333;
+  font-weight: 500;
+}
+
+.vendor-response {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #e7f3ff;
+  border-radius: 4px;
+  border-left: 4px solid #007bff;
+}
+
+.vendor-response h4 {
+  margin: 0 0 0.75rem 0;
+  color: #007bff;
+}
+
+.response-item {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.response-item .label {
+  font-weight: 600;
+  color: #333;
+  min-width: 150px;
+}
+
+.response-item .value {
+  color: #666;
+}
+```
+
+### Example 7: Polling for Call Status Updates
 
 ```typescript
 const useVendorCallStatus = (maintenanceRequestId: number, isActive: boolean) => {

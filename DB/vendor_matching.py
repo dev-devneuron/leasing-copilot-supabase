@@ -47,35 +47,92 @@ CATEGORY_TO_SERVICE_TYPE = {
     "emergency": "emergency",
 }
 
+# Keywords in issue description that indicate specific service types
+# Used when category is "other" or unclear
+DESCRIPTION_KEYWORDS = {
+    "carpenter": ["cupboard", "cabinet", "cabinet", "furniture", "wood", "wooden", "door", "drawer", "shelf", "shelves", "cabinet door", "broken door", "broken drawer", "broken shelf", "broken cabinet", "broken cupboard"],
+    "plumber": ["water", "leak", "leaking", "pipe", "faucet", "tap", "toilet", "sink", "drain", "clog", "dripping", "flood"],
+    "electrician": ["power", "outlet", "switch", "light", "wiring", "circuit", "breaker", "electrical", "electric", "fuse", "spark"],
+    "hvac": ["heat", "heating", "cool", "cooling", "air", "ac", "a/c", "furnace", "thermostat", "vent", "ventilation"],
+}
 
-def map_category_to_service_type(category: Optional[str], priority: str = "normal") -> str:
+
+def map_category_to_service_type(
+    category: Optional[str], 
+    priority: str = "normal",
+    issue_description: Optional[str] = None
+) -> str:
     """
     Map maintenance request category to vendor service type.
     
     Args:
         category: Maintenance request category (e.g., "plumbing", "electrical")
         priority: Request priority (if "urgent", may map to "emergency")
+        issue_description: Optional issue description for keyword-based detection
     
     Returns:
         Service type string (e.g., "plumber", "electrician", "emergency")
     """
     if not category:
+        # If no category, try to infer from description
+        if issue_description:
+            return infer_service_type_from_description(issue_description)
         return "general"
     
     category_lower = category.lower().strip()
     
-    # Check for emergency priority
-    if priority.lower() == "urgent":
+    # Check for emergency priority (but only if category doesn't clearly indicate a specific service)
+    if priority.lower() == "urgent" and category_lower in ["other", "general"]:
+        # For "other" + urgent, try description first, then fall back to emergency
+        if issue_description:
+            inferred = infer_service_type_from_description(issue_description)
+            if inferred != "general":
+                return inferred
         return "emergency"
     
     # Direct mapping
     if category_lower in CATEGORY_TO_SERVICE_TYPE:
-        return CATEGORY_TO_SERVICE_TYPE[category_lower]
+        mapped = CATEGORY_TO_SERVICE_TYPE[category_lower]
+        # If mapped to "general" or "other", try description-based inference
+        if mapped in ["general", "other"] and issue_description:
+            inferred = infer_service_type_from_description(issue_description)
+            if inferred != "general":
+                return inferred
+        return mapped
     
     # Partial matching
     for key, service_type in CATEGORY_TO_SERVICE_TYPE.items():
         if key in category_lower:
             return service_type
+    
+    # Fallback: try description if category didn't match
+    if issue_description:
+        return infer_service_type_from_description(issue_description)
+    
+    return "general"
+
+
+def infer_service_type_from_description(description: Optional[str]) -> str:
+    """
+    Infer service type from issue description using keyword matching.
+    
+    Args:
+        description: Issue description text
+    
+    Returns:
+        Service type string (e.g., "carpenter", "plumber", "general")
+    """
+    if not description:
+        return "general"
+    
+    description_lower = description.lower()
+    
+    # Check each service type's keywords
+    for service_type, keywords in DESCRIPTION_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in description_lower:
+                print(f"🔍 [VENDOR MATCHING] Detected '{service_type}' from description keyword: '{keyword}'")
+                return service_type
     
     return "general"
 
@@ -228,10 +285,11 @@ def match_vendors_to_maintenance_request(
     is_emergency = maintenance_request.priority.lower() == "urgent"
     print(f"   Emergency: {is_emergency}")
     
-    # Map category to service type
+    # Map category to service type (with description-based inference for better accuracy)
     service_type = map_category_to_service_type(
         maintenance_request.category,
-        maintenance_request.priority
+        maintenance_request.priority,
+        maintenance_request.issue_description
     )
     print(f"   Mapped service type: {service_type}")
 
@@ -241,10 +299,11 @@ def match_vendors_to_maintenance_request(
     # If urgent mapped to "emergency" but no vendors found, try mapping without priority
     original_service_type = service_type
     if is_emergency and service_type == "emergency":
-        # Try the actual category first
+        # Try the actual category first (with description inference)
         category_service_type = map_category_to_service_type(
             maintenance_request.category,
-            "normal"  # Don't use urgent priority for mapping
+            "normal",  # Don't use urgent priority for mapping
+            maintenance_request.issue_description
         )
         if category_service_type != "emergency":
             print(f"   Also trying category-based service type: {category_service_type}")
@@ -294,45 +353,48 @@ def match_vendors_to_maintenance_request(
         )
         print(f"   Found {len(vendors)} 'general' vendor(s)")
     
-    # If still no vendors, try more lenient matching (any service type for this property)
+    # If still no vendors, ONLY try "any service type" fallback if service_type is "general" or "emergency"
+    # For specific service types (carpenter, plumber, electrician, hvac), DO NOT fall back to wrong service types
     if not vendors:
-        print(f"⚠️  [VENDOR MATCHING] No vendors found for '{service_type}' or 'general', trying ANY service type for property")
-        # Try without service type filter
-        from .db import PropertyVendor, Vendor
-        query = (
-            select(PropertyVendor, Vendor)
-            .join(Vendor, PropertyVendor.vendor_id == Vendor.vendor_id)
-            .where(PropertyVendor.property_id == maintenance_request.property_id)
-            .where(PropertyVendor.is_active == True)
-            .where(Vendor.is_active == True)
-            .where(Vendor.opted_out == False)
-        )
-        
-        # Don't filter by emergency_available in fallback - be more lenient
-        # if is_emergency:
-        #     query = query.where(Vendor.emergency_available == True)
-        
-        query = query.order_by(PropertyVendor.priority.asc())
-        results = session.exec(query).all()
-        
-        print(f"   Found {len(results)} vendor(s) for property (any service type)")
-        
-        for property_vendor, vendor in results:
-            vendors.append({
-                "vendor_id": vendor.vendor_id,
-                "vendor": vendor,
-                "property_vendor": property_vendor,
-                "priority": property_vendor.priority,
-                "name": vendor.name,
-                "phone_number": vendor.phone_number,
-                "backup_phone": vendor.backup_phone,
-                "email": vendor.email,
-                "emergency_available": vendor.emergency_available,
-                "operating_hours_start": vendor.operating_hours_start,
-                "operating_hours_end": vendor.operating_hours_end,
-                "timezone": vendor.timezone,
-                "notes": vendor.notes,
-            })
+        if service_type in ["general", "emergency"]:
+            # Only for general/emergency: allow fallback to any vendor
+            print(f"⚠️  [VENDOR MATCHING] No vendors found for '{service_type}' or 'general', trying ANY service type for property")
+            from .db import PropertyVendor, Vendor
+            query = (
+                select(PropertyVendor, Vendor)
+                .join(Vendor, PropertyVendor.vendor_id == Vendor.vendor_id)
+                .where(PropertyVendor.property_id == maintenance_request.property_id)
+                .where(PropertyVendor.is_active == True)
+                .where(Vendor.is_active == True)
+                .where(Vendor.opted_out == False)
+            )
+            
+            query = query.order_by(PropertyVendor.priority.asc())
+            results = session.exec(query).all()
+            
+            print(f"   Found {len(results)} vendor(s) for property (any service type)")
+            
+            for property_vendor, vendor in results:
+                vendors.append({
+                    "vendor_id": vendor.vendor_id,
+                    "vendor": vendor,
+                    "property_vendor": property_vendor,
+                    "priority": property_vendor.priority,
+                    "name": vendor.name,
+                    "phone_number": vendor.phone_number,
+                    "backup_phone": vendor.backup_phone,
+                    "email": vendor.email,
+                    "emergency_available": vendor.emergency_available,
+                    "operating_hours_start": vendor.operating_hours_start,
+                    "operating_hours_end": vendor.operating_hours_end,
+                    "timezone": vendor.timezone,
+                    "notes": vendor.notes,
+                })
+        else:
+            # For specific service types (carpenter, plumber, etc.), DO NOT call wrong service type vendors
+            print(f"❌ [VENDOR MATCHING] No {service_type} vendors found for property {maintenance_request.property_id}")
+            print(f"   NOT falling back to other service types - would call wrong vendor type (e.g., plumber for carpenter job)")
+            print(f"   Please add a {service_type} vendor to this property or use 'general' service type vendors")
     
     # Filter by operating hours if requested
     if respect_operating_hours:
