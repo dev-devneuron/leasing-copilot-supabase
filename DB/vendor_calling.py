@@ -291,25 +291,16 @@ def start_vendor_calling(
     
     if queue.status == "calling":
         print(f"⏸️  [VENDOR CALLING] Queue status is 'calling' for request {maintenance_request_id}")
-        # Check if there's actually an active call in progress
-        # If not, we should continue calling (queue might be stuck)
+        # Check if there's actually an active call in progress.
+        # IMPORTANT: only treat attempts with completed_at IS NULL as active.
         active_attempts = session.exec(
             select(VendorCallAttempt)
             .where(VendorCallAttempt.maintenance_request_id == maintenance_request_id)
             .where(VendorCallAttempt.call_status.in_(["initiated", "ringing", "answered"]))
+            .where(VendorCallAttempt.completed_at.is_(None))
         ).all()
         
-        # Also check for recent attempts (within last 5 minutes) that might still be processing
-        from datetime import timedelta
-        recent_cutoff = datetime.utcnow() - timedelta(minutes=5)
-        recent_attempts = session.exec(
-            select(VendorCallAttempt)
-            .where(VendorCallAttempt.maintenance_request_id == maintenance_request_id)
-            .where(VendorCallAttempt.initiated_at >= recent_cutoff)
-        ).all()
-        
-        print(f"   Active attempts (initiated/ringing/answered): {len(active_attempts)}")
-        print(f"   Recent attempts (last 5 min): {len(recent_attempts)}")
+        print(f"   Active attempts (initiated/ringing/answered & not completed): {len(active_attempts)}")
         
         if active_attempts:
             print(f"✅ [VENDOR CALLING] Found {len(active_attempts)} active call attempt(s) - call is in progress")
@@ -323,24 +314,11 @@ def start_vendor_calling(
                 "success": False,
                 "error": "Vendor calling already in progress"
             }
-        elif recent_attempts:
-            print(f"⏳ [VENDOR CALLING] Found {len(recent_attempts)} recent attempt(s) - call might still be processing")
-            print(f"   Waiting for call to complete. Not starting new call yet.")
-            # Ensure maintenance_request status matches queue status
-            if maintenance_request.vendor_call_status != "calling":
-                print(f"🔄 [VENDOR CALLING] Syncing maintenance_request.vendor_call_status to 'calling'")
-                maintenance_request.vendor_call_status = "calling"
-                session.add(maintenance_request)
-                session.commit()
-            return {
-                "success": False,
-                "error": "Vendor calling in progress (recent attempts found)"
-            }
         else:
-            # Queue is "calling" but no active or recent attempts - likely stuck, continue calling
-            print(f"⚠️  [VENDOR CALLING] Queue status is 'calling' but no active/recent call attempts found")
-            print(f"   This indicates the queue is stuck. Continuing to call next vendor...")
-            # Don't return - continue to call_next_vendor below
+            # Queue is "calling" but no active attempts - it's safe to resume and call next vendor
+            print(f"⚠️  [VENDOR CALLING] Queue status is 'calling' but no active call attempts found (all completed / none exist)")
+            print(f"   Treating as safe to continue and calling next vendor...")
+            # Don't return here – continue to update status below and call_next_vendor at the end.
     
     # Update queue status
     print(f"🔄 [VENDOR CALLING] Updating queue {queue.queue_id} status to 'calling'")
