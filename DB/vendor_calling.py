@@ -67,7 +67,13 @@ def create_vendor_call_queue(
     print(f"   Category: {maintenance_request.category}")
     print(f"   Priority: {maintenance_request.priority}")
     
-    matched_vendors = match_vendors_to_maintenance_request(maintenance_request, session)
+    try:
+        matched_vendors = match_vendors_to_maintenance_request(maintenance_request, session)
+    except Exception as e:
+        print(f"❌ [VENDOR CALLING] Error matching vendors: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
     
     if not matched_vendors:
         # More lenient fallback: try to find ANY vendor for this property
@@ -146,7 +152,28 @@ def create_vendor_call_queue(
     
     # Start calling if auto_start
     if auto_start:
-        start_vendor_calling(maintenance_request.maintenance_request_id, session)
+        try:
+            result = start_vendor_calling(maintenance_request.maintenance_request_id, session)
+            if not result.get("success"):
+                # If start_vendor_calling failed, rollback queue status
+                print(f"⚠️  [VENDOR CALLING] start_vendor_calling failed: {result.get('error')}")
+                print(f"   Rolling back queue status from 'calling' to 'pending'")
+                queue.status = "pending"
+                maintenance_request.vendor_call_status = "not_started"
+                session.add(queue)
+                session.add(maintenance_request)
+                session.commit()
+        except Exception as e:
+            # If start_vendor_calling raised an exception, rollback queue status
+            print(f"❌ [VENDOR CALLING] Exception in start_vendor_calling: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"   Rolling back queue status from 'calling' to 'pending'")
+            queue.status = "pending"
+            maintenance_request.vendor_call_status = "not_started"
+            session.add(queue)
+            session.add(maintenance_request)
+            session.commit()
     
     print(f"📋 [VENDOR CALLING] Created vendor call queue {queue.queue_id} for maintenance request {maintenance_request.maintenance_request_id}")
     print(f"   Status: {queue.status}, Vendors in queue: {len(vendor_queue)}")
@@ -274,6 +301,12 @@ def start_vendor_calling(
     
     if queue.status == "calling":
         print(f"⏸️  [VENDOR CALLING] Vendor calling already in progress for request {maintenance_request_id}")
+        # Ensure maintenance_request status matches queue status
+        if maintenance_request.vendor_call_status != "calling":
+            print(f"🔄 [VENDOR CALLING] Syncing maintenance_request.vendor_call_status to 'calling' (queue is already calling)")
+            maintenance_request.vendor_call_status = "calling"
+            session.add(maintenance_request)
+            session.commit()
         return {
             "success": False,
             "error": "Vendor calling already in progress"
@@ -284,14 +317,14 @@ def start_vendor_calling(
     queue.status = "calling"
     queue.started_at = datetime.utcnow()
     session.add(queue)
-    session.commit()
     
-    # Update maintenance request
+    # Update maintenance request status to match queue
     maintenance_request.vendor_call_status = "calling"
     session.add(maintenance_request)
     session.commit()
     
     print(f"✅ [VENDOR CALLING] Queue {queue.queue_id} activated, starting first vendor call")
+    print(f"   Maintenance request {maintenance_request_id} vendor_call_status updated to 'calling'")
     
     # Call next vendor
     return call_next_vendor(maintenance_request_id, session)

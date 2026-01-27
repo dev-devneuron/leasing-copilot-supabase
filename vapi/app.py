@@ -3395,9 +3395,68 @@ async def delete_maintenance_request(
         else:
             raise HTTPException(status_code=403, detail="Unauthorized user type")
         
-        # Delete the request
-        session.delete(request)
-        session.commit()
+        # Delete related vendor calling records first (to avoid foreign key constraint violations)
+        try:
+            from DB.db import VendorCallQueue, VendorCallAttempt, VendorCallbackSchedule
+            
+            # Delete vendor callback schedules
+            callbacks = session.exec(
+                select(VendorCallbackSchedule).where(
+                    VendorCallbackSchedule.maintenance_request_id == request_id
+                )
+            ).all()
+            print(f"🗑️  [DELETE] Found {len(callbacks)} vendor callback schedule(s) to delete for request {request_id}")
+            for callback in callbacks:
+                session.delete(callback)
+            
+            # Delete vendor call attempts
+            attempts = session.exec(
+                select(VendorCallAttempt).where(
+                    VendorCallAttempt.maintenance_request_id == request_id
+                )
+            ).all()
+            print(f"🗑️  [DELETE] Found {len(attempts)} vendor call attempt(s) to delete for request {request_id}")
+            for attempt in attempts:
+                session.delete(attempt)
+            
+            # Delete vendor call queue
+            queue = session.exec(
+                select(VendorCallQueue).where(
+                    VendorCallQueue.maintenance_request_id == request_id
+                )
+            ).first()
+            if queue:
+                print(f"🗑️  [DELETE] Found vendor call queue {queue.queue_id} to delete for request {request_id}")
+                session.delete(queue)
+            
+            # Flush to ensure deletes are processed in the same transaction
+            # This ensures related records are deleted before the main delete
+            session.flush()
+            print(f"✅ [DELETE] Flushed deletion of related vendor calling records for request {request_id}")
+        except Exception as e:
+            print(f"❌ [DELETE] Error deleting related vendor calling records: {e}")
+            import traceback
+            traceback.print_exc()
+            session.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete maintenance request: {str(e)}"
+            )
+        
+        # Now delete the maintenance request (after related records are deleted)
+        try:
+            session.delete(request)
+            session.commit()
+        except Exception as e:
+            print(f"❌ [DELETE] Error deleting maintenance request: {e}")
+            import traceback
+            traceback.print_exc()
+            session.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete maintenance request: {str(e)}"
+            )
+        print(f"✅ [DELETE] Successfully deleted maintenance request {request_id}")
         
         return JSONResponse(content={
             "message": "Maintenance request deleted successfully",
@@ -4346,9 +4405,25 @@ async def get_vendor_call_status(
                     "completed_at": queue.completed_at.isoformat() if queue.completed_at else None,
                 }
             
+            # Determine the actual vendor call status
+            # Priority: queue status > maintenance_request.vendor_call_status > "not_started"
+            actual_status = maintenance_request.vendor_call_status
+            if queue:
+                # If queue exists, use queue status as source of truth
+                if queue.status in ["calling", "pending"]:
+                    actual_status = queue.status
+                elif queue.status == "completed":
+                    actual_status = "completed"
+                elif queue.status == "cancelled":
+                    actual_status = "cancelled"
+                elif queue.status == "paused":
+                    actual_status = "paused"
+            elif not actual_status:
+                actual_status = "not_started"
+            
             return JSONResponse(content={
                 "maintenance_request_id": request_id,
-                "vendor_call_status": maintenance_request.vendor_call_status,
+                "vendor_call_status": actual_status,  # Use determined status
                 "assigned_vendor_id": maintenance_request.assigned_vendor_id,
                 "queue": queue_info,
                 "call_attempts": attempt_list,
