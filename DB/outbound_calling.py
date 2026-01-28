@@ -2324,15 +2324,18 @@ def trigger_outbound_call(
     print(f"   From Number provided: {from_number}")
     print(f"   Bypass Eligibility: {bypass_eligibility}")
     print(f"   Metadata vendorCall: {metadata.get('vendorCall') if metadata else None}")
-    
+
+    # Determine if this is a vendor call up‑front so we can simplify logic for it.
+    # Vendor calls should use ONLY the maintenance‑request specific metadata that the caller
+    # passes in (e.g. from DB.vendor_calling), NOT any historical "extracted_intel" from
+    # previous tenant calls. This avoids leaking old inquiry context into a new vendor job.
+    is_vendor_call = bool(metadata and metadata.get("vendorCall") is True)
+
     # Get outbound assistant ID from property manager if not provided
     if not assistant_id and property_manager_id:
         try:
             pm = session.get(PropertyManager, property_manager_id)
             if pm:
-                # Check metadata to determine call type (backup logic if assistant_id not passed explicitly)
-                is_vendor_call = metadata and metadata.get("vendorCall") == True
-                
                 if is_vendor_call:
                     # Prefer vendor calling assistant
                     assistant_id = pm.vapi_vendor_calling_assistant_id
@@ -2407,120 +2410,123 @@ def trigger_outbound_call(
     print(f"   To Number: {contact.phone_number}")
     print(f"   Proceeding to make VAPI API call...")
     
-    # Load extracted intelligence from latest call for this contact
-    # This provides context for personalized re-engagement
+    # Load extracted intelligence from latest call for this contact (for customer re‑engagement ONLY).
+    # ✅ For vendor calls we SKIP this entirely and rely ONLY on the maintenance‑request metadata
+    #    provided by the caller (DB.vendor_calling). This prevents mixing old tenant inquiries into
+    #    a fresh maintenance job.
     extracted_intel = None
     context_message = None
-    
-    try:
-        # Get the most recent call record with extracted intelligence
-        latest_call = session.exec(
-            select(CallRecord)
-            .where(CallRecord.caller_number == contact.phone_number)
-            .where(CallRecord.extracted_intel.isnot(None))
-            .where(CallRecord.extraction_status == "completed")
-            .order_by(CallRecord.created_at.desc())
-        ).first()
-        
-        if latest_call and latest_call.extracted_intel:
-            extracted_intel = latest_call.extracted_intel
-            print(f"📋 Loaded extracted intelligence for re-engagement:")
-            print(f"   - Email: {extracted_intel.get('email')}")
-            print(f"   - Name: {extracted_intel.get('inferred_name')}")
-            print(f"   - Property: {extracted_intel.get('inquiry_property')}")
-            print(f"   - Purpose: {extracted_intel.get('inquiry_purpose')}")
-            print(f"   - Region: {extracted_intel.get('region')}")
+
+    if not is_vendor_call:
+        try:
+            # Get the most recent call record with extracted intelligence
+            latest_call = session.exec(
+                select(CallRecord)
+                .where(CallRecord.caller_number == contact.phone_number)
+                .where(CallRecord.extracted_intel.isnot(None))
+                .where(CallRecord.extraction_status == "completed")
+                .order_by(CallRecord.created_at.desc())
+            ).first()
             
-            # Build context message for assistant.messages (RECOMMENDED METHOD)
-            # Format: Natural, conversational, no mention of "records", "database", "system"
-            # ⚠️ PRIVACY RULE: Do NOT include email in conversational context
-            # Email should ONLY be in metadata, not in assistant.messages
-            # ✅ Name CAN be included in conversational context (natural to use)
-            # Only include non-null fields to avoid confusing Vapi
-            context_parts = []
-            
-            # Add customer name if available (OK to include in context)
-            # Filter out null/N/A/empty values
-            customer_name = extracted_intel.get("inferred_name") or contact.name
-            if _is_valid_value(customer_name):
-                context_parts.append(f"The customer's name is {customer_name}.")
-            
-            # Build a concise, non-repetitive context message
-            # Combine property and purpose into one natural sentence
-            # Filter out null/N/A/empty values
-            property_addr = extracted_intel.get("inquiry_property")
-            if not _is_valid_value(property_addr):
-                property_addr = None
-            
-            purpose = extracted_intel.get("inquiry_purpose")
-            if not _is_valid_value(purpose):
-                purpose = None
-            
-            region = extracted_intel.get("region")
-            if not _is_valid_value(region):
-                region = None
-            
-            # Build main context sentence (property + purpose combined)
-            if property_addr and purpose:
-                # Combine property and purpose naturally
-                if purpose == "booking a tour":
-                    context_parts.append(f"When they last reached out, they were interested in booking a tour for {property_addr}.")
-                elif purpose == "availability inquiry":
-                    context_parts.append(f"They previously asked about availability at {property_addr}.")
-                elif purpose == "pricing inquiry":
-                    context_parts.append(f"They previously inquired about pricing for {property_addr}.")
-                elif purpose == "viewing request":
-                    context_parts.append(f"They previously requested a viewing for {property_addr}.")
-                else:
-                    context_parts.append(f"They previously inquired about {purpose} for {property_addr}.")
-            elif property_addr:
-                # Only property, no purpose
-                context_parts.append(f"When they last reached out, they were asking about {property_addr}.")
-            elif purpose:
-                # Only purpose, no property
-                if purpose == "booking a tour":
-                    context_parts.append("They were previously interested in booking a tour.")
-                elif purpose == "availability inquiry":
-                    context_parts.append("They were previously asking about availability.")
-                elif purpose == "pricing inquiry":
-                    context_parts.append("They were previously asking about pricing.")
-                elif purpose == "viewing request":
-                    context_parts.append("They previously requested a viewing.")
-                else:
-                    context_parts.append(f"They were previously inquiring about {purpose}.")
-            
-            # Add region only if it's different from property location (avoid repetition)
-            if region and property_addr:
-                # Check if region is already mentioned in property address
-                region_in_property = region.lower() in property_addr.lower()
-                if not region_in_property:
+            if latest_call and latest_call.extracted_intel:
+                extracted_intel = latest_call.extracted_intel
+                print(f"📋 Loaded extracted intelligence for re-engagement:")
+                print(f"   - Email: {extracted_intel.get('email')}")
+                print(f"   - Name: {extracted_intel.get('inferred_name')}")
+                print(f"   - Property: {extracted_intel.get('inquiry_property')}")
+                print(f"   - Purpose: {extracted_intel.get('inquiry_purpose')}")
+                print(f"   - Region: {extracted_intel.get('region')}")
+                
+                # Build context message for assistant.messages (RECOMMENDED METHOD)
+                # Format: Natural, conversational, no mention of "records", "database", "system"
+                # ⚠️ PRIVACY RULE: Do NOT include email in conversational context
+                # Email should ONLY be in metadata, not in assistant.messages
+                # ✅ Name CAN be included in conversational context (natural to use)
+                # Only include non-null fields to avoid confusing Vapi
+                context_parts = []
+                
+                # Add customer name if available (OK to include in context)
+                # Filter out null/N/A/empty values
+                customer_name = extracted_intel.get("inferred_name") or contact.name
+                if _is_valid_value(customer_name):
+                    context_parts.append(f"The customer's name is {customer_name}.")
+                
+                # Build a concise, non-repetitive context message
+                # Combine property and purpose into one natural sentence
+                # Filter out null/N/A/empty values
+                property_addr = extracted_intel.get("inquiry_property")
+                if not _is_valid_value(property_addr):
+                    property_addr = None
+                
+                purpose = extracted_intel.get("inquiry_purpose")
+                if not _is_valid_value(purpose):
+                    purpose = None
+                
+                region = extracted_intel.get("region")
+                if not _is_valid_value(region):
+                    region = None
+                
+                # Build main context sentence (property + purpose combined)
+                if property_addr and purpose:
+                    # Combine property and purpose naturally
+                    if purpose == "booking a tour":
+                        context_parts.append(f"When they last reached out, they were interested in booking a tour for {property_addr}.")
+                    elif purpose == "availability inquiry":
+                        context_parts.append(f"They previously asked about availability at {property_addr}.")
+                    elif purpose == "pricing inquiry":
+                        context_parts.append(f"They previously inquired about pricing for {property_addr}.")
+                    elif purpose == "viewing request":
+                        context_parts.append(f"They previously requested a viewing for {property_addr}.")
+                    else:
+                        context_parts.append(f"They previously inquired about {purpose} for {property_addr}.")
+                elif property_addr:
+                    # Only property, no purpose
+                    context_parts.append(f"When they last reached out, they were asking about {property_addr}.")
+                elif purpose:
+                    # Only purpose, no property
+                    if purpose == "booking a tour":
+                        context_parts.append("They were previously interested in booking a tour.")
+                    elif purpose == "availability inquiry":
+                        context_parts.append("They were previously asking about availability.")
+                    elif purpose == "pricing inquiry":
+                        context_parts.append("They were previously asking about pricing.")
+                    elif purpose == "viewing request":
+                        context_parts.append("They previously requested a viewing.")
+                    else:
+                        context_parts.append(f"They were previously inquiring about {purpose}.")
+                
+                # Add region only if it's different from property location (avoid repetition)
+                if region and property_addr:
+                    # Check if region is already mentioned in property address
+                    region_in_property = region.lower() in property_addr.lower()
+                    if not region_in_property:
+                        context_parts.append(f"They were looking in {region}.")
+                elif region:
+                    # Only region, no property
                     context_parts.append(f"They were looking in {region}.")
-            elif region:
-                # Only region, no property
-                context_parts.append(f"They were looking in {region}.")
-            
-            # Build the context message (only if we have useful data)
-            if context_parts:
-                context_message = " ".join(context_parts)
-                # Add instruction for natural usage
-                context_message += " Use this information naturally in conversation. Do not mention 'records', 'database', 'system', or 'logs'. Reference it casually, as if you remember the previous conversation."
-                print(f"✅ Built context message for assistant (email excluded for privacy, name included):")
-                print(f"   {context_message}")
+                
+                # Build the context message (only if we have useful data)
+                if context_parts:
+                    context_message = " ".join(context_parts)
+                    # Add instruction for natural usage
+                    context_message += " Use this information naturally in conversation. Do not mention 'records', 'database', 'system', or 'logs'. Reference it casually, as if you remember the previous conversation."
+                    print(f"✅ Built context message for assistant (email excluded for privacy, name included):")
+                    print(f"   {context_message}")
+                else:
+                    print(f"⚠️  No useful context to send (all fields are null)")
             else:
-                print(f"⚠️  No useful context to send (all fields are null)")
-        else:
-            print(f"ℹ️  No extracted intelligence found for this contact - proceeding without context")
-    except Exception as e:
-        print(f"⚠️  Error loading extracted intelligence: {e}")
-        import traceback
-        traceback.print_exc()
-        # Continue without context if there's an error
+                print(f"ℹ️  No extracted intelligence found for this contact - proceeding without context")
+        except Exception as e:
+            print(f"⚠️  Error loading extracted intelligence: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue without context if there's an error
     
     # Prepare Vapi API request with correct structure (following Vapi best practices)
     # Vapi expects: phoneNumber.twilioPhoneNumber, phoneNumber.twilioAccountSid, phoneNumber.twilioAuthToken
     # and customer.number (not phoneNumber.to)
     # Best practice: Include customer.name if available for better personalization
-    customer_name = contact.name or (extracted_intel.get("inferred_name") if extracted_intel else None)
+    customer_name = contact.name or (extracted_intel.get("inferred_name") if (extracted_intel and not is_vendor_call) else None)
     
     # VAPI API endpoint: POST https://api.vapi.ai/call
     # This is the correct endpoint for creating outbound calls
@@ -2547,17 +2553,23 @@ def trigger_outbound_call(
         payload["customer"]["name"] = customer_name
     
     # Add context to metadata (Vapi best practice: use metadata for context)
-    # The assistant's system prompt should be configured to read from metadata.callContext
-    # Alternative: Use assistantOverrides.variableValues for structured variables
-    # Filter out null/N/A/empty values
-    if _is_valid_value(context_message):
+    # The assistant's system prompt should be configured to read from metadata.callContext.
+    # IMPORTANT:
+    #   - For vendor calls we DO NOT inject any historical context here.
+    #   - If caller already provided metadata["callContext"] (e.g. maintenance job JSON),
+    #     we respect that and do not overwrite it.
+    if (
+        not is_vendor_call
+        and _is_valid_value(context_message)
+        and not (metadata and _is_valid_value(metadata.get("callContext")))
+    ):
         payload["metadata"]["callContext"] = context_message
-        print(f"📤 Added call context to metadata")
+        print(f"📤 Added call context to metadata (customer re-engagement)")
     
     # Also add structured variables via assistantOverrides for easier prompt reference
-    # This allows the assistant to use {{customerName}}, {{inquiryProperty}}, etc. in prompts
-    # Filter out null/N/A/empty values - only send valid data
-    if extracted_intel:
+    # This allows the assistant to use {{customerName}}, {{inquiryProperty}}, etc. in prompts.
+    # For vendor calls we skip this entirely to keep context strictly per‑maintenance‑request.
+    if extracted_intel and not is_vendor_call:
         variable_values = {}
         
         # Only add valid (non-null, non-empty, non-"N/A") values
@@ -2595,6 +2607,23 @@ def trigger_outbound_call(
             if _is_valid_value(v)
         }
         print(f"📤 Merged additional metadata (filtered nulls/N/A/empty): {list(payload['metadata'].keys())}")
+
+        # For vendor calls, add an explicit debug log so we can always verify
+        # the maintenance‑request‑specific context that Vapi will see.
+        if is_vendor_call:
+            mr_id = payload["metadata"].get("maintenanceRequestId")
+            vendor_id = payload["metadata"].get("vendorId")
+            attempt_id = payload["metadata"].get("vendorCallAttemptId")
+            ctx = payload["metadata"].get("callContext")
+            print("🔍 [OUTBOUND CALLING][VENDOR CALL] Metadata sanity check:")
+            print(f"   maintenanceRequestId: {mr_id}, vendorId: {vendor_id}, vendorCallAttemptId: {attempt_id}")
+            if isinstance(ctx, str):
+                preview = ctx[:400]
+                print(f"   callContext (preview, first 400 chars): {preview}")
+                if len(ctx) > 400:
+                    print(f"   (callContext truncated for logs, total_length={len(ctx)})")
+            else:
+                print("   callContext: None or non‑string (expected JSON string from DB.vendor_calling)")
     
     # Make API call to Vapi
     try:
