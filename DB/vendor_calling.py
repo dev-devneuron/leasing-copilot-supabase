@@ -489,9 +489,12 @@ def call_next_vendor(
         return call_next_vendor(maintenance_request_id, session)
     
     # Prepare call metadata
+    # This JSON is sent to Vapi as metadata.callContext (stringified) so the
+    # vendor assistant can clearly see the current job details.
     call_metadata = {
         "maintenance_request_id": maintenance_request_id,
         "vendor_id": vendor_id,
+        "vendor_business_name": vendor.name,  # ✅ Explicit vendor business name
         "vendor_call_attempt_id": attempt.attempt_id,
         "issue_description": maintenance_request.issue_description,
         "category": maintenance_request.category,
