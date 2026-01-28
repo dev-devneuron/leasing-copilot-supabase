@@ -41,6 +41,15 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 DEFAULT_TWILIO_FROM_NUMBER = os.getenv("DEFAULT_TWILIO_FROM_NUMBER")
 
 # ============================================================================
+# LOGGING / PERFORMANCE CONFIG
+# ============================================================================
+# These flags let us keep extremely rich logging available for debugging
+# without forcing the system to always pay the cost of serializing and
+# printing very large payloads in normal operation.
+LOG_VAPI_FULL_PAYLOAD = os.getenv("LOG_VAPI_FULL_PAYLOAD", "false").lower() == "true"
+LOG_VAPI_FULL_RESPONSE = os.getenv("LOG_VAPI_FULL_RESPONSE", "false").lower() == "true"
+
+# ============================================================================
 # COMPLIANCE CONFIGURATION
 # ============================================================================
 
@@ -2632,8 +2641,10 @@ def trigger_outbound_call(
             "Content-Type": "application/json"
         }
         
-        # Log the full payload being sent to Vapi (for debugging)
-        # IMPORTANT: redact secrets (Twilio auth token) before logging.
+        is_vendor_call = metadata and metadata.get("vendorCall") == True
+        call_type = "VENDOR CALL" if is_vendor_call else "CUSTOMER RE-ENGAGEMENT"
+        # Function to redact sensitive fields when logging full payload
+        # so we can debug safely when deep logging is enabled.
         def _redact_vapi_payload_for_logs(p: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 redacted = json.loads(json.dumps(p))  # deep copy
@@ -2645,8 +2656,6 @@ def trigger_outbound_call(
                 phone["twilioAuthToken"] = "***REDACTED***"
             return redacted
 
-        is_vendor_call = metadata and metadata.get("vendorCall") == True
-        call_type = "VENDOR CALL" if is_vendor_call else "CUSTOMER RE-ENGAGEMENT"
         print(f"\n📤 SENDING PAYLOAD TO VAPI ({call_type}):")
         print(f"   Assistant ID: {assistant_id}")
         print(f"   From Number: {from_number}")
@@ -2654,19 +2663,28 @@ def trigger_outbound_call(
         if bypass_eligibility:
             print(f"   ⚠️  BYPASSING ELIGIBILITY CHECKS (vendor call or urgent request)")
         if payload.get("metadata", {}).get("callContext"):
-            print(f"   ✅ Call context in metadata: {payload['metadata']['callContext'][:200]}...")
+            # Always log a short preview of callContext so we can see which
+            # maintenance request / context Vapi is using, without dumping
+            # the entire JSON by default.
+            ctx_preview = str(payload["metadata"]["callContext"])[:200]
+            print(f"   ✅ Call context in metadata (preview): {ctx_preview}...")
         else:
             print(f"   ⚠️  No call context (no extracted intelligence available)")
         print(f"   Metadata keys: {list(payload.get('metadata', {}).keys())}")
-        # Log the entire payload (sanitized) so we can confirm exactly what Vapi receives.
-        sanitized_payload = _redact_vapi_payload_for_logs(payload)
-        try:
-            print(f"   Full payload (sanitized): {json.dumps(sanitized_payload, indent=2)[:6000]}")
-            if len(json.dumps(sanitized_payload)) > 6000:
-                print(f"   (Payload truncated in logs; total chars={len(json.dumps(sanitized_payload))})")
-        except Exception as _log_err:
-            print(f"   ⚠️  Could not serialize full payload for logs: {_log_err}")
-            print(f"   Payload keys: {list(payload.keys())}")
+
+        # Optionally log the entire payload (sanitized) for deep debugging.
+        # This is controlled by LOG_VAPI_FULL_PAYLOAD to avoid performance
+        # issues from serializing very large payloads on every call.
+        if LOG_VAPI_FULL_PAYLOAD:
+            sanitized_payload = _redact_vapi_payload_for_logs(payload)
+            try:
+                serialized = json.dumps(sanitized_payload, indent=2)
+                print(f"   Full payload (sanitized): {serialized[:6000]}")
+                if len(serialized) > 6000:
+                    print(f"   (Payload truncated in logs; total chars={len(serialized)})")
+            except Exception as _log_err:
+                print(f"   ⚠️  Could not serialize full payload for logs: {_log_err}")
+                print(f"   Payload keys: {list(payload.keys())}")
         
         # VAPI API endpoint: POST https://api.vapi.ai/call
         # This is the correct endpoint according to VAPI documentation
@@ -2684,14 +2702,17 @@ def trigger_outbound_call(
         )
         
         print(f"📥 [OUTBOUND CALLING] VAPI API response status: {response.status_code}")
-        # Log response body (truncated) to verify how Vapi interpreted payload.
-        try:
-            resp_text = response.text or ""
-            print(f"📥 [OUTBOUND CALLING] VAPI response body (truncated): {resp_text[:2000]}")
-            if len(resp_text) > 2000:
-                print(f"   (Response truncated in logs; total chars={len(resp_text)})")
-        except Exception as _resp_log_err:
-            print(f"⚠️  [OUTBOUND CALLING] Could not log VAPI response body: {_resp_log_err}")
+
+        # Optionally log response body (truncated) to verify how Vapi interpreted payload.
+        # Guarded by LOG_VAPI_FULL_RESPONSE to avoid repeatedly printing large bodies.
+        if LOG_VAPI_FULL_RESPONSE:
+            try:
+                resp_text = response.text or ""
+                print(f"📥 [OUTBOUND CALLING] VAPI response body (truncated): {resp_text[:2000]}")
+                if len(resp_text) > 2000:
+                    print(f"   (Response truncated in logs; total chars={len(resp_text)})")
+            except Exception as _resp_log_err:
+                print(f"⚠️  [OUTBOUND CALLING] Could not log VAPI response body: {_resp_log_err}")
         
         if response.status_code not in [200, 201]:
             error_msg = response.text
