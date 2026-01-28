@@ -2577,7 +2577,16 @@ def trigger_outbound_call(
     
     # Also add structured variables via assistantOverrides for easier prompt reference
     # This allows the assistant to use {{customerName}}, {{inquiryProperty}}, etc. in prompts.
-    # For vendor calls we skip this entirely to keep context strictly per‑maintenance‑request.
+    #
+    # CUSTOMER RE-ENGAGEMENT:
+    #   - Use extracted_intel to populate variables like {{customerName}}, {{inquiryProperty}}, etc.
+    #
+    # VENDOR CALLS:
+    #   - We derive variables DIRECTLY from the per-call maintenance JSON in metadata.callContext
+    #     so that the assistant sees the same job details in two places:
+    #       1) metadata.callContext (full JSON string)
+    #       2) assistantOverrides.variableValues (structured fields)
+    #
     if extracted_intel and not is_vendor_call:
         variable_values = {}
         
@@ -2633,6 +2642,72 @@ def trigger_outbound_call(
                     print(f"   (callContext truncated for logs, total_length={len(ctx)})")
             else:
                 print("   callContext: None or non‑string (expected JSON string from DB.vendor_calling)")
+
+            # Derive assistantOverrides.variableValues from callContext JSON so the
+            # vendor assistant can access job fields as structured variables
+            # (same strategy as customer outreach, but using maintenance JSON).
+            try:
+                import json as _json_for_ctx
+                ctx_raw = payload["metadata"].get("callContext")
+                if isinstance(ctx_raw, str) and ctx_raw.strip():
+                    ctx_obj = _json_for_ctx.loads(ctx_raw)
+                    variable_values_vendor: Dict[str, Any] = {}
+
+                    # Map core fields into clear variable names
+                    mr_id_ctx = ctx_obj.get("maintenance_request_id")
+                    if _is_valid_value(mr_id_ctx):
+                        variable_values_vendor["jobMaintenanceRequestId"] = str(mr_id_ctx)
+
+                    vendor_business_name = ctx_obj.get("vendor_business_name")
+                    if _is_valid_value(vendor_business_name):
+                        variable_values_vendor["jobVendorName"] = vendor_business_name
+
+                    issue_description = ctx_obj.get("issue_description")
+                    if _is_valid_value(issue_description):
+                        variable_values_vendor["jobIssueDescription"] = issue_description
+
+                    category = ctx_obj.get("category")
+                    if _is_valid_value(category):
+                        variable_values_vendor["jobCategory"] = category
+
+                    priority = ctx_obj.get("priority")
+                    if _is_valid_value(priority):
+                        variable_values_vendor["jobPriority"] = priority
+
+                    location = ctx_obj.get("location")
+                    if _is_valid_value(location):
+                        variable_values_vendor["jobLocation"] = location
+
+                    property_address = ctx_obj.get("property_address")
+                    if _is_valid_value(property_address):
+                        variable_values_vendor["jobPropertyAddress"] = property_address
+
+                    tenant_name = ctx_obj.get("tenant_name")
+                    if _is_valid_value(tenant_name):
+                        variable_values_vendor["jobTenantName"] = tenant_name
+
+                    tenant_unit = ctx_obj.get("tenant_unit")
+                    if _is_valid_value(tenant_unit):
+                        variable_values_vendor["jobTenantUnit"] = str(tenant_unit)
+
+                    property_id_ctx = ctx_obj.get("property_id")
+                    if _is_valid_value(property_id_ctx):
+                        variable_values_vendor["jobPropertyId"] = str(property_id_ctx)
+
+                    # Only attach assistantOverrides if we found at least one useful variable
+                    if variable_values_vendor:
+                        existing_overrides = payload.get("assistantOverrides") or {}
+                        existing_vars = existing_overrides.get("variableValues") or {}
+                        # Merge, vendor job vars take precedence for these keys
+                        existing_vars.update(variable_values_vendor)
+                        payload["assistantOverrides"] = {
+                            "variableValues": existing_vars
+                        }
+                        print(f"📤 Added vendor job variables via assistantOverrides: {list(variable_values_vendor.keys())}")
+                else:
+                    print("   ⚠️  callContext missing or empty, cannot derive vendor assistant variables")
+            except Exception as _ctx_err:
+                print(f"⚠️  Failed to derive vendor assistantOverrides from callContext: {_ctx_err}")
     
     # Make API call to Vapi
     try:
