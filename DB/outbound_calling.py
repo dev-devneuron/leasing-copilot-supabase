@@ -2672,14 +2672,20 @@ def trigger_outbound_call(
             print(f"   ⚠️  No call context (no extracted intelligence available)")
         print(f"   Metadata keys: {list(payload.get('metadata', {}).keys())}")
 
-        # Optionally log the entire payload (sanitized) for deep debugging.
-        # This is controlled by LOG_VAPI_FULL_PAYLOAD to avoid performance
-        # issues from serializing very large payloads on every call.
-        if LOG_VAPI_FULL_PAYLOAD:
+        # Log the entire payload (sanitized) so we have an exact record of
+        # what was sent to Vapi. This is especially important for vendor
+        # calls, where this JSON is the single source of truth for job
+        # context.
+        #
+        # For non-vendor calls, we keep this behind LOG_VAPI_FULL_PAYLOAD
+        # to avoid unnecessary overhead in high-volume flows.
+        should_log_full_payload = is_vendor_call or LOG_VAPI_FULL_PAYLOAD
+        if should_log_full_payload:
             sanitized_payload = _redact_vapi_payload_for_logs(payload)
             try:
                 serialized = json.dumps(sanitized_payload, indent=2)
-                print(f"   Full payload (sanitized): {serialized[:6000]}")
+                print("   Full VAPI payload being sent (sanitized):")
+                print(serialized[:6000])
                 if len(serialized) > 6000:
                     print(f"   (Payload truncated in logs; total chars={len(serialized)})")
             except Exception as _log_err:
