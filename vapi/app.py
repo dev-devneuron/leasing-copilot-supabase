@@ -10896,28 +10896,43 @@ async def vapi_webhook_hyphen(request: Request):
                             if call_record.transcript:
                                 transcript_lower = call_record.transcript.lower()
                                 
-                                # Extract availability time
                                 import re
+
+                                # Extract availability time (store as human text; frontend should NOT parse as Date)
+                                # Prefer day+time phrases like "tomorrow at 11 am" so it doesn't show as "Invalid Date".
                                 time_patterns = [
-                                    r"(?:available|come|arrive|be there|schedule).*?(?:at|by|around|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
-                                    r"(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday).*?(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
+                                    # day + time
+                                    r"(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:at|around|by)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))",
+                                    # schedule/available + time
+                                    r"(?:available|come|arrive|be there|schedule).*?(?:at|by|around|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))",
                                 ]
                                 for pattern in time_patterns:
                                     match = re.search(pattern, transcript_lower)
                                     if match:
-                                        call_data["earliest_available_time"] = match.group(1)
+                                        if len(match.groups()) >= 2 and match.group(1) in [
+                                            "tomorrow","today","monday","tuesday","wednesday","thursday","friday","saturday","sunday"
+                                        ]:
+                                            call_data["earliest_available_time"] = f"{match.group(1)} {match.group(2)}"
+                                        else:
+                                            call_data["earliest_available_time"] = match.group(1)
                                         break
-                                
-                                # Extract cost estimate
-                                cost_patterns = [
-                                    r"(?:cost|price|charge|estimate).*?(\$?\d+(?:,\d{3})*(?:\.\d{2})?)",
-                                    r"(\$?\d+(?:,\d{3})*(?:\.\d{2})?).*?(?:dollar|buck)",
-                                ]
-                                for pattern in cost_patterns:
-                                    match = re.search(pattern, transcript_lower)
-                                    if match:
-                                        call_data["estimated_cost_range"] = match.group(1)
-                                        break
+
+                                # Extract cost estimate (avoid grabbing "2 hours" from "how long do you estimate...")
+                                # We DO NOT match plain word "estimate" here; only cost/price/charge/fee + currency context.
+                                # 1) prefer explicit $ amounts
+                                money_match = re.search(r"\$\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)", transcript_lower)
+                                if money_match:
+                                    call_data["estimated_cost_range"] = f"${money_match.group(1)}"
+                                else:
+                                    # 2) number followed by dollar(s)/buck(s)
+                                    m2 = re.search(r"(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:dollars?|bucks?)", transcript_lower)
+                                    if m2:
+                                        call_data["estimated_cost_range"] = f"${m2.group(1)}"
+                                    else:
+                                        # 3) anchor on cost/price/charge/fee then find a number after it
+                                        m3 = re.search(r"(?:cost|price|charge|fee)\D{0,40}(\d+(?:,\d{3})*(?:\.\d{1,2})?)", transcript_lower)
+                                        if m3:
+                                            call_data["estimated_cost_range"] = f"${m3.group(1)}"
                             
                             # Process outcome
                             result = handle_vendor_call_outcome(

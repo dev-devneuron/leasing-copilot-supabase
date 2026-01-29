@@ -476,6 +476,11 @@ interface VendorCallAttempt {
 - Show `call_transcript` (preview + expand/copy)
 - These are the **source of truth** for what was actually discussed on the call.
 
+**Important UI rule (prevents “Invalid Date” bugs):**
+- Treat `earliest_available_time` as **display text**, not a guaranteed ISO datetime.
+  - Do **NOT** do `new Date(earliest_available_time)` unless you have your own ISO field.
+  - Display it directly (e.g. `"tomorrow 11 am"` / `"2026-01-30 11:00"` / `"11 am"`).
+
 **Additional vendor-tool data (recommended to implement):**
 - Read these fields from `attempt.call_metadata` when present. They come from the Vapi tools:
   - **From `captureVendorResponse`** (stored in `call_metadata`):
