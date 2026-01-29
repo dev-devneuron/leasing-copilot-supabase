@@ -27,6 +27,11 @@ When a tenant submits a maintenance request, the system can automatically call r
 - Get cost estimates
 - Assign the best available vendor
 
+**Important behavior updates (2026-01):**
+- **Strict vendor type matching**: If the request maps to a specific service type (e.g. `carpenter`), the system will **NOT** call unrelated service types (e.g. plumbers). If no matching vendors exist, the queue will not “fallback” to wrong vendors.
+- **Auto-start timing**: Vendor calling is triggered **1 minute after** the inbound maintenance-request call’s **end-of-call-report** webhook is received (when auto-calling is enabled). PM can still manually start/pause/cancel.
+- **PM verification**: Call recording + transcript are stored per attempt and should be shown in the maintenance modal so PM can verify what was agreed.
+
 ### Architecture Overview
 
 **Important Architecture Points:**
@@ -425,6 +430,10 @@ Response: {
 }
 ```
 
+**Notes:**
+- This endpoint can also be used to **resume** a paused queue.
+- Even if vendor calling auto-starts after 1 minute, the UI should still expose Start/Pause/Cancel for control and recovery.
+
 #### Get Vendor Call Status
 ```typescript
 GET /maintenance-requests/{request_id}/vendor-call-status
@@ -458,6 +467,22 @@ interface VendorCallAttempt {
   completed_at: string | null; // ISO timestamp
 }
 ```
+
+**PM verification requirement (must implement):**
+- Show `call_recording_url` (audio player + open/download)
+- Show `call_transcript` (preview + expand/copy)
+- These are the **source of truth** for what was actually discussed on the call.
+
+---
+
+### Backend-only: Vapi Tool Endpoints (Frontend does NOT call these)
+
+These endpoints are called by the Vapi vendor assistant during the call (tools are **synchronous**):
+
+- `POST /vapi/vendor/capture-response` (tool: `captureVendorResponse`)
+- `POST /vapi/vendor/escalate-next` (tool: `escalateToNextVendor`)
+
+Frontend doesn’t integrate these directly; it only reads results via `GET /maintenance-requests/{id}/vendor-call-status`.
 
 #### Pause Vendor Calls
 ```typescript

@@ -4715,6 +4715,11 @@ async def capture_vendor_response(
     VAPI Function: captureVendorResponse
     Capture vendor's availability, timing, and cost estimate for a maintenance request.
     
+    NOTE: This endpoint is designed for SYNCHRONOUS Vapi tool calls:
+    - It returns immediately with a Vapi-compatible `results[]` payload.
+    - It performs the DB update and triggers queue progression/assignment logic.
+    - It is safe for strict parameter validation.
+    
     Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/capture-response
     """
     from DB.db import VendorCallAttempt, Vendor, MaintenanceRequest
@@ -4725,6 +4730,60 @@ async def capture_vendor_response(
         request_body = await http_request.json()
         tool_call_id = None
         args = {}
+
+        def _extract_vendor_call_attempt_id(body: dict) -> Optional[int]:
+            """
+            Vapi may send metadata in different locations depending on tool configuration.
+            We support multiple shapes to make the endpoint robust.
+            """
+            try:
+                meta = (body.get("metadata") or {})
+                if not meta and isinstance(body.get("call"), dict):
+                    meta = body.get("call", {}).get("metadata") or {}
+                if not meta and isinstance(body.get("message"), dict):
+                    meta = body.get("message", {}).get("metadata") or {}
+
+                raw = meta.get("vendorCallAttemptId") or body.get("vendorCallAttemptId")
+                if raw is None:
+                    return None
+                # Vapi often serializes metadata values as strings
+                return int(raw)
+            except Exception:
+                return None
+
+        def _to_bool(val: Any) -> Optional[bool]:
+            """Lenient boolean coercion for tool args."""
+            if val is None:
+                return None
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, (int, float)):
+                return bool(val)
+            if isinstance(val, str):
+                s = val.strip().lower()
+                if s in ["true", "yes", "y", "available", "ok", "okay", "sure"]:
+                    return True
+                if s in ["false", "no", "n", "unavailable", "not available"]:
+                    return False
+            return None
+
+        def _tool_ok(message: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            payload = {"success": True, "message": message}
+            if extra:
+                payload.update(extra)
+            return {"results": [{"toolCallId": tool_call_id, "result": payload}]}
+
+        def _tool_err(message: str) -> Dict[str, Any]:
+            # Return 200 with a tool result so Vapi can continue gracefully.
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": False,
+                        "error": message
+                    }
+                }]
+            }
         
         # Extract from VAPI tool call format
         if request_body.get("message") and request_body["message"].get("toolCalls"):
@@ -4752,14 +4811,15 @@ async def capture_vendor_response(
                     break
         
         # Extract metadata from request to identify vendor call attempt
-        metadata = request_body.get("metadata", {}) or {}
-        vendor_call_attempt_id = metadata.get("vendorCallAttemptId") or request_body.get("vendorCallAttemptId")
+        vendor_call_attempt_id = _extract_vendor_call_attempt_id(request_body)
         
         if not vendor_call_attempt_id:
-            raise HTTPException(status_code=400, detail="Missing vendorCallAttemptId in metadata")
+            return _tool_err("Missing vendorCallAttemptId in metadata (cannot map response to a vendor call attempt)")
         
-        # Extract vendor response data
-        available = args.get("available", False)
+        # Extract vendor response data (lenient)
+        # We prefer explicit "available" but infer it if missing.
+        available_raw = args.get("available", None)
+        available = _to_bool(available_raw)
         available_date = args.get("availableDate")
         available_time_window = args.get("availableTimeWindow")
         estimated_cost_range = args.get("estimatedCostRange")
@@ -4768,6 +4828,15 @@ async def capture_vendor_response(
         vendor_notes = args.get("vendorNotes")
         preferred_contact_method = args.get("preferredContactMethod")
         next_available_if_not_now = args.get("nextAvailableIfNotNow")
+
+        if available is None:
+            # Infer availability from presence of timing fields; default to False if nothing useful.
+            inferred = bool(available_date or available_time_window or next_available_if_not_now)
+            available = inferred
+            print(
+                "⚠️  [VENDOR CALLING] captureVendorResponse missing/invalid 'available'; "
+                f"inferred available={available} from timing fields"
+            )
         
         with Session(engine) as session:
             # Get vendor call attempt
@@ -4797,6 +4866,21 @@ async def capture_vendor_response(
                 "emergency_surcharge": emergency_surcharge,
                 "preferred_contact_method": preferred_contact_method,
                 "next_available_if_not_now": next_available_if_not_now,
+                # Store raw availability fields too (useful for UI + auditing)
+                "available_date": available_date,
+                "available_time_window": available_time_window,
+                # Keep a snapshot of the tool payload we received (single source of truth from tool)
+                "tool_captureVendorResponse": {
+                    "available": available,
+                    "availableDate": available_date,
+                    "availableTimeWindow": available_time_window,
+                    "estimatedCostRange": estimated_cost_range,
+                    "requiresAccessInstructions": requires_access_instructions,
+                    "emergencySurcharge": emergency_surcharge,
+                    "vendorNotes": vendor_notes,
+                    "preferredContactMethod": preferred_contact_method,
+                    "nextAvailableIfNotNow": next_available_if_not_now,
+                },
             })
             
             session.add(attempt)
@@ -4827,30 +4911,25 @@ async def capture_vendor_response(
                 call_data=call_data
             )
             
-            return {
-                "results": [{
-                    "toolCallId": tool_call_id,
-                    "result": {
-                        "success": True,
-                        "message": f"Vendor response captured: {'Available' if available else 'Not available'}",
-                        "vendor_call_attempt_id": vendor_call_attempt_id,
-                        "outcome": outcome
-                    }
-                }]
-            }
+            return _tool_ok(
+                message=f"Vendor response captured: {'Available' if available else 'Not available'}",
+                extra={
+                    "vendor_call_attempt_id": vendor_call_attempt_id,
+                    "outcome": outcome
+                }
+            )
     
-    except HTTPException:
-        raise
     except Exception as e:
         print(f"❌ Error in capture_vendor_response: {e}")
         import traceback
         traceback.print_exc()
+        # Return a tool error result (not a 500) to keep Vapi call flow stable.
         return {
             "results": [{
                 "toolCallId": tool_call_id if 'tool_call_id' in locals() else None,
                 "result": {
                     "success": False,
-                    "error": f"I'm having technical difficulties. Let me have our property manager follow up with you directly."
+                    "error": "I'm having technical difficulties. Let me have our property manager follow up with you directly."
                 }
             }]
         }
@@ -4865,15 +4944,73 @@ async def escalate_to_next_vendor(
     VAPI Function: escalateToNextVendor
     Trigger when current vendor declines or call fails, to move to next vendor in queue.
     
+    NOTE: This endpoint is designed for SYNCHRONOUS Vapi tool calls:
+    - It returns immediately with a Vapi-compatible `results[]` payload.
+    - If `retryRecommended` + `retryDelayMinutes` are provided, it schedules a retry and does NOT advance.
+    - Otherwise it records outcome and escalates according to our queue logic.
+    
     Endpoint: POST https://leasing-copilot-mvp.onrender.com/vapi/vendor/escalate-next
     """
     from DB.db import VendorCallAttempt, Vendor
-    from DB.vendor_calling import handle_vendor_call_outcome, call_next_vendor
+    from DB.vendor_calling import handle_vendor_call_outcome, call_next_vendor, enqueue_retry_job, schedule_vendor_callback
     
     try:
         request_body = await http_request.json()
         tool_call_id = None
         args = {}
+
+        def _extract_vendor_call_attempt_id(body: dict) -> Optional[int]:
+            try:
+                meta = (body.get("metadata") or {})
+                if not meta and isinstance(body.get("call"), dict):
+                    meta = body.get("call", {}).get("metadata") or {}
+                if not meta and isinstance(body.get("message"), dict):
+                    meta = body.get("message", {}).get("metadata") or {}
+                raw = meta.get("vendorCallAttemptId") or body.get("vendorCallAttemptId")
+                if raw is None:
+                    return None
+                return int(raw)
+            except Exception:
+                return None
+
+        def _normalize_call_outcome(val: Any) -> str:
+            """Lenient normalization for callOutcome."""
+            if val is None:
+                return "no_answer"
+            if isinstance(val, str):
+                s = val.strip().lower()
+                # normalize common variants
+                if s in ["no answer", "no_answer", "noanswer"]:
+                    return "no_answer"
+                if s in ["voice mail", "voice_mail", "voicemail"]:
+                    return "voicemail"
+                if s in ["busy", "line busy"]:
+                    return "busy"
+                if s in ["declined", "decline", "no", "not available", "unavailable"]:
+                    return "declined"
+                if s in ["wrong number", "wrong_number"]:
+                    return "wrong_number"
+                if s in ["out of service", "out_of_service", "disconnected"]:
+                    return "out_of_service"
+                return s
+            return "no_answer"
+
+        def _tool_ok(message: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            payload = {"success": True, "message": message}
+            if extra:
+                payload.update(extra)
+            return {"results": [{"toolCallId": tool_call_id, "result": payload}]}
+
+        def _tool_err(message: str) -> Dict[str, Any]:
+            return {
+                "results": [{
+                    "toolCallId": tool_call_id,
+                    "result": {
+                        "success": False,
+                        "error": message
+                    }
+                }]
+            }
         
         # Extract from VAPI tool call format
         if request_body.get("message") and request_body["message"].get("toolCalls"):
@@ -4900,13 +5037,13 @@ async def escalate_to_next_vendor(
                         args = func_args
                     break
         
-        metadata = request_body.get("metadata", {}) or {}
-        vendor_call_attempt_id = metadata.get("vendorCallAttemptId") or request_body.get("vendorCallAttemptId")
+        vendor_call_attempt_id = _extract_vendor_call_attempt_id(request_body)
         
         if not vendor_call_attempt_id:
-            raise HTTPException(status_code=400, detail="Missing vendorCallAttemptId in metadata")
+            return _tool_err("Missing vendorCallAttemptId in metadata (cannot map escalation to a vendor call attempt)")
         
-        call_outcome = args.get("callOutcome", "no_answer")
+        # Lenient: default callOutcome if missing
+        call_outcome = _normalize_call_outcome(args.get("callOutcome"))
         decline_reason = args.get("declineReason")
         suggested_callback_time = args.get("suggestedCallbackTime")
         permanent_opt_out = args.get("permanentOptOut", False)
@@ -4947,35 +5084,91 @@ async def escalate_to_next_vendor(
             if attempt.call_metadata is None:
                 attempt.call_metadata = {}
             attempt.call_metadata.update({
+                # Persist everything the tool gave us (useful for reporting + UI)
+                "tool_escalateToNextVendor": {
+                    "callOutcome": call_outcome,
+                    "declineReason": decline_reason,
+                    "suggestedCallbackTime": suggested_callback_time,
+                    "permanentOptOut": permanent_opt_out,
+                    "retryRecommended": retry_recommended,
+                    "retryDelayMinutes": retry_delay_minutes,
+                },
+                "call_outcome": call_outcome,
+                "decline_reason": decline_reason,
                 "suggested_callback_time": suggested_callback_time,
                 "retry_recommended": retry_recommended,
                 "retry_delay_minutes": retry_delay_minutes,
+                "permanent_opt_out": permanent_opt_out,
             })
             session.add(attempt)
             session.commit()
+
+            # If we got a suggested callback time, schedule it ONLY when it is clearly parseable.
+            # We avoid guessing on natural-language times to prevent incorrect automation.
+            scheduled_callback = False
+            if suggested_callback_time and isinstance(suggested_callback_time, str):
+                try:
+                    import re
+                    s = suggested_callback_time.strip()
+                    # Accept "YYYY-MM-DD HH:MM" or "YYYY-MM-DDTHH:MM"
+                    m = re.match(r"^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2})$", s)
+                    if m:
+                        cb_date = m.group(1)
+                        cb_time = m.group(2)
+                        schedule_vendor_callback(
+                            maintenance_request_id=attempt.maintenance_request_id,
+                            vendor_id=attempt.vendor_id,
+                            callback_date=cb_date,
+                            callback_time=cb_time,
+                            callback_reason="check_availability",
+                            notes_for_next_call=decline_reason,
+                            vendor_call_attempt_id=attempt.attempt_id,
+                            session=session
+                        )
+                        scheduled_callback = True
+                        # Store status so frontend can show "callback scheduled"
+                        attempt.call_metadata["callback_scheduled"] = True
+                        attempt.call_metadata["callback_scheduled_at"] = f"{cb_date} {cb_time}"
+                        session.add(attempt)
+                        session.commit()
+                except Exception as _cb_err:
+                    print(f"⚠️  Could not schedule callback from suggestedCallbackTime='{suggested_callback_time}': {_cb_err}")
+                    scheduled_callback = False
+
+            # If a retry is explicitly recommended by the assistant, schedule it and do NOT
+            # immediately advance to the next vendor. This makes behavior predictable and
+            # aligns with tool parameters.
+            if retry_recommended and retry_delay_minutes:
+                try:
+                    enqueue_retry_job(
+                        attempt_id=attempt.attempt_id,
+                        maintenance_request_id=attempt.maintenance_request_id,
+                        retry_delay_minutes=int(retry_delay_minutes)
+                    )
+                    result = {"success": True, "scheduled_retry": True}
+                except Exception as _retry_err:
+                    print(f"⚠️  Failed to enqueue retry job: {_retry_err}")
+                    result = {"success": False, "scheduled_retry": False, "error": str(_retry_err)}
+            else:
+                # Process outcome (default behavior: move forward)
+                # NOTE: handle_vendor_call_outcome will escalate to the next vendor when appropriate.
+                result = handle_vendor_call_outcome(
+                    vendor_call_attempt_id=vendor_call_attempt_id,
+                    outcome=outcome,
+                    session=session,
+                    call_data={"vendor_notes": decline_reason}
+                )
             
-            # Process outcome (will move to next vendor if declined/no_response)
-            result = handle_vendor_call_outcome(
-                vendor_call_attempt_id=vendor_call_attempt_id,
-                outcome=outcome,
-                session=session,
-                call_data={"vendor_notes": decline_reason}
+            return _tool_ok(
+                message=f"Escalation processed. callOutcome={call_outcome}",
+                extra={
+                    "outcome": outcome,
+                    "moved_to_next": bool(result.get("success", False)) and not bool(result.get("scheduled_retry")),
+                    "scheduled_retry": bool(result.get("scheduled_retry", False)),
+                    "scheduled_callback": scheduled_callback
+                }
             )
-            
-            return {
-                "results": [{
-                    "toolCallId": tool_call_id,
-                    "result": {
-                        "success": True,
-                        "message": f"Escalated to next vendor. Outcome: {call_outcome}",
-                        "outcome": outcome,
-                        "moved_to_next": result.get("success", False)
-                    }
-                }]
-            }
     
-    except HTTPException:
-        raise
     except Exception as e:
         print(f"❌ Error in escalate_to_next_vendor: {e}")
         import traceback
@@ -10623,7 +10816,45 @@ async def vapi_webhook_hyphen(request: Request):
                                         print(f"⚠️  Error recording contact opt-out for vendor: {e}")
                     
                     if vendor_call_attempt_id:
-                        # Determine outcome from call status and transcript
+                        # IMPORTANT: Tool calls (captureVendorResponse / escalateToNextVendor) may have
+                        # already finalized the attempt outcome during the call. In that case we should
+                        # NOT re-run heuristic outcome detection here (it can cause incorrect updates
+                        # and "reverts"). Instead, we only attach transcript/recording/duration if missing.
+                        attempt = None
+                        try:
+                            attempt = session.get(VendorCallAttempt, int(vendor_call_attempt_id))
+                        except Exception:
+                            attempt = session.get(VendorCallAttempt, vendor_call_attempt_id)
+
+                        if attempt and attempt.outcome and attempt.completed_at:
+                            print(
+                                f"ℹ️  [VENDOR CALLING] Attempt {attempt.attempt_id} already finalized via tool call "
+                                f"(outcome={attempt.outcome}). Skipping heuristic outcome processing."
+                            )
+                            # Still store transcript/recording/duration if we have them and DB is empty
+                            try:
+                                changed = False
+                                if call_record.transcript and not attempt.call_transcript:
+                                    attempt.call_transcript = call_record.transcript
+                                    changed = True
+                                if call_record.recording_url and not attempt.call_recording_url:
+                                    attempt.call_recording_url = call_record.recording_url
+                                    changed = True
+                                if call_record.call_duration and not attempt.call_duration_seconds:
+                                    attempt.call_duration_seconds = call_record.call_duration
+                                    changed = True
+                                if changed:
+                                    session.add(attempt)
+                                    session.commit()
+                                    print(
+                                        f"✅ [VENDOR CALLING] Attached transcript/recording to finalized attempt {attempt.attempt_id}"
+                                    )
+                            except Exception as _attach_err:
+                                print(f"⚠️  [VENDOR CALLING] Failed attaching transcript/recording: {_attach_err}")
+                            # Do not run heuristic outcome logic
+                            return
+
+                        # Determine outcome from call status and transcript (heuristic fallback)
                         outcome = None
                         if call_record.call_status == "ended" and call_record.call_duration and call_record.call_duration > 30:
                             # Call was answered and had meaningful duration
