@@ -4418,6 +4418,11 @@ async def get_vendor_call_status(
                     "vapi_call_id": attempt.vapi_call_id,
                     "call_transcript": attempt.call_transcript,
                     "call_recording_url": attempt.call_recording_url,
+                    # Contains tool payload snapshots + extra fields like:
+                    # - requires_access_instructions, emergency_surcharge, preferred_contact_method
+                    # - suggested_callback_time, retry_recommended, retry_delay_minutes
+                    # - callback_scheduled, callback_scheduled_at
+                    "call_metadata": attempt.call_metadata,
                     "call_duration_seconds": attempt.call_duration_seconds,
                     "attempt_number": attempt.attempt_number,
                     "initiated_at": attempt.initiated_at.isoformat() if attempt.initiated_at else None,

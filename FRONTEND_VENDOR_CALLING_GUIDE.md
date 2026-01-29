@@ -460,6 +460,7 @@ interface VendorCallAttempt {
   vapi_call_id: string | null;
   call_transcript: string | null; // ⭐ Full call transcript (if available)
   call_recording_url: string | null; // ⭐ Direct URL to audio recording (if available)
+  call_metadata: Record<string, any> | null; // ⭐ Tool payload snapshots + extra vendor details
   call_duration_seconds: number | null;
   attempt_number: number;
   initiated_at: string | null; // ISO timestamp
@@ -472,6 +473,36 @@ interface VendorCallAttempt {
 - Show `call_recording_url` (audio player + open/download)
 - Show `call_transcript` (preview + expand/copy)
 - These are the **source of truth** for what was actually discussed on the call.
+
+**Additional vendor-tool data (recommended to implement):**
+- Read these fields from `attempt.call_metadata` when present. They come from the Vapi tools:
+  - **From `captureVendorResponse`** (stored in `call_metadata`):
+    - `requires_access_instructions` (boolean)
+    - `emergency_surcharge` (string)
+    - `preferred_contact_method` (string)
+    - `available_date` / `available_time_window` (strings)
+    - `tool_captureVendorResponse` (full snapshot of tool payload)
+  - **From `escalateToNextVendor`** (stored in `call_metadata`):
+    - `call_outcome` / `decline_reason` / `permanent_opt_out`
+    - `suggested_callback_time`
+    - `retry_recommended` / `retry_delay_minutes`
+    - `callback_scheduled` (boolean) and `callback_scheduled_at` (string, if scheduled)
+    - `tool_escalateToNextVendor` (full snapshot of tool payload)
+
+**UI recommendation (what to show in the Maintenance Request modal):**
+- **Vendor decision summary** (per attempt):
+  - Availability (Yes/No)
+  - Earliest available time/window
+  - Cost estimate
+  - Vendor notes
+- **Callback & retry panel** (per attempt, if present):
+  - “Callback suggested: …”
+  - “Callback scheduled: …”
+  - “Retry recommended: … (delay: X minutes)”
+- **Access & emergency details** (per attempt, if present):
+  - “Requires access instructions: Yes/No”
+  - “Emergency surcharge: …”
+  - “Preferred contact method: …”
 
 ---
 
