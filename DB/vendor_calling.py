@@ -29,10 +29,12 @@ from .db import (
 )
 from .vendor_matching import (
     match_vendors_to_maintenance_request,
-    should_auto_call_vendors
+    should_auto_call_vendors,
+    map_category_to_service_type
 )
 from .outbound_calling import trigger_outbound_call, get_or_create_contact
 from .user_lookup import normalize_phone_number
+import os
 
 
 def create_vendor_call_queue(
@@ -59,6 +61,18 @@ def create_vendor_call_queue(
     ).first()
     
     if existing_queue:
+        # If queue already exists and caller asked to auto-start, make sure it actually starts.
+        # This is important for delayed auto-start: the queue may have been created earlier
+        # (e.g. by a PM clicking Start then pausing), and we should resume safely.
+        if auto_start and existing_queue.status not in ["calling", "completed"]:
+            try:
+                print(
+                    f"ℹ️  [VENDOR CALLING] Existing queue {existing_queue.queue_id} found with status={existing_queue.status}. "
+                    f"Auto-start requested; resuming vendor calling."
+                )
+                start_vendor_calling(maintenance_request.maintenance_request_id, session)
+            except Exception as _resume_err:
+                print(f"⚠️  [VENDOR CALLING] Failed to auto-start existing queue {existing_queue.queue_id}: {_resume_err}")
         return existing_queue
     
     # Match vendors to request (automatically excludes opted-out vendors)
@@ -76,8 +90,28 @@ def create_vendor_call_queue(
         raise
     
     if not matched_vendors:
-        # More lenient fallback: try to find ANY vendor for this property
-        print(f"⚠️  [VENDOR CALLING] No vendors matched, trying fallback: ANY vendor for property {maintenance_request.property_id}")
+        # IMPORTANT: Do NOT call wrong service types for specific jobs.
+        # Only allow a broad "any vendor" fallback if the request maps to general/emergency.
+        inferred_service_type = map_category_to_service_type(
+            maintenance_request.category,
+            maintenance_request.priority,
+            maintenance_request.issue_description
+        )
+        if inferred_service_type not in ["general", "emergency"]:
+            print(
+                f"❌ [VENDOR CALLING] No matched vendors for request {maintenance_request.maintenance_request_id} "
+                f"(inferred_service_type={inferred_service_type}). Not falling back to other service types."
+            )
+            raise ValueError(
+                f"No vendors found for maintenance request {maintenance_request.maintenance_request_id} "
+                f"(property_id: {maintenance_request.property_id}, service_type: {inferred_service_type})"
+            )
+
+        # For general/emergency only, allow property-level fallback.
+        print(
+            f"⚠️  [VENDOR CALLING] No vendors matched, trying fallback: ANY vendor for property {maintenance_request.property_id} "
+            f"(service_type={inferred_service_type})"
+        )
         from .db import PropertyVendor, Vendor
         fallback_query = (
             select(PropertyVendor, Vendor)
@@ -89,31 +123,32 @@ def create_vendor_call_queue(
             .order_by(PropertyVendor.priority.asc())
         )
         fallback_results = session.exec(fallback_query).all()
-        
         print(f"   Fallback query found {len(fallback_results)} vendor(s)")
-        
-        if fallback_results:
-            matched_vendors = []
-            for property_vendor, vendor in fallback_results:
-                matched_vendors.append({
-                    "vendor_id": vendor.vendor_id,
-                    "vendor": vendor,
-                    "property_vendor": property_vendor,
-                    "priority": property_vendor.priority,
-                    "name": vendor.name,
-                    "phone_number": vendor.phone_number,
-                    "backup_phone": vendor.backup_phone,
-                    "email": vendor.email,
-                    "emergency_available": vendor.emergency_available,
-                    "operating_hours_start": vendor.operating_hours_start,
-                    "operating_hours_end": vendor.operating_hours_end,
-                    "timezone": vendor.timezone,
-                    "notes": vendor.notes,
-                })
-            print(f"✅ [VENDOR CALLING] Using {len(matched_vendors)} vendor(s) from fallback query")
-        else:
+        if not fallback_results:
             print(f"❌ [VENDOR CALLING] No vendors found even with fallback query")
-            raise ValueError(f"No vendors found for maintenance request {maintenance_request.maintenance_request_id} (property_id: {maintenance_request.property_id})")
+            raise ValueError(
+                f"No vendors found for maintenance request {maintenance_request.maintenance_request_id} "
+                f"(property_id: {maintenance_request.property_id})"
+            )
+
+        matched_vendors = []
+        for property_vendor, vendor in fallback_results:
+            matched_vendors.append({
+                "vendor_id": vendor.vendor_id,
+                "vendor": vendor,
+                "property_vendor": property_vendor,
+                "priority": property_vendor.priority,
+                "name": vendor.name,
+                "phone_number": vendor.phone_number,
+                "backup_phone": vendor.backup_phone,
+                "email": vendor.email,
+                "emergency_available": vendor.emergency_available,
+                "operating_hours_start": vendor.operating_hours_start,
+                "operating_hours_end": vendor.operating_hours_end,
+                "timezone": vendor.timezone,
+                "notes": vendor.notes,
+            })
+        print(f"✅ [VENDOR CALLING] Using {len(matched_vendors)} vendor(s) from fallback query")
     
     # Double-check: Filter out any opted-out vendors (safety check)
     matched_vendors = [v for v in matched_vendors if not v["vendor"].opted_out]
@@ -145,8 +180,9 @@ def create_vendor_call_queue(
     session.commit()
     session.refresh(queue)
     
-    # Update maintenance request (will be updated to "calling" by start_vendor_calling if auto_start)
-    maintenance_request.vendor_call_status = "not_started"
+    # Update maintenance request status to reflect that a queue exists.
+    # UI uses queue status as source of truth, but keeping this aligned avoids confusion.
+    maintenance_request.vendor_call_status = "pending"
     session.add(maintenance_request)
     session.commit()
     
@@ -323,7 +359,9 @@ def start_vendor_calling(
     # Update queue status
     print(f"🔄 [VENDOR CALLING] Updating queue {queue.queue_id} status to 'calling'")
     queue.status = "calling"
-    queue.started_at = datetime.utcnow()
+    # Preserve original started_at if we are resuming a paused/pending queue
+    if not queue.started_at:
+        queue.started_at = datetime.utcnow()
     session.add(queue)
     
     # Update maintenance request status to match queue
@@ -799,50 +837,49 @@ def handle_vendor_call_outcome(
         session.commit()
         print(f"✅ [VENDOR CALLING] Maintenance request {attempt.maintenance_request_id} assigned to vendor {attempt.vendor_id}")
         
-        # Send notification to vendor
-        try:
-            vendor = session.get(Vendor, attempt.vendor_id)
-            if vendor:
-                # Build notification message
-                message_content = {
-                    "subject": "Maintenance Job Assignment Confirmation",
-                    "body": f"Hello {vendor.name},\n\nYou have been assigned to maintenance request #{attempt.maintenance_request_id}. "
-                           f"Please review the details and confirm your availability.\n\n"
-                           f"Issue: {maintenance_request.issue_description}\n"
-                           f"Location: {maintenance_request.location}\n"
-                           f"Priority: {maintenance_request.priority}\n\n"
-                           f"Thank you!"
-                }
-                
-                # Try SMS first, fallback to email
-                print(f"📧 [VENDOR CALLING] Sending notification to vendor {attempt.vendor_id}")
-                result = send_vendor_notification(
-                    vendor_id=attempt.vendor_id,
-                    maintenance_request_id=attempt.maintenance_request_id,
-                    notification_type="job_assignment",
-                    delivery_method="sms",
-                    message_content=message_content,
-                    session=session
-                )
-                
-                if result.get("success"):
-                    print(f"✅ [VENDOR CALLING] SMS notification sent successfully")
-                elif vendor.email:
-                    # Fallback to email if SMS failed
-                    print(f"⚠️  [VENDOR CALLING] SMS failed, trying email")
+        # Notifications are out-of-scope for the simplified vendor-calling feature.
+        # Keep the capability behind a flag so we don't break expected flows while
+        # avoiding slow/fragile external calls by default.
+        if os.getenv("ENABLE_VENDOR_ASSIGNMENT_NOTIFICATIONS", "false").lower() == "true":
+            try:
+                vendor = session.get(Vendor, attempt.vendor_id)
+                if vendor:
+                    message_content = {
+                        "subject": "Maintenance Job Assignment Confirmation",
+                        "body": f"Hello {vendor.name},\n\nYou have been assigned to maintenance request #{attempt.maintenance_request_id}. "
+                               f"Please review the details and confirm your availability.\n\n"
+                               f"Issue: {maintenance_request.issue_description}\n"
+                               f"Location: {maintenance_request.location}\n"
+                               f"Priority: {maintenance_request.priority}\n\n"
+                               f"Thank you!"
+                    }
+                    print(f"📧 [VENDOR CALLING] Sending notification to vendor {attempt.vendor_id}")
                     result = send_vendor_notification(
                         vendor_id=attempt.vendor_id,
                         maintenance_request_id=attempt.maintenance_request_id,
                         notification_type="job_assignment",
-                        delivery_method="email",
+                        delivery_method="sms",
                         message_content=message_content,
                         session=session
                     )
                     if result.get("success"):
-                        print(f"✅ [VENDOR CALLING] Email notification sent successfully")
-        except Exception as e:
-            print(f"⚠️  [VENDOR CALLING] Failed to send notification to vendor {attempt.vendor_id}: {e}")
-            # Don't fail assignment if notification fails
+                        print(f"✅ [VENDOR CALLING] SMS notification sent successfully")
+                    elif vendor.email:
+                        print(f"⚠️  [VENDOR CALLING] SMS failed, trying email")
+                        result = send_vendor_notification(
+                            vendor_id=attempt.vendor_id,
+                            maintenance_request_id=attempt.maintenance_request_id,
+                            notification_type="job_assignment",
+                            delivery_method="email",
+                            message_content=message_content,
+                            session=session
+                        )
+                        if result.get("success"):
+                            print(f"✅ [VENDOR CALLING] Email notification sent successfully")
+            except Exception as e:
+                print(f"⚠️  [VENDOR CALLING] Failed to send notification to vendor {attempt.vendor_id}: {e}")
+        else:
+            print("ℹ️  [VENDOR CALLING] Vendor assignment notifications disabled (ENABLE_VENDOR_ASSIGNMENT_NOTIFICATIONS=false)")
         
         return {
             "success": True,

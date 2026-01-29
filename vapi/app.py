@@ -10856,76 +10856,81 @@ async def vapi_webhook_hyphen(request: Request):
                                     )
                             except Exception as _attach_err:
                                 print(f"⚠️  [VENDOR CALLING] Failed attaching transcript/recording: {_attach_err}")
-                            # Do not run heuristic outcome logic
-                            return
-
-                        # Determine outcome from call status and transcript (heuristic fallback)
-                        outcome = None
-                        if call_record.call_status == "ended" and call_record.call_duration and call_record.call_duration > 30:
-                            # Call was answered and had meaningful duration
-                            transcript_lower = (call_record.transcript or "").lower()
-                            
-                            # Check transcript for acceptance/decline indicators
-                            if any(phrase in transcript_lower for phrase in ["yes", "available", "can do", "sure", "okay", "accept"]):
-                                outcome = "accepted"
-                            elif any(phrase in transcript_lower for phrase in ["no", "not available", "can't", "decline", "busy", "unavailable"]):
-                                outcome = "declined"
+                            # Do not run heuristic outcome logic, but continue webhook processing.
+                            outcome = None
+                            call_data = None
+                            # Skip heuristic processing below
+                        if attempt and attempt.outcome and attempt.completed_at:
+                            # already finalized; nothing else to do here
+                            pass
+                        else:
+                            # Determine outcome from call status and transcript (heuristic fallback)
+                            outcome = None
+                            if call_record.call_status == "ended" and call_record.call_duration and call_record.call_duration > 30:
+                                # Call was answered and had meaningful duration
+                                transcript_lower = (call_record.transcript or "").lower()
+                                
+                                # Check transcript for acceptance/decline indicators
+                                if any(phrase in transcript_lower for phrase in ["yes", "available", "can do", "sure", "okay", "accept"]):
+                                    outcome = "accepted"
+                                elif any(phrase in transcript_lower for phrase in ["no", "not available", "can't", "decline", "busy", "unavailable"]):
+                                    outcome = "declined"
+                                else:
+                                    # Default to accepted if call was answered and had duration
+                                    outcome = "accepted"
+                            elif call_record.call_status == "no-answer" or call_record.call_status == "busy":
+                                outcome = "no_response"
+                            elif call_record.call_status == "voicemail":
+                                outcome = "voicemail"
                             else:
-                                # Default to accepted if call was answered and had duration
-                                outcome = "accepted"
-                        elif call_record.call_status == "no-answer" or call_record.call_status == "busy":
-                            outcome = "no_response"
-                        elif call_record.call_status == "voicemail":
-                            outcome = "voicemail"
-                        else:
-                            outcome = "no_response"
-                        
-                        # Extract vendor response data from transcript if available
-                        call_data = {
-                            "transcript": call_record.transcript,
-                            "recording_url": call_record.recording_url,
-                            "duration": call_record.call_duration,
-                        }
-                        
-                        # Try to extract structured data from transcript
-                        if call_record.transcript:
-                            transcript_lower = call_record.transcript.lower()
+                                outcome = "no_response"
                             
-                            # Extract availability time
-                            import re
-                            time_patterns = [
-                                r"(?:available|come|arrive|be there|schedule).*?(?:at|by|around|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
-                                r"(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday).*?(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
-                            ]
-                            for pattern in time_patterns:
-                                match = re.search(pattern, transcript_lower)
-                                if match:
-                                    call_data["earliest_available_time"] = match.group(1)
-                                    break
+                            # Extract vendor response data from transcript if available
+                            call_data = {
+                                "transcript": call_record.transcript,
+                                "recording_url": call_record.recording_url,
+                                "duration": call_record.call_duration,
+                            }
                             
-                            # Extract cost estimate
-                            cost_patterns = [
-                                r"(?:cost|price|charge|estimate).*?(\$?\d+(?:,\d{3})*(?:\.\d{2})?)",
-                                r"(\$?\d+(?:,\d{3})*(?:\.\d{2})?).*?(?:dollar|buck)",
-                            ]
-                            for pattern in cost_patterns:
-                                match = re.search(pattern, transcript_lower)
-                                if match:
-                                    call_data["estimated_cost_range"] = match.group(1)
-                                    break
-                        
-                        # Process outcome
-                        result = handle_vendor_call_outcome(
-                            vendor_call_attempt_id=vendor_call_attempt_id,
-                            outcome=outcome,
-                            session=session,
-                            call_data=call_data
-                        )
-                        
-                        if result.get("success"):
-                            print(f"✅ Processed vendor call outcome: {outcome} for attempt {vendor_call_attempt_id}")
-                        else:
-                            print(f"⚠️  Failed to process vendor call outcome: {result.get('error')}")
+                            # Try to extract structured data from transcript
+                            if call_record.transcript:
+                                transcript_lower = call_record.transcript.lower()
+                                
+                                # Extract availability time
+                                import re
+                                time_patterns = [
+                                    r"(?:available|come|arrive|be there|schedule).*?(?:at|by|around|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
+                                    r"(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday).*?(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)",
+                                ]
+                                for pattern in time_patterns:
+                                    match = re.search(pattern, transcript_lower)
+                                    if match:
+                                        call_data["earliest_available_time"] = match.group(1)
+                                        break
+                                
+                                # Extract cost estimate
+                                cost_patterns = [
+                                    r"(?:cost|price|charge|estimate).*?(\$?\d+(?:,\d{3})*(?:\.\d{2})?)",
+                                    r"(\$?\d+(?:,\d{3})*(?:\.\d{2})?).*?(?:dollar|buck)",
+                                ]
+                                for pattern in cost_patterns:
+                                    match = re.search(pattern, transcript_lower)
+                                    if match:
+                                        call_data["estimated_cost_range"] = match.group(1)
+                                        break
+                            
+                            # Process outcome
+                            result = handle_vendor_call_outcome(
+                                vendor_call_attempt_id=vendor_call_attempt_id,
+                                outcome=outcome,
+                                session=session,
+                                call_data=call_data
+                            )
+                            
+                            if result.get("success"):
+                                print(f"✅ Processed vendor call outcome: {outcome} for attempt {vendor_call_attempt_id}")
+                            else:
+                                print(f"⚠️  Failed to process vendor call outcome: {result.get('error')}")
                     
                 except Exception as e:
                     print(f"⚠️  Error processing vendor call outcome: {e}")

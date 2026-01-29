@@ -31,6 +31,7 @@ When a tenant submits a maintenance request, the system can automatically call r
 - **Strict vendor type matching**: If the request maps to a specific service type (e.g. `carpenter`), the system will **NOT** call unrelated service types (e.g. plumbers). If no matching vendors exist, the queue will not “fallback” to wrong vendors.
 - **Auto-start timing**: Vendor calling is triggered **1 minute after** the inbound maintenance-request call’s **end-of-call-report** webhook is received (when auto-calling is enabled). PM can still manually start/pause/cancel.
 - **PM verification**: Call recording + transcript are stored per attempt and should be shown in the maintenance modal so PM can verify what was agreed.
+- **Notifications**: Vendor SMS/email notifications are **disabled by default** (backend flag `ENABLE_VENDOR_ASSIGNMENT_NOTIFICATIONS=false`). Frontend should not assume notifications are sent.
 
 ### Architecture Overview
 
@@ -433,6 +434,7 @@ Response: {
 **Notes:**
 - This endpoint can also be used to **resume** a paused queue.
 - Even if vendor calling auto-starts after 1 minute, the UI should still expose Start/Pause/Cancel for control and recovery.
+- When a queue exists but is not started yet, backend may show `vendor_call_status: "pending"` (queue created, not actively calling yet).
 
 #### Get Vendor Call Status
 ```typescript
