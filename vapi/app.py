@@ -138,6 +138,7 @@ app = FastAPI(
 # CORS allowed origins - centralized configuration
 CORS_ALLOWED_ORIGINS = [
     "https://www.leasap.com",   # production frontend
+    "https://pm.leasap.com",    # production frontend (moving here from www)
     "http://localhost:3000"     # local dev (optional)
 ]
 
